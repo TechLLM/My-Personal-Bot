@@ -49,8 +49,15 @@ startScheduler();
 app.route("/api", api);
 
 const dist = join(import.meta.dir, "..", "..", "web", "dist");
-app.use("/*", serveStatic({ root: dist }));
-app.get("/*", serveStatic({ path: join(dist, "index.html") }));
+// html 응답은 항상 재검증 — 해시된 번들은 변경 시 새 파일명이라 캐시돼도 안전
+const noCacheHtml = (path: string, c: any) => {
+  if (path.endsWith(".html")) c.header("Cache-Control", "no-cache");
+};
+app.use("/*", serveStatic({ root: dist, onFound: noCacheHtml }));
+app.get("/*", async (c) => {
+  const html = await Bun.file(join(dist, "index.html")).text();
+  return c.html(html, 200, { "Cache-Control": "no-cache" });
+});
 
 console.log(`[mybot] listening on http://127.0.0.1:${PORT}`);
 export default { port: PORT, fetch: app.fetch, idleTimeout: 255 };
