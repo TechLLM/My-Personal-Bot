@@ -22,6 +22,9 @@ export interface Conversation {
   title: string;
   model: string | null;
   mode: string;
+  agent_id?: string | null;
+  agent_name?: string | null;
+  agent_avatar?: string | null;
   created_at: number;
   updated_at: number;
 }

@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { serveStatic } from "hono/bun";
 import { join } from "node:path";
-import { getSetting } from "./db";
+import { db, getSetting } from "./db";
 import { modelsRoute } from "./routes/models";
 import { chatRoute } from "./routes/chat";
 import { settingsRoute } from "./routes/settings";
@@ -10,7 +10,7 @@ import { filesRoute } from "./routes/files";
 import { personasRoute, seedPersonas } from "./routes/personas";
 import { workspacesRoute, skillsRoute } from "./routes/workspaces";
 import { routinesRoute, startScheduler } from "./routines";
-import { agentsRoute, teamRoute } from "./team";
+import { agentsRoute, teamRoute, ensureBossAgent } from "./team";
 import { browserRoute } from "./browser";
 import { notifyRoute } from "./notify";
 
@@ -44,6 +44,9 @@ api.route("/browser", browserRoute);
 api.route("/team", teamRoute);
 api.route("/notify", notifyRoute);
 seedPersonas();
+// 대장 봇 시드 + 기존 대화를 대장에게 귀속 (봇 중심 모델)
+const boss = ensureBossAgent();
+db.prepare("UPDATE conversations SET agent_id = ? WHERE agent_id IS NULL").run(boss.id);
 startScheduler();
 
 app.route("/api", api);

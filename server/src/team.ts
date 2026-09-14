@@ -26,6 +26,27 @@ export interface Agent {
   created_at: number;
 }
 
+// 대장 봇 — 모든 사용자 대화의 기본 접점. 없으면 시드
+export const BOSS_NAME = "대장";
+
+export function ensureBossAgent(): Agent {
+  let a = db.prepare("SELECT * FROM agents WHERE name = ?").get(BOSS_NAME) as Agent | null;
+  if (!a) {
+    const id = uid();
+    db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, created_at) VALUES (?, ?, ?, ?, ?, NULL, 1, ?)")
+      .run(id, BOSS_NAME,
+        "당신은 MyBot의 대장 봇입니다. 사용자의 모든 업무 지시를 받는 총괄 책임자입니다. 스스로 도구(웹검색·파일·브라우저·MCP)를 사용해 직접 수행하거나, 필요하면 전문 역할 봇들에게 분배하고 결과를 종합해 보고합니다. 이전 대화와 기억한 맥락을 바탕으로 업무의 연속성을 유지하세요.",
+        "main", "🧭", now());
+    a = db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent;
+  }
+  return a;
+}
+
+export function getAgent(id: string | null | undefined): Agent | null {
+  if (!id) return null;
+  return (db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent | null) ?? null;
+}
+
 export interface TeamAgentState {
   id: string;
   runId: string;
@@ -46,14 +67,14 @@ function safePath(p: string): string {
   return join(WORK_DIR, clean);
 }
 
-const BUILTIN_TOOLS = [
+export const BUILTIN_TOOLS = [
   { type: "function", function: { name: "web_search", description: "웹에서 정보를 검색합니다", parameters: { type: "object", properties: { query: { type: "string", description: "검색어" } }, required: ["query"] } } },
   { type: "function", function: { name: "read_file", description: "팀 작업 디렉터리의 파일을 읽습니다", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } },
   { type: "function", function: { name: "write_file", description: "팀 작업 디렉터리에 파일을 저장합니다", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } } },
   { type: "function", function: { name: "list_files", description: "팀 작업 디렉터리의 파일 목록", parameters: { type: "object", properties: {} } } },
 ];
 
-async function callBuiltin(name: string, args: Record<string, unknown>): Promise<string> {
+export async function callBuiltin(name: string, args: Record<string, unknown>): Promise<string> {
   if (name === "web_search") {
     const r = await webSearch(String(args.query ?? ""), 6);
     return r.results.length
@@ -292,7 +313,7 @@ export const teamRoute = new Hono()
 
           // 대장이 봇 결과들을 취합해 최종 답변 작성
           const history: ChatMessage[] = [
-            { role: "system", content: systemPrompt("team", conv.persona_id, conv.workspace_id) },
+            { role: "system", content: systemPrompt("team", conv.persona_id, conv.workspace_id, conv.agent_id) },
             ...(db.prepare("SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at").all(convId) as any[])
               .filter((m) => (m.role === "user" || m.role === "assistant") && m.active && m.id !== msgId)
               .map((m) => ({ role: m.role, content: m.content })),

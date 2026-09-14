@@ -55,6 +55,7 @@ export function Sidebar({
             }`}
             onClick={() => onSelect(c.id)}
           >
+            {c.agent_avatar && <span className="shrink-0 text-xs" title={c.agent_name ?? ""}>{c.agent_avatar}</span>}
             <span className="truncate flex-1">{c.title}</span>
             <button
               className="hidden shrink-0 text-zinc-600 hover:text-red-400 group-hover:block"

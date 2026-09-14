@@ -10,9 +10,9 @@ const FILES_DIR = join(import.meta.dir, "..", "..", "data", "files");
 mkdirSync(FILES_DIR, { recursive: true });
 
 const q = {
-  convList: db.prepare("SELECT * FROM conversations ORDER BY updated_at DESC"),
-  convGet: db.prepare("SELECT * FROM conversations WHERE id = ?"),
-  convInsert: db.prepare("INSERT INTO conversations (id, title, model, mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"),
+  convList: db.prepare("SELECT c.*, a.name AS agent_name, a.avatar AS agent_avatar FROM conversations c LEFT JOIN agents a ON a.id = c.agent_id ORDER BY c.updated_at DESC"),
+  convGet: db.prepare("SELECT c.*, a.name AS agent_name, a.avatar AS agent_avatar FROM conversations c LEFT JOIN agents a ON a.id = c.agent_id WHERE c.id = ?"),
+  convInsert: db.prepare("INSERT INTO conversations (id, title, model, mode, agent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"),
   convUpdate: db.prepare("UPDATE conversations SET title = ?, model = ?, updated_at = ? WHERE id = ?"),
   convTouch: db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?"),
   convDelete: db.prepare("DELETE FROM conversations WHERE id = ?"),
@@ -63,9 +63,18 @@ function withSiblings(m: Msg) {
   return { ...m, sibling_count: sibs.length, sibling_index: idx };
 }
 
-export function systemPrompt(mode: string, personaId?: string | null, workspaceId?: string | null): string {
+export function systemPrompt(mode: string, personaId?: string | null, workspaceId?: string | null, agentId?: string | null): string {
   const base = getSetting("system_prompt") ?? "당신은 MyBot입니다. 정확하고 유용하게 답변하세요. 마크다운을 적절히 사용하세요.";
   let p = base;
+  // 이 대화를 담당하는 봇 — 페르소나와 장기 기억이 봇에 귀속됨
+  if (agentId) {
+    const agent = db.prepare("SELECT * FROM agents WHERE id = ?").get(agentId) as any;
+    if (agent) {
+      p += `\n\n[당신은 봇 "${agent.name}"입니다 — 역할]\n${agent.role_prompt || "사용자의 업무를 수행하는 봇"}`;
+      const amems = db.prepare("SELECT content FROM memories WHERE agent_id = ? ORDER BY created_at DESC LIMIT 20").all(agentId) as { content: string }[];
+      if (amems.length) p += "\n\n[이 봇이 기억하는 업무 맥락]\n" + amems.map((m) => `- ${m.content}`).join("\n");
+    }
+  }
   if (workspaceId) {
     const ws = db.prepare("SELECT * FROM workspaces WHERE id = ?").get(workspaceId) as any;
     if (ws?.instructions) p += `\n\n[워크스페이스: ${ws.name}]\n${ws.instructions}`;
@@ -74,31 +83,32 @@ export function systemPrompt(mode: string, personaId?: string | null, workspaceI
     const persona = db.prepare("SELECT * FROM personas WHERE id = ?").get(personaId) as any;
     if (persona?.prompt) p += `\n\n[페르소나: ${persona.name}]\n${persona.prompt}`;
   }
-  const memories = db.prepare("SELECT content FROM memories ORDER BY created_at DESC LIMIT 20").all() as { content: string }[];
+  const memories = db.prepare("SELECT content FROM memories WHERE agent_id IS NULL ORDER BY created_at DESC LIMIT 20").all() as { content: string }[];
   if (memories.length) p += "\n\n[사용자에 대해 기억하는 정보]\n" + memories.map((m) => `- ${m.content}`).join("\n");
   if (mode === "think") p += "\n\n중요하거나 복잡한 질문에는 단계별로 깊이 생각한 뒤 답하세요.";
   return p;
 }
 
 // 대화에서 지속 저장할 가치가 있는 사실 추출 (fast 모델, 백그라운드)
-async function extractMemories(userText: string, assistantText: string) {
+// agentId가 있으면 그 봇의 장기기억으로 저장 — 모델을 바꿔도 봇의 업무 맥락은 유지됨
+async function extractMemories(userText: string, assistantText: string, agentId?: string | null) {
   if (getSetting("memory_enabled") === "0") return;
   try {
     const { endpoint, model } = resolveModel("fast");
     let out = "";
     for await (const ev of streamChat(endpoint, model, [
-      { role: "user", content: `아래 대화 조각에서 나중 대화에 도움될 사용자 관련 사실(이름, 직업, 선호, 프로젝트, 제약 등)만 JSON 배열로 추출. 없으면 []. 각 항목은 한 줄 요약.\n\n사용자: ${userText.slice(0, 500)}\nAI: ${assistantText.slice(0, 500)}` },
+      { role: "user", content: `아래 대화 조각에서 나중 대화에 도움될 사실(사용자 정보, 프로젝트 상태, 진행 중인 업무, 결정 사항, 선호 등)만 JSON 배열로 추출. 없으면 []. 각 항목은 한 줄 요약.\n\n사용자: ${userText.slice(0, 500)}\nAI: ${assistantText.slice(0, 500)}` },
     ])) {
       if (ev.type === "content") out += ev.text ?? "";
     }
     const m = out.match(/\[[\s\S]*\]/);
     if (!m) return;
     const facts: string[] = JSON.parse(m[0]);
-    const existing = new Set((db.prepare("SELECT content FROM memories").all() as any[]).map((r) => r.content));
+    const existing = new Set((db.prepare("SELECT content FROM memories WHERE agent_id IS ?").all(agentId ?? null) as any[]).map((r) => r.content));
     for (const f of facts.slice(0, 5)) {
       const c = String(f).trim();
       if (c && !existing.has(c)) {
-        db.prepare("INSERT INTO memories (id, content, created_at) VALUES (?, ?, ?)").run(uid(), c, now());
+        db.prepare("INSERT INTO memories (id, content, agent_id, created_at) VALUES (?, ?, ?, ?)").run(uid(), c, agentId ?? null, now());
       }
     }
   } catch {}
@@ -122,9 +132,10 @@ export const chatRoute = new Hono()
   .get("/conversations", (c) => c.json({ conversations: q.convList.all() }))
   .post("/conversations", async (c) => {
     const body = await c.req.json().catch(() => ({}));
+    const { ensureBossAgent } = await import("../team");
     const id = uid();
     const t = now();
-    q.convInsert.run(id, "새 대화", body.model ?? null, body.mode ?? "auto", t, t);
+    q.convInsert.run(id, "새 대화", body.model ?? null, body.mode ?? "auto", body.agentId ?? ensureBossAgent().id, t, t);
     if (body.persona_id) db.prepare("UPDATE conversations SET persona_id = ? WHERE id = ?").run(body.persona_id, id);
     return c.json({ conversation: q.convGet.get(id) });
   })
@@ -140,6 +151,7 @@ export const chatRoute = new Hono()
     q.convUpdate.run(body.title ?? conv.title, body.model ?? conv.model, now(), conv.id);
     if (body.workspace_id !== undefined) db.prepare("UPDATE conversations SET workspace_id = ? WHERE id = ?").run(body.workspace_id || null, conv.id);
     if (body.persona_id !== undefined) db.prepare("UPDATE conversations SET persona_id = ? WHERE id = ?").run(body.persona_id || null, conv.id);
+    if (body.agent_id !== undefined) db.prepare("UPDATE conversations SET agent_id = ? WHERE id = ?").run(body.agent_id || null, conv.id);
     return c.json({ conversation: q.convGet.get(conv.id) });
   })
   .delete("/conversations/:id", (c) => {
@@ -166,8 +178,10 @@ export const chatRoute = new Hono()
 
     let convId = body.conversationId as string | undefined;
     if (!convId) {
+      const { ensureBossAgent } = await import("../team");
       convId = uid();
-      q.convInsert.run(convId, "새 대화", model, mode, now(), now());
+      // 모든 대화는 봇에게 귀속 — 기본은 대장 봇
+      q.convInsert.run(convId, "새 대화", model, mode, body.agentId ?? ensureBossAgent().id, now(), now());
       if (body.personaId) db.prepare("UPDATE conversations SET persona_id = ? WHERE id = ?").run(body.personaId, convId);
       if (body.workspaceId) db.prepare("UPDATE conversations SET workspace_id = ? WHERE id = ?").run(body.workspaceId, convId);
     }
@@ -223,7 +237,7 @@ export const chatRoute = new Hono()
             if (pi >= 0) path = path.slice(0, pi + 1);
           }
           const history: ChatMessage[] = [
-            { role: "system", content: systemPrompt(mode, conv?.persona_id ?? body.personaId, conv?.workspace_id) },
+            { role: "system", content: systemPrompt(mode, conv?.persona_id ?? body.personaId, conv?.workspace_id, conv?.agent_id) },
             ...path
               .filter((m) => m.role === "user" || m.role === "assistant")
               .map((m) => {
@@ -304,15 +318,17 @@ export const chatRoute = new Hono()
             // 계획 없음 → 일반 답변으로 계속 진행
           }
 
-          // 도구 루프: 브라우저(내장, 항상 제공) + MCP 도구(설정 시). 도구 호출이 완료될 때까지 비스트림 라운드 후 최종 답변만 스트리밍
+          // 도구 루프: 봇이 모든 메시지를 처리 — 내장 도구(검색·파일) + 브라우저 + MCP 도구(설정 시)
           {
             const { mcpConfigured, mcpTools, mcpCall } = await import("../mcp");
             const { BROWSER_TOOLS, browserTool, closeAgentPage } = await import("../browser");
-            const openaiTools: any[] = [...BROWSER_TOOLS];
+            const { BUILTIN_TOOLS, callBuiltin } = await import("../team");
+            const openaiTools: any[] = [...BUILTIN_TOOLS, ...BROWSER_TOOLS];
             if (mcpConfigured()) {
               const tools = await mcpTools();
               openaiTools.push(...tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } })));
             }
+            const builtinNames = new Set(BUILTIN_TOOLS.map((t) => t.function.name));
             const { chatOnce } = await import("../providers/openaiCompat");
             const browserKey = `${convId}:${asstMsg.id}`;
             let browserUsed = false;
@@ -327,11 +343,14 @@ export const chatRoute = new Hono()
                 send("search", { type: "read", title: `🔧 ${tc.name}`, url: "" });
                 let out: string;
                 try {
-                  if (tc.name.startsWith("browser_")) {
+                  const args = JSON.parse(tc.arguments || "{}");
+                  if (builtinNames.has(tc.name)) {
+                    out = await callBuiltin(tc.name, args);
+                  } else if (tc.name.startsWith("browser_")) {
                     browserUsed = true;
-                    out = await browserTool(browserKey, tc.name, JSON.parse(tc.arguments || "{}"));
+                    out = await browserTool(browserKey, tc.name, args);
                   } else {
-                    out = await mcpCall(tc.name, JSON.parse(tc.arguments || "{}"));
+                    out = await mcpCall(tc.name, args);
                   }
                 } catch (e) {
                   out = `도구 오류: ${(e as Error).message}`;
@@ -368,8 +387,8 @@ export const chatRoute = new Hono()
             await autoTitle(convId!, userMsg.content);
             send("title", { conversation: q.convGet.get(convId!) });
           }
-          // 메모리 추출 (비차단)
-          if (userMsg && content) extractMemories(userMsg.content, content).catch(() => {});
+          // 메모리 추출 (비차단) — 담당 봇의 장기기억으로 저장
+          if (userMsg && content) extractMemories(userMsg.content, content, conv?.agent_id).catch(() => {});
           // 설정된 알림 채널로 결과 발송 (기본은 채팅창만)
           if (content) {
             const { notifyResult } = await import("../notify");

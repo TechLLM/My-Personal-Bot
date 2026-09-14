@@ -262,6 +262,11 @@ export default function App() {
           <span className="text-sm text-zinc-400 truncate">
             {convId ? conversations.find((c) => c.id === convId)?.title ?? "대화" : "새 대화"}
           </span>
+          {convId && conversations.find((c) => c.id === convId)?.agent_name && (
+            <span className="flex shrink-0 items-center gap-1 rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-400" title="이 대화를 담당하는 봇 — 모델을 바꿔도 봇의 기억·맥락은 유지됩니다">
+              {conversations.find((c) => c.id === convId)?.agent_avatar} {conversations.find((c) => c.id === convId)?.agent_name}
+            </span>
+          )}
         </header>
 
         <div ref={scrollRef} className="flex-1 overflow-y-auto">
