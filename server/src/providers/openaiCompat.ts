@@ -5,6 +5,40 @@ export interface ChatMessage {
   content: string | { type: string; text?: string; image_url?: { url: string } }[];
 }
 
+export interface ToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+export interface ChatResult {
+  content: string;
+  toolCalls?: ToolCall[];
+}
+
+// 비스트리밍 호출 (도구 루프·내부용)
+export async function chatOnce(
+  endpoint: Endpoint,
+  model: string,
+  messages: any[],
+  opts: { signal?: AbortSignal; tools?: { type: string; function: { name: string; description?: string; parameters?: object } }[] } = {},
+): Promise<ChatResult> {
+  const res = await fetch(`${endpoint.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(endpoint.apiKey ? { Authorization: `Bearer ${endpoint.apiKey}` } : {}),
+    },
+    body: JSON.stringify({ model, messages, stream: false, ...(opts.tools?.length ? { tools: opts.tools, tool_choice: "auto" } : {}) }),
+    signal: opts.signal ?? AbortSignal.timeout(120000),
+  });
+  if (!res.ok) return { content: `오류 ${res.status}: ${(await res.text()).slice(0, 300)}` };
+  const data = await res.json();
+  const msg = data.choices?.[0]?.message ?? {};
+  const toolCalls = (msg.tool_calls ?? []).map((tc: any) => ({ id: tc.id, name: tc.function?.name, arguments: tc.function?.arguments ?? "{}" }));
+  return { content: msg.content ?? "", toolCalls: toolCalls.length ? toolCalls : undefined };
+}
+
 export interface StreamEvent {
   type: "content" | "reasoning" | "usage" | "error" | "done";
   text?: string;

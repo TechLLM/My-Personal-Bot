@@ -282,6 +282,31 @@ export const chatRoute = new Hono()
             }
           }
 
+          // MCP 도구 루프: 도구 호출이 완료될 때까지 비스트림 라운드 후 최종 답변만 스트리밍
+          const { mcpConfigured, mcpTools, mcpCall } = await import("../mcp");
+          if (mcpConfigured()) {
+            const tools = await mcpTools();
+            if (tools.length) {
+              const openaiTools = tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } }));
+              const { chatOnce } = await import("../providers/openaiCompat");
+              for (let round = 0; round < 4; round++) {
+                const res = await chatOnce(endpoint, realModel, history, { signal, tools: openaiTools });
+                if (!res.toolCalls?.length) {
+                  if (res.content) history.push({ role: "assistant", content: res.content });
+                  break;
+                }
+                history.push({ role: "assistant", content: res.content || "", tool_calls: res.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })) } as any);
+                for (const tc of res.toolCalls) {
+                  send("search", { type: "read", title: `🔧 ${tc.name}`, url: "" });
+                  let out: string;
+                  try { out = await mcpCall(tc.name, JSON.parse(tc.arguments || "{}")); }
+                  catch { out = "도구 인자 파싱 실패"; }
+                  history.push({ role: "tool", tool_call_id: tc.id, content: String(out).slice(0, 8000) } as any);
+                }
+              }
+            }
+          }
+
           for await (const ev of streamChat(endpoint, realModel, history, { signal })) {
             if (ev.type === "content" && ev.text) {
               content += ev.text;

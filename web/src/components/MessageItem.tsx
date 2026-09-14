@@ -132,6 +132,16 @@ export function MessageItem({
           onClick={() => { navigator.clipboard.writeText(m.content); setCopied(true); setTimeout(() => setCopied(false), 1200); }}
         >{copied ? "복사됨" : "복사"}</button>
         <button className="hover:text-zinc-200" onClick={() => onRegenerate?.(m)}>재생성</button>
+        <button
+          className="hover:text-zinc-200"
+          title="읽어주기"
+          onClick={() => {
+            if (speechSynthesis.speaking) { speechSynthesis.cancel(); return; }
+            const u = new SpeechSynthesisUtterance(m.content.replace(/[#*`\[\]]/g, "").slice(0, 3000));
+            u.lang = "ko-KR";
+            speechSynthesis.speak(u);
+          }}
+        >🔊</button>
         {m.model && <span className="ml-auto font-mono text-[10px]">{m.model}{m.tokens_out ? ` · ${m.tokens_out}tok` : ""}</span>}
       </div>
     </div>

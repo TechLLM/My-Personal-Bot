@@ -34,10 +34,32 @@ export function Composer({
   const [text, setText] = useState("");
   const [mode, setMode] = useState<Mode>("auto");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [listening, setListening] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const recogRef = useRef<any>(null);
 
   useEffect(() => { ref.current?.focus(); }, []);
+
+  const toggleVoice = () => {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) { alert("이 브라우저는 음성 인식을 지원하지 않습니다 (Chrome/Safari 사용)"); return; }
+    if (listening) { recogRef.current?.stop(); setListening(false); return; }
+    const rec = new SR();
+    rec.lang = "ko-KR";
+    rec.interimResults = true;
+    rec.continuous = false;
+    rec.onresult = (e: any) => {
+      const t = Array.from(e.results).map((r: any) => r[0].transcript).join("");
+      setText(t);
+      if (e.results[e.results.length - 1].isFinal) setListening(false);
+    };
+    rec.onend = () => setListening(false);
+    rec.onerror = () => setListening(false);
+    rec.start();
+    recogRef.current = rec;
+    setListening(true);
+  };
 
   const send = () => {
     const t = text.trim();
@@ -150,6 +172,13 @@ export function Composer({
         {chip("deepsearch", "DeepSearch", "bg-sky-600 text-white")}
         {chip("think", "Think", "bg-violet-600 text-white")}
         {chip("image", "이미지", "bg-emerald-600 text-white")}
+        <button
+          onClick={toggleVoice}
+          className={`rounded-full p-1.5 transition-colors ${listening ? "bg-red-600 text-white animate-pulse" : "text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"}`}
+          title={listening ? "음성 입력 중지" : "음성으로 입력"}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" /><path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4" /></svg>
+        </button>
         {streaming ? (
           <button onClick={onStop} className="rounded-full bg-zinc-100 p-2 text-zinc-900 hover:bg-white" title="중단">
             <svg width="14" height="14" viewBox="0 0 14 14"><rect x="2" y="2" width="10" height="10" rx="2" fill="currentColor" /></svg>
