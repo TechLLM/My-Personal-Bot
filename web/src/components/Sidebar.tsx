@@ -64,7 +64,7 @@ export function Sidebar({
         ))}
         {!conversations.length && <div className="px-2.5 py-4 text-xs text-zinc-600">대화가 없습니다</div>}
       </div>
-      <div className="border-t border-zinc-800 p-2">
+      <div className="border-t border-zinc-800 p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
         <button
           onClick={onOpenSettings}
           className="w-full rounded-lg px-2.5 py-2 text-left text-xs text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"

@@ -89,7 +89,7 @@ export function Composer({
     <button
       key={m}
       onClick={() => setMode(mode === m ? "auto" : m)}
-      className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
+      className={`shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
         mode === m ? active_cls : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
       }`}
     >
@@ -149,17 +149,17 @@ export function Composer({
           }
         }}
       />
-      <div className="mt-2 flex items-center gap-2">
+      <div className="mt-2 flex flex-wrap items-center gap-2">
         <button
           onClick={() => fileRef.current?.click()}
-          className="rounded-full p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+          className="shrink-0 rounded-full p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
           title="이미지/파일 첨부"
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l8.57-8.57A4 4 0 1118 8.84l-8.59 8.57a2 2 0 01-2.83-2.83l8.49-8.48" /></svg>
         </button>
         <ModelPicker models={models} value={model} onChange={onModelChange} />
         <select
-          className="rounded-full bg-zinc-800 px-2 py-1.5 text-xs text-zinc-300 outline-none hover:bg-zinc-700 max-w-[110px]"
+          className="shrink-0 rounded-full bg-zinc-800 px-2 py-1.5 text-xs text-zinc-300 outline-none hover:bg-zinc-700 max-w-[110px]"
           value={personaId}
           onChange={(e) => onPersonaChange(e.target.value)}
           title="페르소나"
