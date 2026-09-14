@@ -25,14 +25,23 @@ if (origQuery) {
 `;
 
 let ctx: BrowserContext | null = null;
+let ctxHeadless = true;
 let launching: Promise<BrowserContext> | null = null;
 
-export async function getBrowser(): Promise<BrowserContext> {
-  if (ctx) return ctx;
+// 봇 작업은 headless(창 없음, Chrome for Testing의 new headless = 실제 Chrome 지문에 근접),
+// 수동 로그인만 headed로 잠시 전환. 프로필 잠금 때문에 동시 실행은 불가 — 모드 전환 시 재기동.
+export async function getBrowser(headless = true): Promise<BrowserContext> {
+  if (ctx && ctxHeadless === headless) return ctx;
+  if (ctx) {
+    try { await ctx.close(); } catch {}
+    ctx = null;
+    pages.clear();
+  }
   if (launching) return launching;
   launching = chromium
     .launchPersistentContext(PROFILE_DIR, {
-      headless: false,
+      headless,
+      channel: "chromium",
       args: ["--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check"],
       ignoreDefaultArgs: ["--enable-automation"],
       viewport: { width: 1440, height: 900 },
@@ -44,6 +53,7 @@ export async function getBrowser(): Promise<BrowserContext> {
       await c.addInitScript(STEALTH_INIT);
       c.on("close", () => { ctx = null; pages.clear(); });
       ctx = c;
+      ctxHeadless = headless;
       return c;
     })
     .finally(() => { launching = null; });
@@ -54,7 +64,7 @@ export async function getBrowser(): Promise<BrowserContext> {
 const pages = new Map<string, Page>();
 
 async function pageFor(key: string): Promise<Page> {
-  const browser = await getBrowser();
+  const browser = await getBrowser(true);
   const existing = pages.get(key);
   if (existing && !existing.isClosed()) return existing;
   const page = await browser.newPage();
@@ -149,7 +159,7 @@ export const browserRoute = new Hono()
   .post("/open", async (c) => {
     const b = await c.req.json().catch(() => ({}));
     try {
-      const browser = await getBrowser();
+      const browser = await getBrowser(false); // 수동 로그인은 창이 보여야 하므로 headed
       const page = await browser.newPage();
       await page.goto(String(b.url ?? "about:blank"), { waitUntil: "domcontentloaded" }).catch(() => {});
       return c.json({ ok: true });
