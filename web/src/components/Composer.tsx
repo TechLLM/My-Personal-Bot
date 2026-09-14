@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ModelPicker } from "./ModelPicker";
 import { mybotFetch, type Model } from "../api";
+import { X } from "lucide-react";
 
 export type Mode = "auto" | "think" | "deepsearch" | "image" | "team";
 
@@ -111,7 +112,7 @@ export function Composer({
               <button
                 className="absolute -right-1 -top-1 rounded-full bg-zinc-700 px-1 text-[10px] text-zinc-300 hover:bg-red-600"
                 onClick={() => setAttachments(attachments.filter((_, j) => j !== i))}
-              >✕</button>
+              ><X size={10} strokeWidth={2.5} /></button>
             </div>
           ))}
         </div>
@@ -165,7 +166,7 @@ export function Composer({
           title="페르소나"
         >
           {personas.map((p) => (
-            <option key={p.id} value={p.id}>{p.avatar} {p.name}</option>
+            <option key={p.id} value={p.id}>{p.name}</option>
           ))}
         </select>
         <div className="flex-1" />

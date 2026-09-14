@@ -301,7 +301,7 @@ export const chatRoute = new Hono()
             const { planTeam } = await import("../team");
             const plan = await planTeam(endpoint, realModel, userMsg.content, (ev) => send("team", ev), signal);
             if (plan?.length) {
-              const agents = plan.map((t) => ({ name: t.name, avatar: t.avatar, role: t.role ?? "", task: t.task, model: t.model, existing: t.existing }));
+              const agents = plan.map((t) => ({ name: t.name, avatar: t.avatar, role: t.role ?? "", task: t.task, model: t.model, model_label: t.model_label, existing: t.existing }));
               send("team", { type: "team_plan", pending: true, agents });
               const notice = "대장 봇이 작업 계획을 세웠습니다. 실행할 봇을 선택해 주세요.";
               const meta = JSON.stringify({ type: "team", status: "pending", agents });
@@ -322,20 +322,21 @@ export const chatRoute = new Hono()
           {
             const { mcpConfigured, mcpTools, mcpCall } = await import("../mcp");
             const { BROWSER_TOOLS, browserTool, closeAgentPage } = await import("../browser");
-            const { BUILTIN_TOOLS, callBuiltin } = await import("../team");
-            const openaiTools: any[] = [...BUILTIN_TOOLS, ...BROWSER_TOOLS];
+            const { BUILTIN_TOOLS, BOSS_TOOLS, callBuiltin, getAgent } = await import("../team");
+            const convAgent = getAgent(conv?.agent_id);
+            const openaiTools: any[] = [...BUILTIN_TOOLS, ...(convAgent?.is_boss ? BOSS_TOOLS : []), ...BROWSER_TOOLS];
             if (mcpConfigured()) {
               const tools = await mcpTools();
               openaiTools.push(...tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } })));
             }
-            const builtinNames = new Set(BUILTIN_TOOLS.map((t) => t.function.name));
+            const builtinNames = new Set([...BUILTIN_TOOLS, ...BOSS_TOOLS].map((t) => t.function.name));
             const { chatOnce } = await import("../providers/openaiCompat");
             const browserKey = `${convId}:${asstMsg.id}`;
             const deadline = Date.now() + 3 * 60_000; // 일반 대화 도구 루프 최대 3분
             let browserUsed = false;
             for (let round = 0; round < 4; round++) {
               if (Date.now() > deadline) break;
-              send("search", { type: "read", title: `🤖 봇 작업 중… (라운드 ${round + 1})`, url: "" });
+              send("search", { type: "read", title: `봇 작업 중… (라운드 ${round + 1})`, url: "" });
               const res = await chatOnce(endpoint, realModel, history, { signal, tools: openaiTools });
               if (!res.toolCalls?.length) {
                 if (res.content) history.push({ role: "assistant", content: res.content });
@@ -343,7 +344,7 @@ export const chatRoute = new Hono()
               }
               history.push({ role: "assistant", content: res.content || "", tool_calls: res.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })) } as any);
               for (const tc of res.toolCalls) {
-                send("search", { type: "read", title: `🔧 ${tc.name}`, url: "" });
+                send("search", { type: "read", title: tc.name, url: "" });
                 let out: string;
                 try {
                   const args = JSON.parse(tc.arguments || "{}");

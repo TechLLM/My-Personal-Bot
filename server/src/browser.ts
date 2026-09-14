@@ -1,7 +1,8 @@
 import { Hono } from "hono";
-import { chromium, type BrowserContext, type Page } from "playwright";
+import { chromium, type BrowserContext, type Frame, type Page } from "playwright";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
+import { db } from "./db";
 
 // ego(lite) 방식 증류: 별도 브라우저가 아니라 MyBot이 직접 구동하는 영속 Chromium.
 // - headed(실제 창)로 실행해 headless 탐지 신호 제거
@@ -133,6 +134,38 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
         await page.waitForTimeout(800);
         return await snapshot(page);
       }
+      case "browser_login": {
+        // 설정에 등록된 계정으로 자동 로그인 — 비밀번호는 서버에만 있고 모델 컨텍스트로 안 나감
+        const siteName = String(args.site ?? "");
+        const site = db.prepare("SELECT * FROM site_logins WHERE name LIKE ?").get(`%${siteName}%`) as any;
+        if (!site) return `등록된 사이트 계정 없음: "${siteName}". 설정 → 사이트 계정에서 먼저 등록하세요.`;
+        await page.goto(site.url, { waitUntil: "domcontentloaded", timeout: 30000 });
+        await page.waitForTimeout(1500);
+        // 로그인 폼 탐색 — iframe 안 폼도 지원 (그룹웨어 다수)
+        let scope: Page | Frame = page;
+        if (!(await page.locator('input[type="password"]').count().catch(() => 0))) {
+          for (const f of page.frames()) {
+            if (await f.locator('input[type="password"]').count().catch(() => 0)) { scope = f; break; }
+          }
+        }
+        const pass = scope.locator('input[type="password"]').first();
+        if (!(await pass.count().catch(() => 0))) {
+          return `로그인 폼을 찾지 못했습니다 — 이미 로그인된 상태일 수 있습니다.\n\n${await snapshot(page)}`;
+        }
+        const userSels = ['input[type="email"]', 'input[name*="user" i]', 'input[name*="login" i]', 'input[name*="mail" i]', 'input[id*="user" i]', 'input[name*="id" i]', 'input[id*="id" i]', 'input[type="text"]'];
+        for (const sel of userSels) {
+          const f = scope.locator(sel).first();
+          if (await f.count().catch(() => 0)) { await f.fill(site.username, { timeout: 5000 }).catch(() => {}); break; }
+        }
+        await pass.fill(site.password, { timeout: 5000 });
+        const btn = scope.locator('button[type="submit"], input[type="submit"], button:has-text("로그인"), a:has-text("로그인"), button:has-text("Sign in"), button:has-text("Log in")').first();
+        if (await btn.count().catch(() => 0)) await btn.click().catch(() => {});
+        else await pass.press("Enter").catch(() => {});
+        await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
+        await page.waitForTimeout(1500);
+        const stillForm = await page.locator('input[type="password"]').count().catch(() => 0);
+        return `${stillForm ? "로그인 폼이 아직 남아 있습니다 — 실패했거나 추가 인증이 필요할 수 있습니다." : "로그인 완료."}\n\n${await snapshot(page)}`;
+      }
       default:
         return `알 수 없는 도구: ${name}`;
     }
@@ -147,7 +180,25 @@ export const BROWSER_TOOLS = [
   { type: "function", function: { name: "browser_click", description: "CSS 선택자 또는 text=텍스트 로 요소를 클릭합니다", parameters: { type: "object", properties: { selector: { type: "string", description: "CSS 선택자 또는 'text=링크텍스트'" } }, required: ["selector"] } } },
   { type: "function", function: { name: "browser_type", description: "입력 필드에 텍스트를 입력합니다", parameters: { type: "object", properties: { selector: { type: "string" }, text: { type: "string" }, enter: { type: "boolean", description: "입력 후 Enter" } }, required: ["selector", "text"] } } },
   { type: "function", function: { name: "browser_scroll", description: "페이지를 스크롤합니다", parameters: { type: "object", properties: { direction: { type: "string", enum: ["down", "up"] } } } } },
+  { type: "function", function: { name: "browser_login", description: "설정에 등록된 사이트 계정으로 자동 로그인합니다 (회사 그룹웨어·사내 시스템 등). 로그인 후 browser_read/browser_click으로 정보를 가져오세요.", parameters: { type: "object", properties: { site: { type: "string", description: "설정에 등록한 사이트 이름" } }, required: ["site"] } } },
 ];
+
+// 등록된 사이트 계정 CRUD — 비밀번호는 목록/조회에서 절대 반환하지 않음 (write-only)
+export const sitesRoute = new Hono()
+  .get("/", (c) => c.json({ sites: db.prepare("SELECT id, name, url, username, created_at FROM site_logins ORDER BY created_at").all() }))
+  .post("/", async (c) => {
+    const b = await c.req.json();
+    if (!b.name || !b.url || !b.username || !b.password) return c.json({ error: "name/url/username/password 필요" }, 400);
+    const { uid, now } = await import("./db");
+    const id = uid();
+    db.prepare("INSERT INTO site_logins (id, name, url, username, password, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(id, String(b.name).slice(0, 50), String(b.url), String(b.username), String(b.password), now());
+    return c.json({ site: db.prepare("SELECT id, name, url, username, created_at FROM site_logins WHERE id = ?").get(id) });
+  })
+  .delete("/:id", (c) => {
+    db.prepare("DELETE FROM site_logins WHERE id = ?").run(c.req.param("id"));
+    return c.json({ ok: true });
+  });
 
 export function browserRunning(): boolean {
   return ctx !== null;

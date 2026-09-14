@@ -1,4 +1,6 @@
 import type { Conversation } from "../api";
+import { X, Settings } from "lucide-react";
+import { AgentIcon } from "./icons";
 
 export function Sidebar({
   conversations,
@@ -42,7 +44,7 @@ export function Sidebar({
             onChange={(e) => onWorkspaceChange(e.target.value)}
           >
             <option value="">모든 대화</option>
-            {workspaces.map((w) => <option key={w.id} value={w.id}>📁 {w.name}</option>)}
+            {workspaces.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
           </select>
         </div>
       )}
@@ -55,12 +57,12 @@ export function Sidebar({
             }`}
             onClick={() => onSelect(c.id)}
           >
-            {c.agent_avatar && <span className="shrink-0 text-xs" title={c.agent_name ?? ""}>{c.agent_avatar}</span>}
+            {c.agent_name && <AgentIcon name={c.agent_name} size={13} className="shrink-0 text-zinc-500" />}
             <span className="truncate flex-1">{c.title}</span>
             <button
               className="hidden shrink-0 text-zinc-600 hover:text-red-400 group-hover:block"
               onClick={(e) => { e.stopPropagation(); onDelete(c.id); }}
-            >✕</button>
+            ><X size={12} strokeWidth={2} /></button>
           </div>
         ))}
         {!conversations.length && <div className="px-2.5 py-4 text-xs text-zinc-600">대화가 없습니다</div>}
@@ -69,7 +71,7 @@ export function Sidebar({
         <button
           onClick={onOpenSettings}
           className="w-full rounded-lg px-2.5 py-2 text-left text-xs text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
-        >⚙ 설정 · 엔드포인트 · 검색</button>
+        ><span className="flex items-center gap-1.5"><Settings size={13} strokeWidth={1.8} /> 설정 · 엔드포인트 · 검색</span></button>
       </div>
     </aside>
   );

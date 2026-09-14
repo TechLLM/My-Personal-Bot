@@ -3,9 +3,11 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import type { Message } from "../api";
+import { Brain, Bot, FileText, Volume2 } from "lucide-react";
+import { AgentIcon } from "./icons";
 
 interface TeamPlanAgent {
-  name: string; avatar: string; role: string; task: string; model: string;
+  name: string; avatar: string; role: string; task: string; model: string; model_label?: string;
   status?: string; result?: string; existing?: boolean;
 }
 
@@ -76,7 +78,7 @@ export function MessageItem({
               a.mime.startsWith("image/") ? (
                 <img key={i} src={a.url} className="mb-2 max-h-64 rounded-lg" alt={a.name} />
               ) : (
-                <div key={i} className="mb-2 rounded-lg bg-zinc-700 px-2 py-1 text-xs">📄 {a.name}</div>
+                <div key={i} className="mb-2 flex items-center gap-1 rounded-lg bg-zinc-700 px-2 py-1 text-xs"><FileText size={11} /> {a.name}</div>
               ),
             )}
             {m.content}
@@ -104,7 +106,7 @@ export function MessageItem({
             className="flex w-full items-center gap-2 px-3 py-2 text-xs text-zinc-400 hover:text-zinc-200"
             onClick={() => setShowReasoning(!showReasoning)}
           >
-            <span className={streaming && !m.content ? "thinking-dot" : ""}>🧠</span>
+            <Brain size={13} className={streaming && !m.content ? "thinking-dot" : ""} />
             사고 과정
             <span className="ml-auto">{showReasoning ? "▾" : "▸"}</span>
           </button>
@@ -127,18 +129,18 @@ export function MessageItem({
       )}
       {meta?.type === "team" && meta.status === "pending" && meta.agents && (
         <div className="mt-1 rounded-xl border border-amber-900/40 bg-amber-950/20 px-3 py-2.5">
-          <div className="text-xs font-medium text-amber-300/90 mb-2">🤖 팀 작업 계획 — 실행할 봇을 선택하세요</div>
+          <div className="flex items-center gap-1.5 text-xs font-medium text-amber-300/90 mb-2"><Bot size={13} /> 팀 작업 계획 — 실행할 봇을 선택하세요</div>
           <div className="space-y-1.5">
             {meta.agents.map((a, i) => (
               <label key={i} className="flex items-start gap-2 rounded-lg bg-zinc-900/60 px-2.5 py-2 text-xs cursor-pointer">
                 <input type="checkbox" className="mt-0.5" checked={sel.has(i)} onChange={() => toggleSel(i)} />
-                <span className="shrink-0">{a.avatar}</span>
+                <AgentIcon name={a.name} size={13} className="mt-0.5 shrink-0 text-zinc-500" />
                 <span className="min-w-0 flex-1">
                   <span className="font-medium text-zinc-200">{a.name}</span>
                   <span className={`ml-1.5 rounded px-1 text-[9px] ${a.existing ? "bg-sky-900/60 text-sky-300" : "bg-emerald-900/60 text-emerald-300"}`}>
                     {a.existing ? "기존 봇" : "새 봇"}
                   </span>
-                  <span className="ml-1.5 font-mono text-[10px] text-zinc-600">{a.model}</span>
+                  <span className="ml-1.5 font-mono text-[10px] text-zinc-600">{a.model_label ?? a.model}</span>
                   <span className="block truncate text-zinc-500">{a.role}</span>
                   <span className="block text-zinc-400">작업: {a.task}</span>
                 </span>
@@ -165,12 +167,14 @@ export function MessageItem({
       )}
       {meta?.type === "team" && meta.status !== "pending" && meta.status !== "cancelled" && meta.agents && (
         <div className="mt-1 rounded-xl border border-amber-900/40 bg-amber-950/20 px-3 py-2">
-          <div className="text-xs font-medium text-amber-300/90 mb-1">🤖 팀 작업 — 봇 {meta.agents.length}개</div>
+          <div className="flex items-center gap-1.5 text-xs font-medium text-amber-300/90 mb-1"><Bot size={13} /> 팀 작업 — 봇 {meta.agents.length}개</div>
           <div className="space-y-1 text-xs text-zinc-500">
             {meta.agents.map((a, i) => (
-              <div key={i}>
-                <span className={a.status === "done" ? "text-emerald-400" : "text-red-400"}>●</span>{" "}
-                {a.avatar} <span className="text-zinc-300">{a.name}</span>
+              <div key={i} className="flex items-center gap-1.5">
+                <span className={a.status === "done" ? "text-emerald-400" : "text-red-400"}>●</span>
+                <AgentIcon name={a.name} size={12} className="text-zinc-500" />
+                <span className="text-zinc-300">{a.name}</span>
+                {a.model_label && <span className="font-mono text-[9px] text-zinc-600">{a.model_label}</span>}
                 <span className="text-zinc-600"> — {a.task.slice(0, 60)}{a.task.length > 60 ? "…" : ""}</span>
               </div>
             ))}
@@ -213,7 +217,7 @@ export function MessageItem({
             u.lang = "ko-KR";
             speechSynthesis.speak(u);
           }}
-        >🔊</button>
+        ><Volume2 size={13} /></button>
         {m.model && <span className="ml-auto font-mono text-[10px]">{m.model}{m.tokens_out ? ` · ${m.tokens_out}tok` : ""}</span>}
       </div>
     </div>

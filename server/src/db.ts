@@ -110,12 +110,25 @@ CREATE TABLE IF NOT EXISTS agent_runs (
   finished_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_agent_runs_agent ON agent_runs(agent_id, created_at);
+
+-- 봇이 브라우저로 자동 로그인할 사이트 계정 (비밀번호는 로컬 DB에만 저장)
+CREATE TABLE IF NOT EXISTS site_logins (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  url TEXT NOT NULL,
+  username TEXT NOT NULL,
+  password TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
 `);
 
 try { db.exec("ALTER TABLE messages ADD COLUMN attachments TEXT"); } catch {}
 try { db.exec("ALTER TABLE routines ADD COLUMN agent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE conversations ADD COLUMN agent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE memories ADD COLUMN agent_id TEXT"); } catch {}
+try { db.exec("ALTER TABLE agents ADD COLUMN is_boss INTEGER NOT NULL DEFAULT 0"); } catch {}
+// CEO 봇이 하나도 없으면 기존 대장을 CEO로 승격
+db.exec("UPDATE agents SET is_boss = 1 WHERE name = '대장' AND NOT EXISTS (SELECT 1 FROM agents WHERE is_boss = 1)");
 
 export function getSetting(key: string): string | null {
   const row = db.query("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | null;

@@ -87,6 +87,11 @@ export const api = {
   addAgent: (a: { name: string; role_prompt: string; model?: string; avatar?: string }) =>
     mybotFetch("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(a) }).then(j),
   deleteAgent: (id: string) => mybotFetch(`/api/agents/${id}`, { method: "DELETE" }).then(j),
+  setAgentBoss: (id: string) => mybotFetch(`/api/agents/${id}/boss`, { method: "POST" }).then(j),
+  sites: () => mybotFetch("/api/sites").then(j) as Promise<{ sites: SiteLogin[] }>,
+  addSite: (s: { name: string; url: string; username: string; password: string }) =>
+    mybotFetch("/api/sites", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(s) }).then(j),
+  deleteSite: (id: string) => mybotFetch(`/api/sites/${id}`, { method: "DELETE" }).then(j),
 };
 
 export interface Agent {
@@ -94,8 +99,18 @@ export interface Agent {
   name: string;
   role_prompt: string;
   model: string | null;
+  model_label?: string;
   avatar: string | null;
   persistent: number;
+  is_boss: number;
+  created_at: number;
+}
+
+export interface SiteLogin {
+  id: string;
+  name: string;
+  url: string;
+  username: string;
   created_at: number;
 }
 

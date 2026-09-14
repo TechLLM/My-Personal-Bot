@@ -25,16 +25,20 @@ It delivers a Grok-style chat experience without vendor lock-in — **connect an
 - **Team (Boss Bot)** — see below
 
 ### Team Mode (Multi-Agent Orchestration)
-- A boss bot analyzes your instruction and **proposes a task plan** — you approve which bots run via checkboxes
+- Every conversation belongs to a bot — a **CEO bot** is the default contact; switching models preserves the bot's memory and context
+- **Designate any bot as CEO** in Settings — the CEO manages all bots: `agent_list` (roster), `agent_direct` (instant delegation), `agent_update` (edit role/model), `agent_delete`
+- The CEO analyzes your instruction and **proposes a task plan** — you approve which bots run via checkboxes
 - Role bots are auto-created/reused, then work in parallel (up to 4)
 - Reuses a persistent bot only when its persona fits; otherwise creates a fresh persona
 - Bots with scheduled routines are excluded automatically — the boss spawns a different bot
-- Bot tools: web search, shared workspace file I/O, MCP tools, built-in browser
-- Live per-bot status cards; the boss synthesizes the final answer
+- Each bot shows its **actual routed model** (e.g. `openai/gpt-6-astra@high`), not the alias
+- Bot tools: web search, shared workspace file I/O, MCP tools, built-in browser, routine scheduling (`routine_add`)
+- Live per-bot status cards; the CEO synthesizes the final answer
 
 ### Built-in Browser (shared login sessions)
 - Server-driven persistent-profile Chromium (headless)
 - Open a login window once, sign in manually (e.g. x.com) → bots reuse the session
+- **Site accounts**: register per-site credentials in Settings → bots auto-login via `browser_login` (company groupware mail, approval lists, etc.). Passwords stay in the local DB — never sent to the model
 - Per-bot tab isolation, automation-detection signals removed
 
 ### Productivity

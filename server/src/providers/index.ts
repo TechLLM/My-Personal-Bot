@@ -64,6 +64,30 @@ export function resolveModel(modelId: string): Resolved {
   return { endpoint, model: modelId };
 }
 
+function globMatch(s: string, pat: string): boolean {
+  const re = new RegExp("^" + pat.split("*").map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$", "i");
+  return re.test(s);
+}
+
+// airoute 별칭(main/fast/subagent…) → 실제 라우팅 대상("openai/gpt-6-astra@high" 등)
+export function modelLabel(modelId: string): string {
+  if (!modelId || modelId.startsWith("ep_")) return modelId;
+  try {
+    if (!existsSync(AIRouteConfigPath)) return modelId;
+    const cfg = JSON.parse(readFileSync(AIRouteConfigPath, "utf8"));
+    const routes = cfg.routes ?? {};
+    let m = modelId;
+    for (const rule of routes.rules ?? []) {
+      const pats = String(rule.match?.model ?? "").split("|").filter(Boolean);
+      if (pats.some((p) => globMatch(m, p))) { m = rule.route; break; }
+    }
+    if (routes[m]) m = routes[m];
+    return m;
+  } catch {
+    return modelId;
+  }
+}
+
 export async function listRemoteModels(endpoint: Endpoint): Promise<{ id: string; label: string }[]> {
   try {
     const res = await fetch(`${endpoint.baseUrl}/models`, {

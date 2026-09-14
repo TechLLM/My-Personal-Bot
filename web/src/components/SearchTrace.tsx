@@ -1,3 +1,5 @@
+import { Search, Bot } from "lucide-react";
+
 export interface SearchEvent {
   type: "plan" | "search" | "read" | "round" | "synthesize";
   queries?: string[];
@@ -20,7 +22,7 @@ export function SearchTrace({ events, done }: { events: SearchEvent[]; done: boo
   return (
     <div className="rounded-xl border border-sky-900/40 bg-sky-950/20 px-4 py-3 text-sm">
       <div className="flex items-center gap-2 font-medium text-sky-300">
-        <span className={done ? "" : "thinking-dot"}>{isSearch ? "🔍" : "🤖"}</span>
+        <span className={done ? "" : "thinking-dot"}>{isSearch ? <Search size={14} /> : <Bot size={14} />}</span>
         {isSearch
           ? done ? "DeepSearch 완료" : synthesizing ? "출처 종합 중…" : "DeepSearch 진행 중…"
           : done ? "봇 작업 완료" : "봇 작업 중…"}
@@ -36,7 +38,7 @@ export function SearchTrace({ events, done }: { events: SearchEvent[]; done: boo
         ))}
         {reads.map((r, i) => (
           <div key={`r${i}`} className="text-zinc-400">
-            {r.title?.startsWith("🔧") || r.title?.startsWith("🤖") || r.title?.startsWith("⏱") || !r.url ? (
+            {!r.url ? (
               <span>· {r.title || r.url}</span>
             ) : (
               <span>· 읽음: <a href={r.url} target="_blank" rel="noreferrer" className="hover:text-sky-400 underline decoration-zinc-700">{r.title}</a></span>

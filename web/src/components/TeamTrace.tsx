@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { Bot } from "lucide-react";
+import { AgentIcon } from "./icons";
 
 export interface TeamAgentInfo {
   id: string;
@@ -7,6 +9,7 @@ export interface TeamAgentInfo {
   role: string;
   task: string;
   model: string;
+  model_label?: string;
   status?: string;
   result?: string;
   steps?: number;
@@ -51,7 +54,7 @@ export function TeamTrace({ events, done }: { events: TeamEvent[]; done: boolean
   return (
     <div className="rounded-xl border border-amber-900/40 bg-amber-950/20 px-4 py-3 text-sm">
       <div className="flex items-center gap-2 font-medium text-amber-300">
-        <span className={!done || running ? "thinking-dot" : ""}>🤖</span>
+        <span className={!done || running ? "thinking-dot" : ""}><Bot size={14} /></span>
         {list.length
           ? pending
             ? `대장 봇이 계획을 세웠습니다 — 봇 ${list.length}개 (승인 대기)`
@@ -62,10 +65,10 @@ export function TeamTrace({ events, done }: { events: TeamEvent[]; done: boolean
         {list.map((a) => (
           <div key={a.id} className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
             <div className="flex items-center gap-2 text-xs">
-              <span>{a.avatar}</span>
+              <AgentIcon name={a.name} size={13} className="shrink-0 text-zinc-500" />
               <span className="font-medium text-zinc-200">{a.name}</span>
               <span className="text-zinc-500 truncate">{a.role}</span>
-              <span className="ml-auto shrink-0 font-mono text-[10px] text-zinc-600">{a.model}</span>
+              <span className="ml-auto shrink-0 font-mono text-[10px] text-zinc-600">{a.model_label ?? a.model}</span>
               <span className={`shrink-0 ${a.status === "done" ? "text-emerald-400" : a.status === "error" ? "text-red-400" : "text-amber-400"}`}>
                 {a.status === "done" ? "● 완료" : a.status === "error" ? "● 오류" : a.status === "running" ? "◐ 실행 중" : "○ 대기"}
               </span>

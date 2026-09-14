@@ -6,6 +6,8 @@ import { MessageItem } from "./components/MessageItem";
 import { SearchTrace, type SearchEvent } from "./components/SearchTrace";
 import { TeamTrace, type TeamEvent } from "./components/TeamTrace";
 import { SettingsModal } from "./components/SettingsModal";
+import { Menu } from "lucide-react";
+import { AgentIcon } from "./components/icons";
 
 export default function App() {
   const [models, setModels] = useState<Model[]>([]);
@@ -110,7 +112,7 @@ export default function App() {
           setStreaming(false);
           setMessages((prev) => [...prev, {
             id: "err" + Date.now(), conversation_id: convId ?? "", parent_id: null, role: "assistant",
-            content: `⚠ 오류: ${msg}`, reasoning: null, model: null, search_meta: null, attachments: null,
+            content: `오류: ${msg}`, reasoning: null, model: null, search_meta: null, attachments: null,
             tokens_in: null, tokens_out: null, created_at: Date.now(),
           }]);
         },
@@ -120,7 +122,7 @@ export default function App() {
       if (e.name !== "AbortError") {
         setMessages((prev) => [...prev, {
           id: "err" + Date.now(), conversation_id: convId ?? "", parent_id: null, role: "assistant",
-          content: `⚠ 연결 오류: ${e.message}`, reasoning: null, model: null, search_meta: null, attachments: null,
+          content: `연결 오류: ${e.message}`, reasoning: null, model: null, search_meta: null, attachments: null,
           tokens_in: null, tokens_out: null, created_at: Date.now(),
         }]);
       }
@@ -210,7 +212,7 @@ export default function App() {
           setStreaming(false);
           setMessages((prev) => [...prev, {
             id: "err" + Date.now(), conversation_id: m.conversation_id, parent_id: null, role: "assistant",
-            content: `⚠ 오류: ${msg}`, reasoning: null, model: null, search_meta: null, attachments: null,
+            content: `오류: ${msg}`, reasoning: null, model: null, search_meta: null, attachments: null,
             tokens_in: null, tokens_out: null, created_at: Date.now(),
           }]);
         },
@@ -258,13 +260,13 @@ export default function App() {
       />
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center gap-2 border-b border-zinc-800/60 px-4 py-2.5">
-          <button className="text-zinc-500 hover:text-zinc-200" onClick={() => setSidebarOpen(!sidebarOpen)}>☰</button>
+          <button className="text-zinc-500 hover:text-zinc-200" onClick={() => setSidebarOpen(!sidebarOpen)}><Menu size={16} strokeWidth={1.8} /></button>
           <span className="text-sm text-zinc-400 truncate">
             {convId ? conversations.find((c) => c.id === convId)?.title ?? "대화" : "새 대화"}
           </span>
           {convId && conversations.find((c) => c.id === convId)?.agent_name && (
             <span className="flex shrink-0 items-center gap-1 rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-400" title="이 대화를 담당하는 봇 — 모델을 바꿔도 봇의 기억·맥락은 유지됩니다">
-              {conversations.find((c) => c.id === convId)?.agent_avatar} {conversations.find((c) => c.id === convId)?.agent_name}
+              <AgentIcon name={conversations.find((c) => c.id === convId)?.agent_name} size={11} /> {conversations.find((c) => c.id === convId)?.agent_name}
             </span>
           )}
         </header>

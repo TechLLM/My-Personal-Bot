@@ -39,7 +39,7 @@ export async function runRoutine(r: any): Promise<string> {
   // 결과를 대화로 저장
   const convId = uid();
   const t = now();
-  const title = `⏰ ${agent.avatar ?? "🤖"} ${agent.name} · ${r.name}`;
+  const title = `루틴 · ${agent.name} · ${r.name}`;
   db.prepare("INSERT INTO conversations (id, title, model, mode, agent_id, created_at, updated_at) VALUES (?, ?, ?, 'routine', ?, ?, ?)").run(convId, title, useModel, agent.id, t, t);
   const uId = uid();
   db.prepare("INSERT INTO messages (id, conversation_id, parent_id, role, content, created_at) VALUES (?, ?, NULL, 'user', ?, ?)").run(uId, convId, `[루틴] ${r.prompt}`, t);
