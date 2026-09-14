@@ -113,6 +113,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_agent ON agent_runs(agent_id, created_
 `);
 
 try { db.exec("ALTER TABLE messages ADD COLUMN attachments TEXT"); } catch {}
+try { db.exec("ALTER TABLE routines ADD COLUMN agent_id TEXT"); } catch {}
 
 export function getSetting(key: string): string | null {
   const row = db.query("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | null;

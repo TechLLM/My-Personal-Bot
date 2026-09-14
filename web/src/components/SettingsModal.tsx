@@ -26,6 +26,7 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
   const [aAvatar, setAAvatar] = useState("🤖");
   const [aRole, setARole] = useState("");
   const [aModel, setAModel] = useState("");
+  const [rAgent, setRAgent] = useState("");
 
   const load = () => {
     mybotFetch("/api/settings").then((r) => r.json()).then((d) => { setS(d.settings); setMemories(d.memories); setPersonas(d.personas); });
@@ -194,7 +195,7 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
                 <button onClick={() => mybotFetch(`/api/routines/${r.id}/toggle`, { method: "POST" }).then(load)} className={r.enabled ? "text-emerald-400" : "text-zinc-600"}>{r.enabled ? "●" : "○"}</button>
                 <span className="font-medium">{r.name}</span>
                 <span className="text-zinc-500">{r.schedule}</span>
-                <span className="text-zinc-600">{r.model}</span>
+                <span className="text-zinc-600">{r.agent_id ? `🤖 ${agents.find((a) => a.id === r.agent_id)?.name ?? "봇"}` : r.model}</span>
                 <button className="ml-auto text-zinc-600 hover:text-sky-400" onClick={() => mybotFetch(`/api/routines/${r.id}/run`, { method: "POST" }).then(load)}>지금 실행</button>
                 <button className="text-zinc-600 hover:text-red-400" onClick={() => mybotFetch(`/api/routines/${r.id}`, { method: "DELETE" }).then(load)}>삭제</button>
               </div>
@@ -204,6 +205,12 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
           <div className="mt-2 space-y-1.5">
             <div className="flex gap-1.5">
               <input className="flex-1 rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none" placeholder="루틴 이름" value={rName} onChange={(e) => setRName(e.target.value)} />
+              <select className="rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none" value={rAgent} onChange={(e) => setRAgent(e.target.value)} title="담당 봇 (선택 시 그 봇의 역할·모델로 실행, 팀 모드에서 재사용 제외)">
+                <option value="">담당 봇 없음</option>
+                {agents.map((a) => (
+                  <option key={a.id} value={a.id}>{a.avatar} {a.name}</option>
+                ))}
+              </select>
               <select className="rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none" value={rSched} onChange={(e) => setRSched(e.target.value)}>
                 <option value="every:30m">30분마다</option>
                 <option value="every:2h">2시간마다</option>
@@ -214,7 +221,7 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
             <textarea className="w-full rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none" rows={2} placeholder="예약 실행할 프롬프트 (예: 오늘 AI 뉴스 요약)" value={rPrompt} onChange={(e) => setRPrompt(e.target.value)} />
             <button className="rounded-lg bg-zinc-100 px-2.5 py-1 text-xs font-medium text-zinc-900" onClick={() => {
               if (!rName.trim() || !rPrompt.trim()) return;
-              mybotFetch("/api/routines", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: rName, prompt: rPrompt, schedule: rSched }) }).then(() => { setRName(""); setRPrompt(""); load(); });
+              mybotFetch("/api/routines", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: rName, prompt: rPrompt, schedule: rSched, agent_id: rAgent || undefined }) }).then(() => { setRName(""); setRPrompt(""); setRAgent(""); load(); });
             }}>루틴 추가</button>
           </div>
         </section>
@@ -227,6 +234,9 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
               <div className="flex items-center gap-2">
                 <span>{a.avatar} {a.name}</span>
                 <span className="text-zinc-600 font-mono text-[10px]">{a.model ?? "subagent"}</span>
+                {routines.some((r) => r.agent_id === a.id && r.enabled) && (
+                  <span className="rounded bg-amber-900/50 px-1 text-[9px] text-amber-300" title="예약 루틴 담당 — 팀 모드에서 재사용 안 함">⏰ 루틴</span>
+                )}
                 <button className="ml-auto text-zinc-600 hover:text-red-400" onClick={() => mybotFetch(`/api/agents/${a.id}`, { method: "DELETE" }).then(load)}>삭제</button>
               </div>
               <div className="mt-0.5 truncate text-zinc-500">{a.role_prompt}</div>

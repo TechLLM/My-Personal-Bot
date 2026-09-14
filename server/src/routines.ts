@@ -18,18 +18,30 @@ function nextRunAt(schedule: string, from = Date.now()): number | null {
 }
 
 export async function runRoutine(r: any): Promise<string> {
-  const { endpoint, model } = resolveModel(r.model ?? "main");
+  // 루틴이 특정 봇에 배정된 경우 그 봇의 역할·모델로 실행 (봇의 상주 업무)
+  const agent = r.agent_id
+    ? (db.prepare("SELECT * FROM agents WHERE id = ?").get(r.agent_id) as any)
+    : null;
+  const useModel = agent?.model ?? r.model ?? "main";
+  const { endpoint, model } = resolveModel(useModel);
+  const messages = agent
+    ? [
+        { role: "system" as const, content: `당신은 "${agent.name}" 에이전트입니다. 역할: ${agent.role_prompt}\n예약된 정기 업무를 수행하고 결과를 보고하세요.` },
+        { role: "user" as const, content: r.prompt },
+      ]
+    : [{ role: "user" as const, content: r.prompt }];
   let out = "";
-  for await (const ev of streamChat(endpoint, model, [{ role: "user", content: r.prompt }])) {
+  for await (const ev of streamChat(endpoint, model, messages)) {
     if (ev.type === "content") out += ev.text ?? "";
   }
   // 결과를 대화로 저장
   const convId = uid();
   const t = now();
-  db.prepare("INSERT INTO conversations (id, title, model, mode, created_at, updated_at) VALUES (?, ?, ?, 'routine', ?, ?)").run(convId, `⏰ ${r.name}`, r.model ?? "main", t, t);
+  const title = `⏰ ${agent ? `${agent.avatar ?? "🤖"} ${agent.name} · ` : ""}${r.name}`;
+  db.prepare("INSERT INTO conversations (id, title, model, mode, created_at, updated_at) VALUES (?, ?, ?, 'routine', ?, ?)").run(convId, title, useModel, t, t);
   const uId = uid();
   db.prepare("INSERT INTO messages (id, conversation_id, parent_id, role, content, created_at) VALUES (?, ?, NULL, 'user', ?, ?)").run(uId, convId, `[루틴] ${r.prompt}`, t);
-  db.prepare("INSERT INTO messages (id, conversation_id, parent_id, role, content, model, created_at) VALUES (?, ?, ?, 'assistant', ?, ?, ?)").run(uid(), convId, uId, out, r.model, t);
+  db.prepare("INSERT INTO messages (id, conversation_id, parent_id, role, content, model, created_at) VALUES (?, ?, ?, 'assistant', ?, ?, ?)").run(uid(), convId, uId, out, useModel, t);
   return out;
 }
 
@@ -56,7 +68,7 @@ export const routinesRoute = new Hono()
     if (!b.name?.trim() || !b.prompt?.trim() || !b.schedule) return c.json({ error: "name/prompt/schedule 필요" }, 400);
     if (!nextRunAt(b.schedule)) return c.json({ error: "schedule 형식: every:30m, every:2h, daily:08:30" }, 400);
     const id = uid();
-    db.prepare("INSERT INTO routines (id, name, prompt, schedule, model, enabled, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)").run(id, b.name, b.prompt, b.schedule, b.model ?? "main", now());
+    db.prepare("INSERT INTO routines (id, name, prompt, schedule, model, agent_id, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)").run(id, b.name, b.prompt, b.schedule, b.model ?? "main", b.agent_id || null, now());
     return c.json({ routine: db.prepare("SELECT * FROM routines WHERE id = ?").get(id) });
   })
   .post("/:id/toggle", (c) => {

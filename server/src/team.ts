@@ -70,14 +70,22 @@ async function callBuiltin(name: string, args: Record<string, unknown>): Promise
   return `알 수 없는 도구: ${name}`;
 }
 
-// 이름으로 기존 상주 봇 재사용, 없으면 생성 (둘 다 지원: 계획이 임시 봇을 요구해도 저장됨)
-function findOrCreateAgent(t: { name?: string; role?: string; model?: string; avatar?: string }): Agent {
-  const name = String(t.name ?? "작업봇").slice(0, 30);
-  const existing = db.prepare("SELECT * FROM agents WHERE name = ?").get(name) as Agent | null;
-  if (existing) return existing;
+// 이름 충돌 시 " #2" 식으로 유일 이름 생성
+function uniqueName(base: string): string {
+  const trimmed = base.slice(0, 30).trim() || "작업봇";
+  let name = trimmed;
+  let i = 2;
+  while (db.prepare("SELECT 1 FROM agents WHERE name = ?").get(name)) {
+    name = `${trimmed.slice(0, 26)} #${i++}`;
+  }
+  return name;
+}
+
+// 대장이 새 페르소나를 부여해 생성하는 봇 (항상 신규 생성 — 이름 같아도 페르소나 다르면 별개 봇)
+function createAgent(t: { name?: string; role?: string; model?: string; avatar?: string }): Agent {
   const id = uid();
   db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)")
-    .run(id, name, String(t.role ?? ""), t.model ?? "subagent", t.avatar ?? "🤖", null, now());
+    .run(id, uniqueName(String(t.name ?? "작업봇")), String(t.role ?? ""), t.model ?? "subagent", t.avatar ?? "🤖", null, now());
   return db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent;
 }
 
@@ -141,25 +149,45 @@ export async function orchestrateTeam(
   signal?: AbortSignal,
 ): Promise<TeamAgentState[] | null> {
   emit({ type: "team_planning" });
+
+  // 기존 상주 봇 목록 + 루틴 담당 중인 봇(바쁨) 표시
+  const existing = db.prepare("SELECT * FROM agents ORDER BY created_at").all() as Agent[];
+  const busyIds = new Set(
+    (db.prepare("SELECT DISTINCT agent_id FROM routines WHERE enabled = 1 AND agent_id IS NOT NULL").all() as { agent_id: string }[]).map((r) => r.agent_id),
+  );
+  const roster = existing.length
+    ? "\n\n현재 상주 에이전트 목록:\n" + existing.map((a) =>
+        `- ${a.name} (${a.avatar ?? "🤖"}) | 역할: ${a.role_prompt || "없음"} | 모델: ${a.model ?? "subagent"}${busyIds.has(a.id) ? " | [바쁨: 예약 루틴 담당 중]" : ""}`,
+      ).join("\n")
+    : "";
+
   const planRes = await chatOnce(endpoint, bossModel, [
     {
       role: "system",
       content: `당신은 팀 리더입니다. 사용자의 작업을 분석해 전문 에이전트들에게 분배할 하위 작업으로 분해하세요.
-JSON 배열만 출력하세요: [{"name":"에이전트 이름","avatar":"이모지","role":"역할 설명 한 줄","task":"구체적 작업 지시","model":"subagent|fast|code|main 중 하나"}]
+JSON 배열만 출력하세요. 각 항목은 둘 중 하나:
+- 기존 에이전트 재사용: {"agent":"기존 에이전트 이름","task":"구체적 작업 지시"}
+- 새 에이전트 생성: {"name":"에이전트 이름","avatar":"이모지","role":"역할 설명 한 줄","task":"구체적 작업 지시","model":"subagent|fast|code|main 중 하나"}
+
+규칙:
+- 기존 에이전트의 역할이 하위 작업에 맞을 때만 재사용하세요. 역할이 맞지 않으면 새 페르소나로 새 에이전트를 만드세요 (이름이 같아도 새로 생성).
+- [바쁨] 표시된 에이전트는 예약 루틴이 우선이므로 재사용하지 말고 새 에이전트를 만드세요.
 - 최대 4개. 코드 작업은 code, 빠른 단순 작업은 fast, 나머지는 subagent.
-- 단순 질문·잡담·한 번에 답할 수 있는 것은 분해하지 말고 빈 배열 []만 출력.`,
+- 단순 질문·잡담·한 번에 답할 수 있는 것은 분해하지 말고 빈 배열 []만 출력.${roster}`,
     },
     { role: "user", content: task },
   ], { signal });
 
   const m = planRes.content.match(/\[[\s\S]*\]/);
-  let tasks: { name?: string; role?: string; task?: string; model?: string; avatar?: string }[] = [];
+  let tasks: { agent?: string; name?: string; role?: string; task?: string; model?: string; avatar?: string }[] = [];
   try { tasks = m ? JSON.parse(m[0]) : []; } catch { tasks = []; }
   if (!Array.isArray(tasks) || !tasks.length) return null;
   tasks = tasks.slice(0, 4);
 
   const states: TeamAgentState[] = tasks.map((t) => {
-    const agent = findOrCreateAgent(t);
+    // 재사용 지정: 존재하고 바쁘지 않은 봇만. 그 외엔 새 봇 생성
+    const reuse = t.agent ? existing.find((a) => a.name === t.agent && !busyIds.has(a.id)) : undefined;
+    const agent = reuse ?? createAgent(t);
     const runId = uid();
     db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, ?, ?, 'running', ?)")
       .run(runId, agent.id, convId, String(t.task ?? task), now());
