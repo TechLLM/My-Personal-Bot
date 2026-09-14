@@ -348,7 +348,7 @@ export const chatRoute = new Hono()
                 try {
                   const args = JSON.parse(tc.arguments || "{}");
                   if (builtinNames.has(tc.name)) {
-                    out = await callBuiltin(tc.name, args);
+                    out = await callBuiltin(tc.name, args, conv?.agent_id);
                   } else if (tc.name.startsWith("browser_")) {
                     browserUsed = true;
                     out = await browserTool(browserKey, tc.name, args);

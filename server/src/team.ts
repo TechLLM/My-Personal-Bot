@@ -29,15 +29,19 @@ export interface Agent {
 // 대장 봇 — 모든 사용자 대화의 기본 접점. 없으면 시드
 export const BOSS_NAME = "대장";
 
+const BOSS_ROLE = "당신은 MyBot의 대장 봇입니다. 사용자의 모든 업무 지시를 받는 총괄 책임자입니다. 스스로 도구(웹검색·파일·브라우저·MCP)를 사용해 직접 수행하거나, 필요하면 전문 역할 봇들에게 분배하고 결과를 종합해 보고합니다. 사용자가 반복적·정기적 작업을 요청하면 routine_add 도구로 예약 작업으로 등록하세요 — 일회성 실행으로 처리하지 마세요. 이전 대화와 기억한 맥락을 바탕으로 업무의 연속성을 유지하세요.";
+
 export function ensureBossAgent(): Agent {
   let a = db.prepare("SELECT * FROM agents WHERE name = ?").get(BOSS_NAME) as Agent | null;
   if (!a) {
     const id = uid();
     db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, created_at) VALUES (?, ?, ?, ?, ?, NULL, 1, ?)")
-      .run(id, BOSS_NAME,
-        "당신은 MyBot의 대장 봇입니다. 사용자의 모든 업무 지시를 받는 총괄 책임자입니다. 스스로 도구(웹검색·파일·브라우저·MCP)를 사용해 직접 수행하거나, 필요하면 전문 역할 봇들에게 분배하고 결과를 종합해 보고합니다. 이전 대화와 기억한 맥락을 바탕으로 업무의 연속성을 유지하세요.",
-        "main", "🧭", now());
+      .run(id, BOSS_NAME, BOSS_ROLE, "main", "🧭", now());
     a = db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent;
+  } else if (!a.role_prompt.includes("routine_add")) {
+    // 기존 대장 봇에 루틴 지침 추가
+    db.prepare("UPDATE agents SET role_prompt = ? WHERE id = ?").run(BOSS_ROLE, a.id);
+    a.role_prompt = BOSS_ROLE;
   }
   return a;
 }
@@ -72,9 +76,29 @@ export const BUILTIN_TOOLS = [
   { type: "function", function: { name: "read_file", description: "팀 작업 디렉터리의 파일을 읽습니다", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } },
   { type: "function", function: { name: "write_file", description: "팀 작업 디렉터리에 파일을 저장합니다", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } } },
   { type: "function", function: { name: "list_files", description: "팀 작업 디렉터리의 파일 목록", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "routine_add", description: "예약 작업(루틴)을 등록합니다. 사용자가 반복·정기 작업을 요청할 때 사용하세요. 이 봇의 담당 업무로 등록됩니다", parameters: { type: "object", properties: { name: { type: "string", description: "루틴 이름" }, prompt: { type: "string", description: "매번 실행할 작업 지시" }, schedule: { type: "string", description: "every:30m | every:Nh | daily:HH:MM" } }, required: ["name", "prompt", "schedule"] } } },
+  { type: "function", function: { name: "routine_list", description: "등록된 예약 작업 목록", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "routine_delete", description: "예약 작업 삭제 (id는 routine_list로 확인)", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } },
 ];
 
-export async function callBuiltin(name: string, args: Record<string, unknown>): Promise<string> {
+export async function callBuiltin(name: string, args: Record<string, unknown>, agentId?: string | null): Promise<string> {
+  if (name === "routine_add") {
+    const { nextRunAt } = await import("./routines");
+    const schedule = String(args.schedule ?? "");
+    if (!nextRunAt(schedule)) return `schedule 형식 오류 — every:30m, every:2h, daily:08:30 같은 형식으로 입력하세요 (받은 값: ${schedule})`;
+    const id = uid();
+    db.prepare("INSERT INTO routines (id, name, prompt, schedule, model, agent_id, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)")
+      .run(id, String(args.name ?? "루틴").slice(0, 50), String(args.prompt ?? ""), schedule, null, agentId ?? null, now());
+    return `루틴 등록됨: ${args.name} (${schedule}) — 담당 봇: ${agentId ? "이 봇" : "대장"}`;
+  }
+  if (name === "routine_list") {
+    const rows = db.prepare("SELECT r.id, r.name, r.schedule, r.enabled, a.name agent_name FROM routines r LEFT JOIN agents a ON a.id = r.agent_id ORDER BY r.created_at").all() as any[];
+    return rows.length ? rows.map((r) => `- [${r.id}] ${r.name} · ${r.schedule} · ${r.enabled ? "활성" : "비활성"} · 담당: ${r.agent_name ?? "대장"}`).join("\n") : "등록된 루틴 없음";
+  }
+  if (name === "routine_delete") {
+    db.prepare("DELETE FROM routines WHERE id = ?").run(String(args.id ?? ""));
+    return `루틴 삭제됨: ${args.id}`;
+  }
   if (name === "web_search") {
     const r = await webSearch(String(args.query ?? ""), 6);
     return r.results.length
@@ -113,7 +137,7 @@ function createAgent(t: { name?: string; role?: string; model?: string; avatar?:
   return db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent;
 }
 
-async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, signal?: AbortSignal): Promise<void> {
+export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, signal?: AbortSignal): Promise<void> {
   const { endpoint, model } = resolveModel(agent.model ?? "subagent");
   state.model = model;
   const tools: any[] = [...BUILTIN_TOOLS, ...BROWSER_TOOLS];
@@ -158,7 +182,7 @@ async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, signal?
         try {
           const args = JSON.parse(tc.arguments || "{}");
           out = builtinNames.has(tc.name)
-            ? await callBuiltin(tc.name, args)
+            ? await callBuiltin(tc.name, args, agent.id)
             : tc.name.startsWith("browser_")
               ? await browserTool(state.runId, tc.name, args)
               : await mcpCall(tc.name, args);

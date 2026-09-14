@@ -1,10 +1,8 @@
 import { Hono } from "hono";
 import { db, uid, now } from "./db";
-import { resolveModel } from "./providers";
-import { streamChat } from "./providers/openaiCompat";
 
 // 스케줄 형식: "every:30m" | "every:2h" | "daily:08:30"
-function nextRunAt(schedule: string, from = Date.now()): number | null {
+export function nextRunAt(schedule: string, from = Date.now()): number | null {
   const ev = schedule.match(/^every:(\d+)(m|h)$/);
   if (ev) return from + Number(ev[1]) * (ev[2] === "h" ? 3600_000 : 60_000);
   const d = schedule.match(/^daily:(\d{1,2}):(\d{2})$/);
@@ -18,27 +16,31 @@ function nextRunAt(schedule: string, from = Date.now()): number | null {
 }
 
 export async function runRoutine(r: any): Promise<string> {
-  // 루틴이 특정 봇에 배정된 경우 그 봇의 역할·모델로 실행 (봇의 상주 업무)
-  const agent = r.agent_id
-    ? (db.prepare("SELECT * FROM agents WHERE id = ?").get(r.agent_id) as any)
-    : null;
-  const useModel = agent?.model ?? r.model ?? "main";
-  const { endpoint, model } = resolveModel(useModel);
-  const messages = agent
-    ? [
-        { role: "system" as const, content: `당신은 "${agent.name}" 에이전트입니다. 역할: ${agent.role_prompt}\n예약된 정기 업무를 수행하고 결과를 보고하세요.` },
-        { role: "user" as const, content: r.prompt },
-      ]
-    : [{ role: "user" as const, content: r.prompt }];
-  let out = "";
-  for await (const ev of streamChat(endpoint, model, messages, { signal: AbortSignal.timeout(300_000) })) {
-    if (ev.type === "content") out += ev.text ?? "";
-  }
+  // 모든 루틴은 봇 세션으로 실행 — 담당 봇, 없으면 대장 봇. 봇의 도구(검색/브라우저/파일/MCP) 사용 가능
+  const { ensureBossAgent, getAgent, runAgent } = await import("./team");
+  type TeamAgentState = import("./team").TeamAgentState;
+  const agent = (r.agent_id ? getAgent(r.agent_id) : null) ?? ensureBossAgent();
+  const useModel = agent.model ?? r.model ?? "main";
+
+  const runId = uid();
+  db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, NULL, ?, 'running', ?)")
+    .run(runId, agent.id, `[루틴] ${r.name}: ${r.prompt}`, now());
+  const state: TeamAgentState = {
+    id: agent.id, runId,
+    name: agent.name, avatar: agent.avatar ?? "🤖",
+    role: agent.role_prompt, task: `예약된 정기 업무입니다. 수행하고 결과를 보고하세요.\n\n${r.prompt}`,
+    model: useModel, status: "running", steps: 0,
+  };
+  await runAgent(state, agent, () => {}, AbortSignal.timeout(300_000));
+  db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, finished_at = ? WHERE id = ?")
+    .run(state.status, state.result ?? null, state.steps, now(), runId);
+  const out = state.result ?? "(결과 없음)";
+
   // 결과를 대화로 저장
   const convId = uid();
   const t = now();
-  const title = `⏰ ${agent ? `${agent.avatar ?? "🤖"} ${agent.name} · ` : ""}${r.name}`;
-  db.prepare("INSERT INTO conversations (id, title, model, mode, created_at, updated_at) VALUES (?, ?, ?, 'routine', ?, ?)").run(convId, title, useModel, t, t);
+  const title = `⏰ ${agent.avatar ?? "🤖"} ${agent.name} · ${r.name}`;
+  db.prepare("INSERT INTO conversations (id, title, model, mode, agent_id, created_at, updated_at) VALUES (?, ?, ?, 'routine', ?, ?, ?)").run(convId, title, useModel, agent.id, t, t);
   const uId = uid();
   db.prepare("INSERT INTO messages (id, conversation_id, parent_id, role, content, created_at) VALUES (?, ?, NULL, 'user', ?, ?)").run(uId, convId, `[루틴] ${r.prompt}`, t);
   db.prepare("INSERT INTO messages (id, conversation_id, parent_id, role, content, model, created_at) VALUES (?, ?, ?, 'assistant', ?, ?, ?)").run(uid(), convId, uId, out, useModel, t);
