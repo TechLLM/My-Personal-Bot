@@ -37,6 +37,7 @@ export function Composer({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [listening, setListening] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
+  const composing = useRef(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const recogRef = useRef<any>(null);
 
@@ -138,8 +139,16 @@ export function Composer({
         rows={1}
         placeholder={mode === "deepsearch" ? "DeepSearch: 웹을 뒤져 종합 리포트 생성…" : mode === "image" ? "생성할 이미지를 설명하세요…" : mode === "team" ? "팀 모드: 대장 봇이 역할 봇들에게 작업을 분배합니다…" : "무엇이든 물어보세요"}
         value={text}
+        onCompositionStart={() => (composing.current = true)}
+        onCompositionEnd={(e) => {
+          composing.current = false;
+          setText(e.currentTarget.value);
+          e.currentTarget.style.height = "auto";
+          e.currentTarget.style.height = Math.min(e.currentTarget.scrollHeight, 192) + "px";
+        }}
         onChange={(e) => {
-          setText(e.target.value);
+          setText(e.target.value); // 항상 동기화 — React가 조합 중 value를 유지
+          if (composing.current) return; // IME 조합 중 DOM 높이 조작은 자모 분리를 유발 — 건너뜀
           e.target.style.height = "auto";
           e.target.style.height = Math.min(e.target.scrollHeight, 192) + "px";
         }}

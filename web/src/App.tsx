@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, streamChat, runTeam, mybotFetch, type Conversation, type Endpoint, type Message, type Model, type TeamPlanTask } from "./api";
+import { api, streamChat, runTeam, mybotFetch, type Agent, type Conversation, type Endpoint, type Message, type Model, type TeamPlanTask } from "./api";
 import { Sidebar } from "./components/Sidebar";
 import { Composer, type Mode, type Persona } from "./components/Composer";
 import { MessageItem } from "./components/MessageItem";
 import { SearchTrace, type SearchEvent } from "./components/SearchTrace";
 import { TeamTrace, type TeamEvent } from "./components/TeamTrace";
 import { SettingsModal } from "./components/SettingsModal";
-import { Menu } from "lucide-react";
+import { BotLobby } from "./components/BotLobby";
+import { Menu, Crown } from "lucide-react";
 import { AgentIcon } from "./components/icons";
 
 export default function App() {
@@ -26,11 +27,21 @@ export default function App() {
   const [teamEvents, setTeamEvents] = useState<TeamEvent[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [routineAgentIds, setRoutineAgentIds] = useState<Set<string>>(new Set());
+  const [pendingAgent, setPendingAgent] = useState<Agent | null>(null); // 새 대화를 담당할 봇 (첫 전송 시 귀속)
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const refreshConversations = useCallback(() => {
     api.conversations().then((d) => setConversations(d.conversations));
+  }, []);
+
+  const refreshAgents = useCallback(() => {
+    api.agents().then((d) => setAgents(d.agents)).catch(() => {});
+    mybotFetch("/api/routines").then((r) => r.json())
+      .then((d) => setRoutineAgentIds(new Set<string>((d.routines ?? []).filter((r: any) => r.enabled && r.agent_id).map((r: any) => r.agent_id))))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -47,7 +58,8 @@ export default function App() {
     mybotFetch("/api/workspaces").then((r) => r.json()).then((d) => setWorkspaces(d.workspaces)).catch(() => {});
     mybotFetch("/api/skills").then((r) => r.json()).then((d) => setSkills(d.skills)).catch(() => {});
     refreshConversations();
-  }, [refreshConversations]);
+    refreshAgents();
+  }, [refreshConversations, refreshAgents]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
@@ -55,6 +67,7 @@ export default function App() {
 
   const loadConversation = useCallback((id: string) => {
     setConvId(id);
+    setPendingAgent(null);
     api.conversation(id).then((d) => {
       setMessages(d.messages);
       if (d.conversation.model) setModel(d.conversation.model);
@@ -63,6 +76,7 @@ export default function App() {
 
   const newConversation = useCallback(() => {
     setConvId(null);
+    setPendingAgent(null);
     setMessages([]);
     setSearchEvents([]);
     setTeamEvents([]);
@@ -81,10 +95,10 @@ export default function App() {
     abortRef.current = abort;
 
     streamChat(
-      { conversationId: convId ?? undefined, content: text, model, mode, attachments, personaId, workspaceId: workspaceId || undefined },
+      { conversationId: convId ?? undefined, content: text, model, mode, attachments, personaId, workspaceId: workspaceId || undefined, agentId: convId ? undefined : pendingAgent?.id },
       {
         onConversation: (id) => {
-          if (!convId) setConvId(id);
+          if (!convId) { setConvId(id); setPendingAgent(null); }
         },
         onUserMessage: (m) => setMessages((prev) => [...prev, m]),
         onAssistantMessage: (m) => setMessages((prev) => [...prev, m]),
@@ -95,6 +109,7 @@ export default function App() {
         onDone: (m) => {
           patchMessage(m.id, m);
           setStreaming(false);
+          refreshAgents(); // 봇이 새 봇을 만들었을 수 있음
         },
         onTitle: (conv) => {
           setConversations((prev) => {
@@ -128,7 +143,7 @@ export default function App() {
       }
       setStreaming(false);
     });
-  }, [convId, model, streaming, patchMessage, refreshConversations]);
+  }, [convId, model, streaming, patchMessage, refreshConversations, refreshAgents, pendingAgent]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -262,8 +277,15 @@ export default function App() {
         <header className="flex items-center gap-2 border-b border-zinc-800/60 px-4 py-2.5">
           <button className="text-zinc-500 hover:text-zinc-200" onClick={() => setSidebarOpen(!sidebarOpen)}><Menu size={16} strokeWidth={1.8} /></button>
           <span className="text-sm text-zinc-400 truncate">
-            {convId ? conversations.find((c) => c.id === convId)?.title ?? "대화" : "새 대화"}
+            {convId ? conversations.find((c) => c.id === convId)?.title ?? "대화" : pendingAgent ? `${pendingAgent.name}와의 새 대화` : "봇 선택"}
           </span>
+          {!convId && pendingAgent && (
+            <span className="flex shrink-0 items-center gap-1 rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-400">
+              {!!pendingAgent.is_boss && <Crown size={10} className="text-amber-400" />}
+              <AgentIcon name={pendingAgent.name} size={11} /> {pendingAgent.name}
+              <button className="ml-0.5 text-zinc-600 hover:text-zinc-300" onClick={() => setPendingAgent(null)}>×</button>
+            </span>
+          )}
           {convId && conversations.find((c) => c.id === convId)?.agent_name && (
             <span className="flex shrink-0 items-center gap-1 rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-400" title="이 대화를 담당하는 봇 — 모델을 바꿔도 봇의 기억·맥락은 유지됩니다">
               <AgentIcon name={conversations.find((c) => c.id === convId)?.agent_name} size={11} /> {conversations.find((c) => c.id === convId)?.agent_name}
@@ -273,21 +295,17 @@ export default function App() {
 
         <div ref={scrollRef} className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-3xl px-4 py-6">
-            {empty && (
-              <div className="mt-[20vh] text-center">
-                <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-zinc-100 text-2xl font-bold text-zinc-900">M</div>
-                <h1 className="text-xl font-semibold text-zinc-200">무엇이든 물어보세요</h1>
-                <p className="mt-2 text-sm text-zinc-500">
-                  {models.length ? `${models.length}개 모델 연결됨 · DeepSearch·Think·이미지 지원` : "모델 엔드포인트를 확인하세요"}
-                </p>
-                <div className="mt-6 grid grid-cols-2 gap-2 max-w-lg mx-auto text-left">
-                  {["오늘 주요 뉴스를 DeepSearch로 요약해줘", "이 코드의 시간복잡도를 분석해줘", "한국어 시를 하나 지어줘", "최신 LLM 동향을 조사해줘"].map((s) => (
-                    <button key={s} onClick={() => send(s, s.includes("DeepSearch") || s.includes("조사") ? "deepsearch" : "auto", [])}
-                      className="rounded-xl border border-zinc-800 px-3 py-2.5 text-xs text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200 text-left">
-                      {s}
-                    </button>
-                  ))}
+            {empty && !pendingAgent && (
+              <BotLobby agents={agents} models={models} routineAgentIds={routineAgentIds} onSelect={setPendingAgent} onRefresh={refreshAgents} />
+            )}
+            {empty && pendingAgent && (
+              <div className="mt-[25vh] text-center">
+                <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-zinc-800 text-zinc-300">
+                  <AgentIcon name={pendingAgent.name} size={22} />
                 </div>
+                <h1 className="text-lg font-semibold text-zinc-200">{pendingAgent.name}</h1>
+                <p className="mt-1 text-xs text-zinc-500 max-w-md mx-auto">{pendingAgent.role_prompt || "이 봇에게 업무를 지시하세요"}</p>
+                <p className="mt-0.5 font-mono text-[10px] text-zinc-600">{pendingAgent.model_label ?? pendingAgent.model}</p>
               </div>
             )}
             <div className="space-y-6">
