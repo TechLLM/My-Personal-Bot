@@ -1,0 +1,103 @@
+import { Database } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+
+const DATA_DIR = join(import.meta.dir, "..", "data");
+mkdirSync(DATA_DIR, { recursive: true });
+
+export const db = new Database(join(DATA_DIR, "mybot.db"), { create: true });
+db.exec("PRAGMA journal_mode = WAL");
+db.exec("PRAGMA foreign_keys = ON");
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS conversations (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL DEFAULT '새 대화',
+  model TEXT,
+  persona_id TEXT,
+  workspace_id TEXT,
+  mode TEXT NOT NULL DEFAULT 'auto',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  parent_id TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  reasoning TEXT,
+  model TEXT,
+  search_meta TEXT,
+  tokens_in INTEGER,
+  tokens_out INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, created_at);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS personas (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  prompt TEXT NOT NULL DEFAULT '',
+  avatar TEXT,
+  builtin INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS memories (
+  id TEXT PRIMARY KEY,
+  content TEXT NOT NULL,
+  source_conversation_id TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workspaces (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  instructions TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS routines (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  schedule TEXT NOT NULL,
+  model TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_run_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS files (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT,
+  conversation_id TEXT,
+  name TEXT NOT NULL,
+  mime TEXT,
+  path TEXT NOT NULL,
+  size INTEGER,
+  created_at INTEGER NOT NULL
+);
+`);
+
+try { db.exec("ALTER TABLE messages ADD COLUMN attachments TEXT"); } catch {}
+
+export function getSetting(key: string): string | null {
+  const row = db.query("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | null;
+  return row?.value ?? null;
+}
+
+export function setSetting(key: string, value: string) {
+  db.query("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
+}
+
+export const uid = () => crypto.randomUUID().replaceAll("-", "").slice(0, 16);
+export const now = () => Date.now();

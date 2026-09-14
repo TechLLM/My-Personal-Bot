@@ -1,0 +1,20 @@
+{
+  "name": "mybot",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun scripts/dev.ts",
+    "dev:server": "bun run --hot server/src/index.ts",
+    "dev:web": "bun --cwd web run dev",
+    "build": "bun --cwd web run build",
+    "start": "bun server/src/index.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "hono": "^4.9.0"
+  },
+  "devDependencies": {
+    "bun-types": "^1.4.2"
+  }
+}

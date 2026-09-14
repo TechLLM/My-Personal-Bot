@@ -1,0 +1,39 @@
+@import "tailwindcss";
+@import "highlight.js/styles/github-dark.css";
+
+html, body, #root { height: 100%; }
+body { background: #09090b; color: #e4e4e7; }
+
+.markdown pre {
+  background: #18181b;
+  border: 1px solid #27272a;
+  border-radius: 0.5rem;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+  font-size: 0.85rem;
+}
+.markdown code:not(pre code) {
+  background: #27272a;
+  border-radius: 0.25rem;
+  padding: 0.1rem 0.3rem;
+  font-size: 0.85em;
+}
+.markdown p { margin: 0.5rem 0; }
+.markdown ul, .markdown ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+.markdown ul { list-style: disc; }
+.markdown ol { list-style: decimal; }
+.markdown h1, .markdown h2, .markdown h3 { font-weight: 600; margin: 1rem 0 0.5rem; }
+.markdown h1 { font-size: 1.4rem; }
+.markdown h2 { font-size: 1.2rem; }
+.markdown h3 { font-size: 1.05rem; }
+.markdown table { border-collapse: collapse; margin: 0.75rem 0; }
+.markdown th, .markdown td { border: 1px solid #3f3f46; padding: 0.35rem 0.75rem; }
+.markdown blockquote { border-left: 3px solid #3f3f46; padding-left: 1rem; color: #a1a1aa; margin: 0.5rem 0; }
+.markdown a { color: #7dd3fc; text-decoration: underline; }
+
+@keyframes pulse-soft { 0%,100% { opacity: 1 } 50% { opacity: 0.4 } }
+.thinking-dot { animation: pulse-soft 1.2s ease-in-out infinite; }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
