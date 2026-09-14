@@ -8,7 +8,7 @@ import { mkdirSync } from "node:fs";
 // - 프로필 디렉터리 영속 → 사용자가 한 번 로그인하면 봇이 세션 재사용
 // - 봇별 탭(page) 격리 = ego의 "Space"에 해당
 
-const PROFILE_DIR = join(import.meta.dir, "..", "..", "data", "browser-profile");
+const PROFILE_DIR = join(import.meta.dir, "..", "data", "browser-profile");
 mkdirSync(PROFILE_DIR, { recursive: true });
 
 // 자동화 탐지 신호 제거 스크립트

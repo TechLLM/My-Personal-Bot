@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 
 // 에이전트 공용 작업 디렉터리 — 파일 도구는 여기로 샌드박스
-const WORK_DIR = join(import.meta.dir, "..", "..", "data", "workspace");
+const WORK_DIR = join(import.meta.dir, "..", "data", "workspace");
 mkdirSync(WORK_DIR, { recursive: true });
 
 export interface Agent {
