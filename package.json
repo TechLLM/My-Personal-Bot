@@ -12,7 +12,8 @@
     "test": "bun test"
   },
   "dependencies": {
-    "hono": "^4.9.0"
+    "hono": "^4.9.0",
+    "playwright": "^1.63.0"
   },
   "devDependencies": {
     "bun-types": "^1.4.2"

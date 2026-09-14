@@ -27,6 +27,7 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
   const [aRole, setARole] = useState("");
   const [aModel, setAModel] = useState("");
   const [rAgent, setRAgent] = useState("");
+  const [brUrl, setBrUrl] = useState("");
 
   const load = () => {
     mybotFetch("/api/settings").then((r) => r.json()).then((d) => { setS(d.settings); setMemories(d.memories); setPersonas(d.personas); });
@@ -254,6 +255,30 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
               if (!aName.trim()) return;
               api.addAgent({ name: aName, role_prompt: aRole, model: aModel || undefined, avatar: aAvatar }).then(() => { setAName(""); setARole(""); setAModel(""); load(); });
             }}>봇 추가</button>
+          </div>
+        </section>
+
+        <section className="mb-5">
+          <h3 className="mb-2 text-xs font-semibold text-zinc-400 uppercase">브라우저 (봇이 사용)</h3>
+          <p className="mb-2 text-[11px] text-zinc-600">
+            팀 모드 봇이 쓰는 내장 Chromium입니다. "열기"를 누르면 맥미니 화면에 창이 뜨니,
+            거기서 x.com 등에 한 번 로그인해 두면 봇이 그 세션을 그대로 사용합니다.
+          </p>
+          <div className="flex gap-1.5">
+            <input
+              className="flex-1 rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none"
+              placeholder="열 URL (기본 x.com)"
+              value={brUrl}
+              onChange={(e) => setBrUrl(e.target.value)}
+            />
+            <button
+              className="rounded-lg bg-zinc-100 px-2.5 py-1 text-xs font-medium text-zinc-900"
+              onClick={() => mybotFetch("/api/browser/open", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: brUrl || "https://x.com" }) })}
+            >로그인 창 열기</button>
+            <button
+              className="rounded-lg bg-zinc-800 px-2.5 py-1 text-xs text-zinc-400"
+              onClick={() => mybotFetch("/api/browser/close", { method: "POST" })}
+            >닫기</button>
           </div>
         </section>
 

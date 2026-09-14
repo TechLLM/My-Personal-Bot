@@ -5,6 +5,7 @@ import { resolveModel } from "./providers";
 import { chatOnce } from "./providers/openaiCompat";
 import { webSearch } from "./search";
 import { mcpConfigured, mcpTools, mcpCall } from "./mcp";
+import { BROWSER_TOOLS, browserTool, closeAgentPage } from "./browser";
 import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 
@@ -92,7 +93,7 @@ function createAgent(t: { name?: string; role?: string; model?: string; avatar?:
 async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, signal?: AbortSignal): Promise<void> {
   const { endpoint, model } = resolveModel(agent.model ?? "subagent");
   state.model = model;
-  const tools: any[] = [...BUILTIN_TOOLS];
+  const tools: any[] = [...BUILTIN_TOOLS, ...BROWSER_TOOLS];
   if (mcpConfigured()) {
     try {
       for (const t of await mcpTools()) {
@@ -104,7 +105,7 @@ async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, signal?
   const messages: any[] = [
     {
       role: "system",
-      content: `당신은 팀의 전문 에이전트 "${agent.name}"입니다.\n역할: ${agent.role_prompt}\n\n지시받은 작업을 수행하세요. 필요하면 도구(web_search, 파일, MCP)를 사용하세요. 다른 에이전트와 파일로 협업할 수 있습니다(공유 작업 디렉터리). 최종 답변은 팀 리더에게 보고하는 결과 보고서로 작성하세요 — 핵심 결과와 근거를 간결하게.`,
+      content: `당신은 팀의 전문 에이전트 "${agent.name}"입니다.\n역할: ${agent.role_prompt}\n\n지시받은 작업을 수행하세요. 필요하면 도구(web_search, 브라우저, 파일, MCP)를 사용하세요. 브라우저 도구는 사용자의 로그인 세션을 공유하므로 로그인이 필요한 사이트도 열 수 있습니다. 다른 에이전트와 파일로 협업할 수 있습니다(공유 작업 디렉터리). 최종 답변은 팀 리더에게 보고하는 결과 보고서로 작성하세요 — 핵심 결과와 근거를 간결하게.`,
     },
     { role: "user", content: state.task },
   ];
@@ -123,7 +124,11 @@ async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, signal?
         let out: string;
         try {
           const args = JSON.parse(tc.arguments || "{}");
-          out = builtinNames.has(tc.name) ? await callBuiltin(tc.name, args) : await mcpCall(tc.name, args);
+          out = builtinNames.has(tc.name)
+            ? await callBuiltin(tc.name, args)
+            : tc.name.startsWith("browser_")
+              ? await browserTool(state.runId, tc.name, args)
+              : await mcpCall(tc.name, args);
         } catch (e) {
           out = `도구 오류: ${(e as Error).message}`;
         }
@@ -135,6 +140,8 @@ async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, signal?
   } catch (e) {
     state.status = "error";
     state.result = `에이전트 오류: ${(e as Error).message}`;
+  } finally {
+    closeAgentPage(state.runId).catch(() => {});
   }
 }
 

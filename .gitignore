@@ -6,3 +6,5 @@ server/data/*.db-*
 server/data/files
 .DS_Store
 *.log
+server/data/browser-profile
+server/data/workspace

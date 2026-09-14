@@ -304,29 +304,42 @@ export const chatRoute = new Hono()
             }
           }
 
-          // MCP 도구 루프: 도구 호출이 완료될 때까지 비스트림 라운드 후 최종 답변만 스트리밍
-          const { mcpConfigured, mcpTools, mcpCall } = await import("../mcp");
-          if (mcpConfigured()) {
-            const tools = await mcpTools();
-            if (tools.length) {
-              const openaiTools = tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } }));
-              const { chatOnce } = await import("../providers/openaiCompat");
-              for (let round = 0; round < 4; round++) {
-                const res = await chatOnce(endpoint, realModel, history, { signal, tools: openaiTools });
-                if (!res.toolCalls?.length) {
-                  if (res.content) history.push({ role: "assistant", content: res.content });
-                  break;
+          // 도구 루프: 브라우저(내장, 항상 제공) + MCP 도구(설정 시). 도구 호출이 완료될 때까지 비스트림 라운드 후 최종 답변만 스트리밍
+          {
+            const { mcpConfigured, mcpTools, mcpCall } = await import("../mcp");
+            const { BROWSER_TOOLS, browserTool, closeAgentPage } = await import("../browser");
+            const openaiTools: any[] = [...BROWSER_TOOLS];
+            if (mcpConfigured()) {
+              const tools = await mcpTools();
+              openaiTools.push(...tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } })));
+            }
+            const { chatOnce } = await import("../providers/openaiCompat");
+            const browserKey = `${convId}:${asstMsg.id}`;
+            let browserUsed = false;
+            for (let round = 0; round < 4; round++) {
+              const res = await chatOnce(endpoint, realModel, history, { signal, tools: openaiTools });
+              if (!res.toolCalls?.length) {
+                if (res.content) history.push({ role: "assistant", content: res.content });
+                break;
+              }
+              history.push({ role: "assistant", content: res.content || "", tool_calls: res.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })) } as any);
+              for (const tc of res.toolCalls) {
+                send("search", { type: "read", title: `🔧 ${tc.name}`, url: "" });
+                let out: string;
+                try {
+                  if (tc.name.startsWith("browser_")) {
+                    browserUsed = true;
+                    out = await browserTool(browserKey, tc.name, JSON.parse(tc.arguments || "{}"));
+                  } else {
+                    out = await mcpCall(tc.name, JSON.parse(tc.arguments || "{}"));
+                  }
+                } catch (e) {
+                  out = `도구 오류: ${(e as Error).message}`;
                 }
-                history.push({ role: "assistant", content: res.content || "", tool_calls: res.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })) } as any);
-                for (const tc of res.toolCalls) {
-                  send("search", { type: "read", title: `🔧 ${tc.name}`, url: "" });
-                  let out: string;
-                  try { out = await mcpCall(tc.name, JSON.parse(tc.arguments || "{}")); }
-                  catch { out = "도구 인자 파싱 실패"; }
-                  history.push({ role: "tool", tool_call_id: tc.id, content: String(out).slice(0, 8000) } as any);
-                }
+                history.push({ role: "tool", tool_call_id: tc.id, content: String(out).slice(0, 8000) } as any);
               }
             }
+            if (browserUsed) closeAgentPage(browserKey).catch(() => {});
           }
 
           for await (const ev of streamChat(endpoint, realModel, history, { signal })) {
