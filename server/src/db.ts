@@ -86,6 +86,30 @@ CREATE TABLE IF NOT EXISTS files (
   size INTEGER,
   created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS agents (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  role_prompt TEXT NOT NULL DEFAULT '',
+  model TEXT,
+  avatar TEXT,
+  tools TEXT,
+  persistent INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT,
+  conversation_id TEXT,
+  task TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'running',
+  result TEXT,
+  steps INTEGER,
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_agent ON agent_runs(agent_id, created_at);
 `);
 
 try { db.exec("ALTER TABLE messages ADD COLUMN attachments TEXT"); } catch {}

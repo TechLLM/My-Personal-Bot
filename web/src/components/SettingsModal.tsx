@@ -21,12 +21,18 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
   const [rName, setRName] = useState("");
   const [rPrompt, setRPrompt] = useState("");
   const [rSched, setRSched] = useState("daily:08:00");
+  const [agents, setAgents] = useState<any[]>([]);
+  const [aName, setAName] = useState("");
+  const [aAvatar, setAAvatar] = useState("🤖");
+  const [aRole, setARole] = useState("");
+  const [aModel, setAModel] = useState("");
 
   const load = () => {
     mybotFetch("/api/settings").then((r) => r.json()).then((d) => { setS(d.settings); setMemories(d.memories); setPersonas(d.personas); });
     mybotFetch("/api/workspaces").then((r) => r.json()).then((d) => setWorkspaces(d.workspaces));
     mybotFetch("/api/skills").then((r) => r.json()).then((d) => setSkills(d.skills));
     mybotFetch("/api/routines").then((r) => r.json()).then((d) => setRoutines(d.routines));
+    mybotFetch("/api/agents").then((r) => r.json()).then((d) => setAgents(d.agents));
   };
   useEffect(() => { load(); }, []);
 
@@ -210,6 +216,34 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
               if (!rName.trim() || !rPrompt.trim()) return;
               mybotFetch("/api/routines", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: rName, prompt: rPrompt, schedule: rSched }) }).then(() => { setRName(""); setRPrompt(""); load(); });
             }}>루틴 추가</button>
+          </div>
+        </section>
+
+        <section className="mb-5">
+          <h3 className="mb-2 text-xs font-semibold text-zinc-400 uppercase">에이전트 봇 (팀 모드)</h3>
+          <p className="mb-2 text-[11px] text-zinc-600">입력창의 "팀" 칩을 켜면 대장 봇이 작업을 분해해 아래 봇들에게 분배합니다. 여기 만든 봇은 계속 유지되며, 대장이 새 봇을 만들면 자동으로 추가됩니다.</p>
+          {agents.map((a) => (
+            <div key={a.id} className="mb-1 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs">
+              <div className="flex items-center gap-2">
+                <span>{a.avatar} {a.name}</span>
+                <span className="text-zinc-600 font-mono text-[10px]">{a.model ?? "subagent"}</span>
+                <button className="ml-auto text-zinc-600 hover:text-red-400" onClick={() => mybotFetch(`/api/agents/${a.id}`, { method: "DELETE" }).then(load)}>삭제</button>
+              </div>
+              <div className="mt-0.5 truncate text-zinc-500">{a.role_prompt}</div>
+            </div>
+          ))}
+          {!agents.length && <p className="text-xs text-zinc-600">아직 봇이 없습니다 — 팀 모드로 지시하면 대장이 자동 생성합니다</p>}
+          <div className="mt-2 space-y-1.5">
+            <div className="flex gap-1.5">
+              <input className="w-12 rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none" placeholder="🤖" value={aAvatar} onChange={(e) => setAAvatar(e.target.value)} />
+              <input className="flex-1 rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none" placeholder="봇 이름 (예: 리서치봇)" value={aName} onChange={(e) => setAName(e.target.value)} />
+              <input className="w-28 rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none" placeholder="모델(기본 subagent)" value={aModel} onChange={(e) => setAModel(e.target.value)} />
+            </div>
+            <textarea className="w-full rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none" rows={2} placeholder="역할 지침 (예: 웹 검색으로 자료를 수집하고 출처를 정리한다)" value={aRole} onChange={(e) => setARole(e.target.value)} />
+            <button className="rounded-lg bg-zinc-100 px-2.5 py-1 text-xs font-medium text-zinc-900" onClick={() => {
+              if (!aName.trim()) return;
+              api.addAgent({ name: aName, role_prompt: aRole, model: aModel || undefined, avatar: aAvatar }).then(() => { setAName(""); setARole(""); setAModel(""); load(); });
+            }}>봇 추가</button>
           </div>
         </section>
 

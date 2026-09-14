@@ -5,9 +5,11 @@ import rehypeHighlight from "rehype-highlight";
 import type { Message } from "../api";
 
 interface SearchMeta {
-  queries: string[];
-  sources: { url: string; title: string }[];
-  steps: number;
+  type?: string;
+  queries?: string[];
+  sources?: { url: string; title: string }[];
+  steps?: number;
+  agents?: { name: string; avatar: string; role: string; task: string; model: string; status: string; result?: string }[];
 }
 
 export function MessageItem({
@@ -105,11 +107,25 @@ export function MessageItem({
           <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{m.content}</ReactMarkdown>
         </div>
       )}
-      {meta && meta.sources.length > 0 && (
+      {meta?.type === "team" && meta.agents && (
+        <div className="mt-1 rounded-xl border border-amber-900/40 bg-amber-950/20 px-3 py-2">
+          <div className="text-xs font-medium text-amber-300/90 mb-1">🤖 팀 작업 — 봇 {meta.agents.length}개</div>
+          <div className="space-y-1 text-xs text-zinc-500">
+            {meta.agents.map((a, i) => (
+              <div key={i}>
+                <span className={a.status === "done" ? "text-emerald-400" : "text-red-400"}>●</span>{" "}
+                {a.avatar} <span className="text-zinc-300">{a.name}</span>
+                <span className="text-zinc-600"> — {a.task.slice(0, 60)}{a.task.length > 60 ? "…" : ""}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {meta && meta.type !== "team" && (meta.sources?.length ?? 0) > 0 && (
         <div className="mt-1 rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 py-2">
-          <div className="text-xs font-medium text-zinc-400 mb-1">출처 {meta.sources.length}개 · 검색 {meta.steps}회</div>
+          <div className="text-xs font-medium text-zinc-400 mb-1">출처 {meta.sources!.length}개 · 검색 {meta.steps}회</div>
           <ol className="text-xs text-zinc-500 space-y-0.5">
-            {meta.sources.map((s, i) => (
+            {meta.sources!.map((s, i) => (
               <li key={i}>
                 <a href={s.url} target="_blank" rel="noreferrer" className="hover:text-sky-400">
                   [{i + 1}] {s.title}

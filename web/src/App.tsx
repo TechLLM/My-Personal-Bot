@@ -4,6 +4,7 @@ import { Sidebar } from "./components/Sidebar";
 import { Composer, type Mode, type Persona } from "./components/Composer";
 import { MessageItem } from "./components/MessageItem";
 import { SearchTrace, type SearchEvent } from "./components/SearchTrace";
+import { TeamTrace, type TeamEvent } from "./components/TeamTrace";
 import { SettingsModal } from "./components/SettingsModal";
 
 export default function App() {
@@ -20,6 +21,7 @@ export default function App() {
   const [model, setModel] = useState<string>("main");
   const [streaming, setStreaming] = useState(false);
   const [searchEvents, setSearchEvents] = useState<SearchEvent[]>([]);
+  const [teamEvents, setTeamEvents] = useState<TeamEvent[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -61,6 +63,7 @@ export default function App() {
     setConvId(null);
     setMessages([]);
     setSearchEvents([]);
+    setTeamEvents([]);
   }, []);
 
   const patchMessage = useCallback((id: string, patch: Partial<Message>) => {
@@ -71,6 +74,7 @@ export default function App() {
     if (streaming) return;
     setStreaming(true);
     setSearchEvents([]);
+    setTeamEvents([]);
     const abort = new AbortController();
     abortRef.current = abort;
 
@@ -85,6 +89,7 @@ export default function App() {
         onDelta: (id, t) => setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, content: m.content + t } : m))),
         onReasoning: (id, t) => setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, reasoning: (m.reasoning ?? "") + t } : m))),
         onSearch: (ev) => setSearchEvents((prev) => [...prev, ev]),
+        onTeam: (ev) => setTeamEvents((prev) => [...prev, ev]),
         onDone: (m) => {
           patchMessage(m.id, m);
           setStreaming(false);
@@ -252,6 +257,9 @@ export default function App() {
               ))}
               {searchEvents.length > 0 && (
                 <SearchTrace events={searchEvents} done={!streaming} />
+              )}
+              {teamEvents.length > 0 && (
+                <TeamTrace events={teamEvents} done={!streaming} />
               )}
             </div>
           </div>

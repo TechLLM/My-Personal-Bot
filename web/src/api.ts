@@ -80,7 +80,21 @@ export const api = {
   addEndpoint: (ep: { id: string; name?: string; baseUrl: string; apiKey?: string }) =>
     mybotFetch("/api/models/endpoints", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(ep) }).then(j),
   deleteEndpoint: (id: string) => mybotFetch(`/api/models/endpoints/${id}`, { method: "DELETE" }).then(j),
+  agents: () => mybotFetch("/api/agents").then(j) as Promise<{ agents: Agent[] }>,
+  addAgent: (a: { name: string; role_prompt: string; model?: string; avatar?: string }) =>
+    mybotFetch("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(a) }).then(j),
+  deleteAgent: (id: string) => mybotFetch(`/api/agents/${id}`, { method: "DELETE" }).then(j),
 };
+
+export interface Agent {
+  id: string;
+  name: string;
+  role_prompt: string;
+  model: string | null;
+  avatar: string | null;
+  persistent: number;
+  created_at: number;
+}
 
 export interface StreamHandlers {
   onConversation?: (id: string) => void;
@@ -89,6 +103,7 @@ export interface StreamHandlers {
   onDelta?: (id: string, text: string) => void;
   onReasoning?: (id: string, text: string) => void;
   onSearch?: (ev: any) => void;
+  onTeam?: (ev: any) => void;
   onDone?: (m: Message) => void;
   onTitle?: (conv: Conversation) => void;
   onError?: (msg: string) => void;
@@ -131,6 +146,7 @@ export async function streamChat(
           case "delta": handlers.onDelta?.(data.id, data.text); break;
           case "reasoning": handlers.onReasoning?.(data.id, data.text); break;
           case "search": handlers.onSearch?.(data); break;
+          case "team": handlers.onTeam?.(data); break;
           case "done": handlers.onDone?.(data.message); break;
           case "title": handlers.onTitle?.(data.conversation); break;
           case "error": handlers.onError?.(data.message); break;
