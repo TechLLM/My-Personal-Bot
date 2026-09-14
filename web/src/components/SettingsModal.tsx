@@ -46,9 +46,21 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
   };
   useEffect(() => { load(); }, []);
 
-  const save = (patch: Record<string, string>) => {
+  const [dirty, setDirty] = useState(false);
+  const [savedMsg, setSavedMsg] = useState("");
+
+  // 입력은 로컬 상태만 변경 — "저장" 버튼을 눌러야 서버에 반영
+  const update = (patch: Record<string, string>) => {
     setS((p) => ({ ...p, ...patch }));
-    mybotFetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+    setDirty(true);
+  };
+
+  const saveAll = () => {
+    mybotFetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(s) })
+      .then((r) => {
+        if (r.ok) { setDirty(false); setSavedMsg("✓ 저장됨"); setTimeout(() => setSavedMsg(""), 1500); }
+        else setSavedMsg("저장 실패");
+      });
   };
 
   const Field = ({ k, label, ph }: { k: string; label: string; ph?: string }) => (
@@ -58,14 +70,13 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
         className="mt-1 w-full rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs outline-none"
         value={s[k] ?? ""}
         placeholder={ph}
-        onChange={(e) => setS({ ...s, [k]: e.target.value })}
-        onBlur={() => save({ [k]: s[k] ?? "" })}
+        onChange={(e) => update({ [k]: e.target.value })}
       />
     </label>
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <div className="w-full max-w-lg max-h-[85vh] overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-950 p-5" onClick={(e) => e.stopPropagation()}>
         <div className="mb-4 flex items-center justify-between">
           <h2 className="font-semibold">설정</h2>
@@ -100,7 +111,7 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
           <select
             className="w-full rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs outline-none"
             value={s.search_provider ?? "auto"}
-            onChange={(e) => save({ search_provider: e.target.value })}
+            onChange={(e) => update({ search_provider: e.target.value })}
           >
             <option value="auto">자동 (설정된 것 우선, 없으면 Bing)</option>
             <option value="searxng">SearXNG (셀프호스트)</option>
@@ -126,8 +137,7 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
           <textarea
             className="w-full rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs outline-none" rows={3}
             value={s.system_prompt ?? ""}
-            onChange={(e) => setS({ ...s, system_prompt: e.target.value })}
-            onBlur={() => save({ system_prompt: s.system_prompt ?? "" })}
+            onChange={(e) => update({ system_prompt: e.target.value })}
           />
         </section>
 
@@ -270,13 +280,13 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
           <h3 className="text-xs font-semibold text-zinc-400 uppercase">결과 알림</h3>
           <p className="text-[11px] text-zinc-600">기본은 채팅창에만 표시됩니다. 체크한 채널로 답변·루틴 결과를 함께 받습니다.</p>
           <label className="flex items-center gap-2 text-xs text-zinc-400">
-            <input type="checkbox" checked={s.notify_telegram === "1"} onChange={(e) => save({ notify_telegram: e.target.checked ? "1" : "0" })} />
+            <input type="checkbox" checked={s.notify_telegram === "1"} onChange={(e) => update({ notify_telegram: e.target.checked ? "1" : "0" })} />
             답변을 텔레그램으로도 받기
           </label>
           <Field k="telegram_bot_token" label="텔레그램 봇 토큰" ph="@BotFather에서 발급 (123456:ABC…)" />
           <Field k="telegram_chat_id" label="텔레그램 채팅 ID" ph="봇에게 말 건 뒤 getUpdates로 확인" />
           <label className="flex items-center gap-2 text-xs text-zinc-400">
-            <input type="checkbox" checked={s.notify_email === "1"} onChange={(e) => save({ notify_email: e.target.checked ? "1" : "0" })} />
+            <input type="checkbox" checked={s.notify_email === "1"} onChange={(e) => update({ notify_email: e.target.checked ? "1" : "0" })} />
             답변을 이메일로도 받기
           </label>
           <div className="grid grid-cols-2 gap-1.5">
@@ -333,7 +343,7 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
             <input
               type="checkbox"
               checked={(s.memory_enabled ?? "1") !== "0"}
-              onChange={(e) => save({ memory_enabled: e.target.checked ? "1" : "0" })}
+              onChange={(e) => update({ memory_enabled: e.target.checked ? "1" : "0" })}
             />
             대화에서 기억할 정보 자동 추출
           </label>
@@ -341,6 +351,16 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
             <Field k="access_code" label="접속 암호 (설정 시 API 전체에 필요)" ph="비워두면 LAN 개방" />
           </div>
         </section>
+
+        <div className="sticky bottom-0 -mx-5 -mb-5 mt-2 flex items-center gap-3 border-t border-zinc-800 bg-zinc-950 px-5 py-3">
+          <button
+            onClick={saveAll}
+            className="rounded-lg bg-zinc-100 px-4 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-white"
+          >저장</button>
+          {dirty && <span className="text-[11px] text-amber-400">저장되지 않은 변경 사항 있음</span>}
+          {savedMsg && <span className="text-[11px] text-emerald-400">{savedMsg}</span>}
+          <button onClick={onClose} className="ml-auto text-xs text-zinc-500 hover:text-zinc-200">닫기</button>
+        </div>
       </div>
     </div>
   );
