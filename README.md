@@ -25,7 +25,8 @@ It delivers a Grok-style chat experience without vendor lock-in — **connect an
 - **Team (Boss Bot)** — see below
 
 ### Team Mode (Multi-Agent Orchestration)
-- A boss bot analyzes your instruction and **auto-creates role bots** that work in parallel (up to 4)
+- A boss bot analyzes your instruction and **proposes a task plan** — you approve which bots run via checkboxes
+- Role bots are auto-created/reused, then work in parallel (up to 4)
 - Reuses a persistent bot only when its persona fits; otherwise creates a fresh persona
 - Bots with scheduled routines are excluded automatically — the boss spawns a different bot
 - Bot tools: web search, shared workspace file I/O, MCP tools, built-in browser
@@ -43,6 +44,7 @@ It delivers a Grok-style chat experience without vendor lock-in — **connect an
 - Skills: custom slash commands (`/summarize`, `/translate`, ...)
 - Routines: `every:30m` / `daily:HH:MM` scheduled runs → results saved as conversations (assignable to a bot)
 - Voice: browser Web Speech STT (🎤) + TTS (🔊) — zero install
+- Notifications: deliver answers & routine results via Telegram bot / SMTP email (chat window is the default)
 - MCP (Model Context Protocol) stdio server integration
 - Attachments: images (vision analysis), text files (content injection)
 - Optional access code protects the entire API

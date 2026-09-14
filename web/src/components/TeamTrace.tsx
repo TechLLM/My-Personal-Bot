@@ -15,6 +15,7 @@ export interface TeamAgentInfo {
 export interface TeamEvent {
   type: "team_planning" | "team_plan" | "agent_start" | "agent_step" | "agent_done";
   agents?: TeamAgentInfo[];
+  pending?: boolean;
   agentId?: string;
   tool?: string;
   status?: string;
@@ -25,7 +26,10 @@ export interface TeamEvent {
 export function TeamTrace({ events, done }: { events: TeamEvent[]; done: boolean }) {
   const [openResult, setOpenResult] = useState<Record<string, boolean>>({});
 
-  const plan = events.find((e) => e.type === "team_plan");
+  // 승인 대기 계획(id 없음)과 실행 계획(id 있음) 중 마지막 것을 사용
+  const plans = events.filter((e) => e.type === "team_plan");
+  const plan = plans[plans.length - 1];
+  const pending = plan?.pending === true;
   const agents = new Map<string, TeamAgentInfo & { toolLog: string[] }>();
   for (const a of plan?.agents ?? []) agents.set(a.id, { ...a, status: "waiting", toolLog: [] });
   for (const e of events) {
@@ -49,7 +53,9 @@ export function TeamTrace({ events, done }: { events: TeamEvent[]; done: boolean
       <div className="flex items-center gap-2 font-medium text-amber-300">
         <span className={!done || running ? "thinking-dot" : ""}>🤖</span>
         {list.length
-          ? done && !running ? `팀 작업 완료 — 봇 ${list.length}개` : `팀 작업 중 — 봇 ${list.length}개`
+          ? pending
+            ? `대장 봇이 계획을 세웠습니다 — 봇 ${list.length}개 (승인 대기)`
+            : done && !running ? `팀 작업 완료 — 봇 ${list.length}개` : `팀 작업 중 — 봇 ${list.length}개`
           : "대장 봇이 작업을 분해하는 중…"}
       </div>
       <div className="mt-2 space-y-2">

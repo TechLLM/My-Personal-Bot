@@ -42,6 +42,11 @@ export async function runRoutine(r: any): Promise<string> {
   const uId = uid();
   db.prepare("INSERT INTO messages (id, conversation_id, parent_id, role, content, created_at) VALUES (?, ?, NULL, 'user', ?, ?)").run(uId, convId, `[루틴] ${r.prompt}`, t);
   db.prepare("INSERT INTO messages (id, conversation_id, parent_id, role, content, model, created_at) VALUES (?, ?, ?, 'assistant', ?, ?, ?)").run(uid(), convId, uId, out, useModel, t);
+  // 루틴 결과도 설정된 알림 채널로 발송
+  if (out) {
+    const { notifyResult } = await import("./notify");
+    notifyResult(title, out);
+  }
   return out;
 }
 

@@ -13,9 +13,11 @@
   },
   "dependencies": {
     "hono": "^4.9.0",
+    "nodemailer": "^10.0.9",
     "playwright": "^1.63.0"
   },
   "devDependencies": {
+    "@types/nodemailer": "^8.0.1",
     "bun-types": "^1.4.2"
   }
 }

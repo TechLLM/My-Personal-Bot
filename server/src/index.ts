@@ -10,8 +10,9 @@ import { filesRoute } from "./routes/files";
 import { personasRoute, seedPersonas } from "./routes/personas";
 import { workspacesRoute, skillsRoute } from "./routes/workspaces";
 import { routinesRoute, startScheduler } from "./routines";
-import { agentsRoute } from "./team";
+import { agentsRoute, teamRoute } from "./team";
 import { browserRoute } from "./browser";
+import { notifyRoute } from "./notify";
 
 const PORT = Number(process.env.MYBOT_PORT ?? 5274);
 
@@ -40,6 +41,8 @@ api.route("/skills", skillsRoute);
 api.route("/routines", routinesRoute);
 api.route("/agents", agentsRoute);
 api.route("/browser", browserRoute);
+api.route("/team", teamRoute);
+api.route("/notify", notifyRoute);
 seedPersonas();
 startScheduler();
 

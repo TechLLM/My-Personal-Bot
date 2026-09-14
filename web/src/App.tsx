@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, streamChat, mybotFetch, type Conversation, type Endpoint, type Message, type Model } from "./api";
+import { api, streamChat, runTeam, mybotFetch, type Conversation, type Endpoint, type Message, type Model, type TeamPlanTask } from "./api";
 import { Sidebar } from "./components/Sidebar";
 import { Composer, type Mode, type Persona } from "./components/Composer";
 import { MessageItem } from "./components/MessageItem";
@@ -188,6 +188,45 @@ export default function App() {
     });
   }, [model, streaming]);
 
+  // 팀 계획 승인 → 선택된 봇들로 실행 (같은 assistant 메시지에 결과 스트리밍)
+  const teamConfirm = useCallback((m: Message, tasks: TeamPlanTask[]) => {
+    if (streaming) return;
+    setStreaming(true);
+    const abort = new AbortController();
+    abortRef.current = abort;
+    // 첫 델타에서 안내 문구를 답변으로 교체
+    let started = false;
+    runTeam(
+      { conversationId: m.conversation_id, messageId: m.id, tasks, model },
+      {
+        onTeam: (ev) => setTeamEvents((prev) => [...prev, ev]),
+        onDelta: (id, t) => {
+          const first = !started;
+          started = true;
+          setMessages((prev) => prev.map((x) => (x.id === id ? { ...x, content: first ? t : x.content + t } : x)));
+        },
+        onDone: (nm) => { patchMessage(nm.id, nm); setStreaming(false); },
+        onError: (msg) => {
+          setStreaming(false);
+          setMessages((prev) => [...prev, {
+            id: "err" + Date.now(), conversation_id: m.conversation_id, parent_id: null, role: "assistant",
+            content: `⚠ 오류: ${msg}`, reasoning: null, model: null, search_meta: null, attachments: null,
+            tokens_in: null, tokens_out: null, created_at: Date.now(),
+          }]);
+        },
+      },
+      abort.signal,
+    ).catch(() => setStreaming(false));
+  }, [model, streaming, patchMessage]);
+
+  // 팀 계획 취소 → 메타만 cancelled로
+  const teamCancel = useCallback((m: Message) => {
+    mybotFetch(`/api/chat/messages/${m.id}/meta`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ meta: { status: "cancelled" } }),
+    }).then((r) => r.json()).then((d) => patchMessage(m.id, d.message));
+  }, [patchMessage]);
+
   const selectSibling = useCallback((m: Message, dir: -1 | 1) => {
     // 형제 목록에서 이전/다음 선택: 부모의 자식들 중에서 이동 — 서버가 활성 경로 반환
     mybotFetch(`/api/chat/messages/${m.id}/select`, { method: "POST" }).then((r) => r.json()).then((d) => {
@@ -253,6 +292,8 @@ export default function App() {
                   onRegenerate={regenerate}
                   onEdit={editMessage}
                   onSelectSibling={selectSibling}
+                  onTeamConfirm={teamConfirm}
+                  onTeamCancel={teamCancel}
                 />
               ))}
               {searchEvents.length > 0 && (
@@ -265,7 +306,7 @@ export default function App() {
           </div>
         </div>
 
-        <div className="px-4 pb-4 pt-1">
+        <div className="px-4 pb-14 pt-1">
           <div className="mx-auto max-w-3xl">
             <Composer models={models} model={model} onModelChange={setModel} onSend={send} onStop={stop} streaming={streaming} personas={personas} personaId={personaId} onPersonaChange={setPersonaId} skills={skills} />
           </div>

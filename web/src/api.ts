@@ -109,12 +109,8 @@ export interface StreamHandlers {
   onError?: (msg: string) => void;
 }
 
-export async function streamChat(
-  body: { conversationId?: string; content?: string; model: string; mode?: string; regenerateMessageId?: string; parentMessageId?: string; attachments?: { url: string; name: string; mime: string }[]; personaId?: string; workspaceId?: string },
-  handlers: StreamHandlers,
-  signal?: AbortSignal,
-) {
-  const res = await mybotFetch("/api/chat/stream", {
+async function ssePost(url: string, body: unknown, handlers: StreamHandlers, signal?: AbortSignal) {
+  const res = await mybotFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -156,4 +152,25 @@ export async function streamChat(
       }
     }
   }
+}
+
+export function streamChat(
+  body: { conversationId?: string; content?: string; model: string; mode?: string; regenerateMessageId?: string; parentMessageId?: string; attachments?: { url: string; name: string; mime: string }[]; personaId?: string; workspaceId?: string },
+  handlers: StreamHandlers,
+  signal?: AbortSignal,
+) {
+  return ssePost("/api/chat/stream", body, handlers, signal);
+}
+
+export interface TeamPlanTask {
+  name?: string; avatar?: string; role?: string; task: string; model?: string; agent?: string; existing?: boolean;
+}
+
+// 승인된 팀 계획 실행
+export function runTeam(
+  body: { conversationId: string; messageId: string; tasks: TeamPlanTask[]; model?: string },
+  handlers: StreamHandlers,
+  signal?: AbortSignal,
+) {
+  return ssePost("/api/team/run", body, handlers, signal);
 }

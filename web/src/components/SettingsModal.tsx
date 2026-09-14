@@ -28,6 +28,14 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
   const [aModel, setAModel] = useState("");
   const [rAgent, setRAgent] = useState("");
   const [brUrl, setBrUrl] = useState("");
+  const [testMsg, setTestMsg] = useState("");
+
+  const testNotify = (channel: string) => {
+    setTestMsg("발송 중…");
+    mybotFetch("/api/notify/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channel }) })
+      .then(async (r) => setTestMsg(r.ok ? `✅ ${channel === "telegram" ? "텔레그램" : "메일"} 테스트 발송 성공` : `❌ ${(await r.json()).error}`))
+      .catch((e) => setTestMsg(`❌ ${e.message}`));
+  };
 
   const load = () => {
     mybotFetch("/api/settings").then((r) => r.json()).then((d) => { setS(d.settings); setMemories(d.memories); setPersonas(d.personas); });
@@ -255,6 +263,34 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
               if (!aName.trim()) return;
               api.addAgent({ name: aName, role_prompt: aRole, model: aModel || undefined, avatar: aAvatar }).then(() => { setAName(""); setARole(""); setAModel(""); load(); });
             }}>봇 추가</button>
+          </div>
+        </section>
+
+        <section className="mb-5 space-y-2.5">
+          <h3 className="text-xs font-semibold text-zinc-400 uppercase">결과 알림</h3>
+          <p className="text-[11px] text-zinc-600">기본은 채팅창에만 표시됩니다. 체크한 채널로 답변·루틴 결과를 함께 받습니다.</p>
+          <label className="flex items-center gap-2 text-xs text-zinc-400">
+            <input type="checkbox" checked={s.notify_telegram === "1"} onChange={(e) => save({ notify_telegram: e.target.checked ? "1" : "0" })} />
+            답변을 텔레그램으로도 받기
+          </label>
+          <Field k="telegram_bot_token" label="텔레그램 봇 토큰" ph="@BotFather에서 발급 (123456:ABC…)" />
+          <Field k="telegram_chat_id" label="텔레그램 채팅 ID" ph="봇에게 말 건 뒤 getUpdates로 확인" />
+          <label className="flex items-center gap-2 text-xs text-zinc-400">
+            <input type="checkbox" checked={s.notify_email === "1"} onChange={(e) => save({ notify_email: e.target.checked ? "1" : "0" })} />
+            답변을 이메일로도 받기
+          </label>
+          <div className="grid grid-cols-2 gap-1.5">
+            <Field k="smtp_host" label="SMTP 호스트" ph="smtp.gmail.com" />
+            <Field k="smtp_port" label="포트" ph="587 (465는 SSL)" />
+            <Field k="smtp_user" label="SMTP 계정" />
+            <Field k="smtp_pass" label="SMTP 비밀번호/앱 비밀번호" />
+            <Field k="smtp_from" label="보내는 주소(선택)" />
+            <Field k="email_to" label="받는 주소" />
+          </div>
+          <div className="flex items-center gap-2">
+            <button className="rounded-lg bg-zinc-800 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-700" onClick={() => testNotify("telegram")}>텔레그램 테스트</button>
+            <button className="rounded-lg bg-zinc-800 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-700" onClick={() => testNotify("email")}>메일 테스트</button>
+            {testMsg && <span className="text-[11px] text-zinc-500">{testMsg}</span>}
           </div>
         </section>
 

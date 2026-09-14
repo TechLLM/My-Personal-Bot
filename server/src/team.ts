@@ -2,7 +2,9 @@ import { Hono } from "hono";
 import { db, uid, now } from "./db";
 import type { Endpoint } from "./providers";
 import { resolveModel } from "./providers";
-import { chatOnce } from "./providers/openaiCompat";
+import { chatOnce, streamChat, type ChatMessage } from "./providers/openaiCompat";
+import { systemPrompt } from "./routes/chat";
+import { notifyResult } from "./notify";
 import { webSearch } from "./search";
 import { mcpConfigured, mcpTools, mcpCall } from "./mcp";
 import { BROWSER_TOOLS, browserTool, closeAgentPage } from "./browser";
@@ -145,23 +147,36 @@ async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, signal?
   }
 }
 
-// 대장 봇 오케스트레이션: 계획 → 역할 봇 병렬 실행 → 결과 반환
+// 대장 봇 계획: 작업을 하위 작업으로 분해만 함 (봇 생성·실행 전 — 사용자 승인 대기용)
 // null 반환 시 팀 불필요(일반 답변으로 진행)
-export async function orchestrateTeam(
-  endpoint: Endpoint,
-  bossModel: string,
-  task: string,
-  convId: string,
-  emit: Emit,
-  signal?: AbortSignal,
-): Promise<TeamAgentState[] | null> {
-  emit({ type: "team_planning" });
+export interface PlanTask {
+  agent?: string;   // 재사용할 기존 봇 이름
+  name?: string;
+  avatar?: string;
+  role?: string;
+  task: string;
+  model?: string;
+  existing?: boolean; // 기존 봇 재사용 여부 (정규화 후 채움)
+}
 
-  // 기존 상주 봇 목록 + 루틴 담당 중인 봇(바쁨) 표시
+function rosterInfo() {
   const existing = db.prepare("SELECT * FROM agents ORDER BY created_at").all() as Agent[];
   const busyIds = new Set(
     (db.prepare("SELECT DISTINCT agent_id FROM routines WHERE enabled = 1 AND agent_id IS NOT NULL").all() as { agent_id: string }[]).map((r) => r.agent_id),
   );
+  return { existing, busyIds };
+}
+
+export async function planTeam(
+  endpoint: Endpoint,
+  bossModel: string,
+  task: string,
+  emit: Emit,
+  signal?: AbortSignal,
+): Promise<PlanTask[] | null> {
+  emit({ type: "team_planning" });
+
+  const { existing, busyIds } = rosterInfo();
   const roster = existing.length
     ? "\n\n현재 상주 에이전트 목록:\n" + existing.map((a) =>
         `- ${a.name} (${a.avatar ?? "🤖"}) | 역할: ${a.role_prompt || "없음"} | 모델: ${a.model ?? "subagent"}${busyIds.has(a.id) ? " | [바쁨: 예약 루틴 담당 중]" : ""}`,
@@ -186,22 +201,56 @@ JSON 배열만 출력하세요. 각 항목은 둘 중 하나:
   ], { signal });
 
   const m = planRes.content.match(/\[[\s\S]*\]/);
-  let tasks: { agent?: string; name?: string; role?: string; task?: string; model?: string; avatar?: string }[] = [];
+  let tasks: PlanTask[] = [];
   try { tasks = m ? JSON.parse(m[0]) : []; } catch { tasks = []; }
   if (!Array.isArray(tasks) || !tasks.length) return null;
   tasks = tasks.slice(0, 4);
 
+  // 재사용 가능 여부 정규화: 존재하고 바쁘지 않은 봇만 existing=true
+  for (const t of tasks) {
+    t.task = String(t.task ?? task);
+    if (t.agent) {
+      const found = existing.find((a) => a.name === t.agent && !busyIds.has(a.id));
+      if (found) {
+        t.existing = true;
+        t.name = found.name;
+        t.avatar = found.avatar ?? "🤖";
+        t.role = found.role_prompt;
+        t.model = found.model ?? "subagent";
+      } else {
+        // 지정한 봇이 없거나 바쁨 → 새 봇으로 전환
+        t.existing = false;
+        t.name = t.name ?? t.agent;
+        t.agent = undefined;
+      }
+    } else {
+      t.existing = false;
+      t.name = t.name ?? "작업봇";
+      t.avatar = t.avatar ?? "🤖";
+      t.model = t.model ?? "subagent";
+    }
+  }
+  return tasks;
+}
+
+// 승인된 계획 실행: 봇 생성/재사용 → 병렬 실행 → 상태 배열 반환
+export async function runTeamTasks(
+  convId: string,
+  tasks: PlanTask[],
+  emit: Emit,
+  signal?: AbortSignal,
+): Promise<TeamAgentState[]> {
+  const { existing, busyIds } = rosterInfo();
   const states: TeamAgentState[] = tasks.map((t) => {
-    // 재사용 지정: 존재하고 바쁘지 않은 봇만. 그 외엔 새 봇 생성
     const reuse = t.agent ? existing.find((a) => a.name === t.agent && !busyIds.has(a.id)) : undefined;
     const agent = reuse ?? createAgent(t);
     const runId = uid();
     db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, ?, ?, 'running', ?)")
-      .run(runId, agent.id, convId, String(t.task ?? task), now());
+      .run(runId, agent.id, convId, t.task, now());
     return {
       id: agent.id, runId,
       name: agent.name, avatar: agent.avatar ?? "🤖",
-      role: agent.role_prompt, task: String(t.task ?? task),
+      role: agent.role_prompt, task: t.task,
       model: agent.model ?? "subagent", status: "running", steps: 0,
     };
   });
@@ -218,6 +267,78 @@ JSON 배열만 출력하세요. 각 항목은 둘 중 하나:
 
   return states;
 }
+
+// 승인된 팀 계획 실행 SSE: 봇 실행 → 대장 종합 답변을 기존 assistant 메시지에 스트리밍
+export const teamRoute = new Hono()
+  .post("/run", async (c) => {
+    const body = await c.req.json();
+    const convId = String(body.conversationId ?? "");
+    const msgId = String(body.messageId ?? "");
+    const tasks = (body.tasks ?? []) as PlanTask[];
+    const conv = db.prepare("SELECT * FROM conversations WHERE id = ?").get(convId) as any;
+    const msg = db.prepare("SELECT * FROM messages WHERE id = ?").get(msgId) as any;
+    if (!conv || !msg || !Array.isArray(tasks) || !tasks.length) return c.json({ error: "conversationId/messageId/tasks 필요" }, 400);
+    const signal = c.req.raw.signal;
+    const { endpoint, model: realModel } = resolveModel(body.model ?? conv.model ?? "main");
+
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      async start(controller) {
+        const send = (event: string, data: unknown) => {
+          try { controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)); } catch {}
+        };
+        try {
+          const states = await runTeamTasks(convId, tasks, (ev) => send("team", ev), signal);
+
+          // 대장이 봇 결과들을 취합해 최종 답변 작성
+          const history: ChatMessage[] = [
+            { role: "system", content: systemPrompt("team", conv.persona_id, conv.workspace_id) },
+            ...(db.prepare("SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at").all(convId) as any[])
+              .filter((m) => (m.role === "user" || m.role === "assistant") && m.active && m.id !== msgId)
+              .map((m) => ({ role: m.role, content: m.content })),
+          ];
+          const report = states.map((a) => `## ${a.avatar} ${a.name} — ${a.status === "done" ? "완료" : "실패"}\n작업: ${a.task}\n\n${a.result ?? "(결과 없음)"}`).join("\n\n");
+          for (let i = history.length - 1; i >= 0; i--) {
+            if (history[i].role === "user") {
+              history[i] = {
+                role: "user",
+                content: `${history[i].content}\n\n[팀 에이전트 실행 결과 — 각 전문 봇이 완료한 보고서]\n\n${report}\n\n---\n위 결과를 종합해 사용자에게 최종 답변을 작성하세요. 어떤 봇이 무엇을 담당했는지 간략히 언급하고, 실패한 봇이 있으면 그 한계도 솔직히 밝히세요.`,
+              };
+              break;
+            }
+          }
+
+          let content = "";
+          let usage: any = null;
+          let usedModel = realModel;
+          for await (const ev of streamChat(endpoint, realModel, history, { signal })) {
+            if (ev.type === "content" && ev.text) { content += ev.text; send("delta", { id: msgId, text: ev.text }); }
+            else if (ev.type === "usage") { usage = ev.usage; if (ev.model) usedModel = ev.model; }
+            else if (ev.type === "error") send("error", { message: ev.error });
+            else if (ev.type === "done" && ev.model) usedModel = ev.model;
+          }
+
+          const meta = {
+            type: "team", status: "done",
+            agents: states.map((a) => ({ name: a.name, avatar: a.avatar, role: a.role, task: a.task, model: a.model, status: a.status, result: (a.result ?? "").slice(0, 4000) })),
+          };
+          db.prepare("UPDATE messages SET content = ?, model = ?, search_meta = ?, tokens_in = ?, tokens_out = ? WHERE id = ?")
+            .run(content, usedModel, JSON.stringify(meta), usage?.prompt_tokens ?? null, usage?.completion_tokens ?? null, msgId);
+          const sibs = db.prepare("SELECT * FROM messages WHERE parent_id IS ?").all(msg.parent_id) as any[];
+          const idx = sibs.findIndex((s) => s.id === msgId);
+          send("done", { message: { ...(db.prepare("SELECT * FROM messages WHERE id = ?").get(msgId) as any), sibling_count: sibs.length, sibling_index: idx } });
+          if (content) notifyResult(conv.title, content);
+        } catch (e: any) {
+          if (e?.name !== "AbortError") send("error", { message: String(e?.message ?? e) });
+        } finally {
+          try { controller.close(); } catch {}
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
+    });
+  });
 
 export const agentsRoute = new Hono()
   .get("/", (c) => c.json({ agents: db.prepare("SELECT * FROM agents ORDER BY created_at").all() }))

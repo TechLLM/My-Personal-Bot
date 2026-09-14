@@ -63,7 +63,7 @@ function withSiblings(m: Msg) {
   return { ...m, sibling_count: sibs.length, sibling_index: idx };
 }
 
-function systemPrompt(mode: string, personaId?: string | null, workspaceId?: string | null): string {
+export function systemPrompt(mode: string, personaId?: string | null, workspaceId?: string | null): string {
   const base = getSetting("system_prompt") ?? "당신은 MyBot입니다. 정확하고 유용하게 답변하세요. 마크다운을 적절히 사용하세요.";
   let p = base;
   if (workspaceId) {
@@ -282,26 +282,26 @@ export const chatRoute = new Hono()
             }
           }
 
-          // 팀 모드: 대장 봇이 작업 분해 → 역할 봇 병렬 실행 → 결과 취합 후 대장이 종합
+          // 팀 모드: 대장 봇이 작업 분해만 수행 → 계획을 보여주고 사용자 승인 대기 (실행은 /api/team/run)
           if (mode === "team" && userMsg) {
-            const { orchestrateTeam } = await import("../team");
-            const agents = await orchestrateTeam(endpoint, realModel, userMsg.content, convId!, (ev) => send("team", ev), signal);
-            if (agents?.length) {
-              searchMeta = {
-                type: "team",
-                agents: agents.map((a) => ({ name: a.name, avatar: a.avatar, role: a.role, task: a.task, model: a.model, status: a.status, result: (a.result ?? "").slice(0, 4000) })),
-              };
-              const report = agents.map((a) => `## ${a.avatar} ${a.name} — ${a.status === "done" ? "완료" : "실패"}\n작업: ${a.task}\n\n${a.result ?? "(결과 없음)"}`).join("\n\n");
-              for (let i = history.length - 1; i >= 0; i--) {
-                if (history[i].role === "user") {
-                  history[i] = {
-                    role: "user",
-                    content: `${userMsg.content}\n\n[팀 에이전트 실행 결과 — 각 전문 봇이 완료한 보고서]\n\n${report}\n\n---\n위 결과를 종합해 사용자에게 최종 답변을 작성하세요. 어떤 봇이 무엇을 담당했는지 간략히 언급하고, 실패한 봇이 있으면 그 한계도 솔직히 밝히세요.`,
-                  };
-                  break;
-                }
+            const { planTeam } = await import("../team");
+            const plan = await planTeam(endpoint, realModel, userMsg.content, (ev) => send("team", ev), signal);
+            if (plan?.length) {
+              const agents = plan.map((t) => ({ name: t.name, avatar: t.avatar, role: t.role ?? "", task: t.task, model: t.model, existing: t.existing }));
+              send("team", { type: "team_plan", pending: true, agents });
+              const notice = "대장 봇이 작업 계획을 세웠습니다. 실행할 봇을 선택해 주세요.";
+              const meta = JSON.stringify({ type: "team", status: "pending", agents });
+              send("delta", { id: asstMsg.id, text: notice });
+              q.msgUpdate.run(notice, null, realModel, meta, null, null, asstMsg.id);
+              send("done", { message: withSiblings(q.msgGet.get(asstMsg.id) as Msg) });
+              const count = (db.prepare("SELECT COUNT(*) as n FROM messages WHERE conversation_id = ?").get(convId!) as any).n;
+              if (count <= 2) {
+                await autoTitle(convId!, userMsg.content);
+                send("title", { conversation: q.convGet.get(convId!) });
               }
+              return;
             }
+            // 계획 없음 → 일반 답변으로 계속 진행
           }
 
           // 도구 루프: 브라우저(내장, 항상 제공) + MCP 도구(설정 시). 도구 호출이 완료될 때까지 비스트림 라운드 후 최종 답변만 스트리밍
@@ -370,6 +370,11 @@ export const chatRoute = new Hono()
           }
           // 메모리 추출 (비차단)
           if (userMsg && content) extractMemories(userMsg.content, content).catch(() => {});
+          // 설정된 알림 채널로 결과 발송 (기본은 채팅창만)
+          if (content) {
+            const { notifyResult } = await import("../notify");
+            notifyResult(conv?.title ?? "MyBot", content);
+          }
         } catch (e: any) {
           if (e?.name !== "AbortError") send("error", { message: String(e?.message ?? e) });
         } finally {
@@ -391,6 +396,16 @@ export const chatRoute = new Hono()
     const name = `${uid()}.${ext}`;
     writeFileSync(join(FILES_DIR, name), Buffer.from(await file.arrayBuffer()));
     return c.json({ url: `/api/files/${name}`, name: file.name, mime: file.type });
+  })
+  // 메시지 메타 패치 (팀 계획 취소 등): body.meta를 search_meta에 병합
+  .post("/messages/:id/meta", async (c) => {
+    const m = q.msgGet.get(c.req.param("id")) as Msg | null;
+    if (!m) return c.json({ error: "not found" }, 404);
+    const body = await c.req.json();
+    const meta = m.search_meta ? JSON.parse(m.search_meta) : {};
+    Object.assign(meta, body.meta ?? {});
+    q.msgUpdate.run(m.content, m.reasoning, m.model, JSON.stringify(meta), m.tokens_in, m.tokens_out, m.id);
+    return c.json({ message: withSiblings(q.msgGet.get(m.id) as Msg) });
   })
   // 메시지 편집 → 같은 부모 아래 새 형제로 분기
   .post("/messages/:id/edit", async (c) => {
