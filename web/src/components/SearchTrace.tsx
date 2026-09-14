@@ -15,12 +15,15 @@ export function SearchTrace({ events, done }: { events: SearchEvent[]; done: boo
   const searches = events.filter((e) => e.type === "search");
   const plan = events.find((e) => e.type === "plan");
   const synthesizing = events.some((e) => e.type === "synthesize");
+  const isSearch = searches.length > 0 || !!plan || synthesizing;
 
   return (
     <div className="rounded-xl border border-sky-900/40 bg-sky-950/20 px-4 py-3 text-sm">
       <div className="flex items-center gap-2 font-medium text-sky-300">
-        <span className={done ? "" : "thinking-dot"}>🔍</span>
-        {done ? "DeepSearch 완료" : synthesizing ? "출처 종합 중…" : "DeepSearch 진행 중…"}
+        <span className={done ? "" : "thinking-dot"}>{isSearch ? "🔍" : "🤖"}</span>
+        {isSearch
+          ? done ? "DeepSearch 완료" : synthesizing ? "출처 종합 중…" : "DeepSearch 진행 중…"
+          : done ? "봇 작업 완료" : "봇 작업 중…"}
       </div>
       {plan?.queries && (
         <div className="mt-2 text-xs text-zinc-400">
@@ -33,7 +36,11 @@ export function SearchTrace({ events, done }: { events: SearchEvent[]; done: boo
         ))}
         {reads.map((r, i) => (
           <div key={`r${i}`} className="text-zinc-400">
-            · 읽음: <a href={r.url} target="_blank" rel="noreferrer" className="hover:text-sky-400 underline decoration-zinc-700">{r.title || r.url}</a>
+            {r.title?.startsWith("🔧") || r.title?.startsWith("🤖") || r.title?.startsWith("⏱") || !r.url ? (
+              <span>· {r.title || r.url}</span>
+            ) : (
+              <span>· 읽음: <a href={r.url} target="_blank" rel="noreferrer" className="hover:text-sky-400 underline decoration-zinc-700">{r.title}</a></span>
+            )}
           </div>
         ))}
       </div>

@@ -331,8 +331,11 @@ export const chatRoute = new Hono()
             const builtinNames = new Set(BUILTIN_TOOLS.map((t) => t.function.name));
             const { chatOnce } = await import("../providers/openaiCompat");
             const browserKey = `${convId}:${asstMsg.id}`;
+            const deadline = Date.now() + 3 * 60_000; // 일반 대화 도구 루프 최대 3분
             let browserUsed = false;
             for (let round = 0; round < 4; round++) {
+              if (Date.now() > deadline) break;
+              send("search", { type: "read", title: `🤖 봇 작업 중… (라운드 ${round + 1})`, url: "" });
               const res = await chatOnce(endpoint, realModel, history, { signal, tools: openaiTools });
               if (!res.toolCalls?.length) {
                 if (res.content) history.push({ role: "assistant", content: res.content });

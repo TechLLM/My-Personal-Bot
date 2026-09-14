@@ -31,7 +31,7 @@ export async function runRoutine(r: any): Promise<string> {
       ]
     : [{ role: "user" as const, content: r.prompt }];
   let out = "";
-  for await (const ev of streamChat(endpoint, model, messages)) {
+  for await (const ev of streamChat(endpoint, model, messages, { signal: AbortSignal.timeout(300_000) })) {
     if (ev.type === "content") out += ev.text ?? "";
   }
   // 결과를 대화로 저장

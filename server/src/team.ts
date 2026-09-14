@@ -132,8 +132,18 @@ async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, signal?
     },
     { role: "user", content: state.task },
   ];
+  // 봇당 최대 작업 시간 — 초과 시 수집된 결과로 즉시 보고 마무리
+  const deadline = Date.now() + 4 * 60_000;
   try {
     for (let round = 0; round < 8; round++) {
+      if (Date.now() > deadline) {
+        emit({ type: "agent_step", agentId: state.id, tool: "⏱ 시간 제한 — 결과 정리" });
+        messages.push({ role: "user", content: "작업 시간 제한에 도달했습니다. 도구를 더 사용하지 말고, 지금까지 얻은 결과로 최종 보고서를 즉시 작성하세요." });
+        const res = await chatOnce(endpoint, model, messages, { signal });
+        state.status = "done";
+        state.result = res.content || "(시간 제한 — 결과 없음)";
+        return;
+      }
       const res = await chatOnce(endpoint, model, messages, { signal, tools });
       state.steps = round + 1;
       if (!res.toolCalls?.length) {
