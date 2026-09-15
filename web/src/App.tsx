@@ -97,9 +97,9 @@ export default function App() {
     setTeamEvents([]);
   }, []);
 
-  // 봇 선택 = 그 봇의 세션으로 진입 — 최근 대화가 있으면 이어가고, 없으면 새 대화를 그 봇에 귀속
+  // 봇 선택 = 그 봇의 메인 세션으로 진입 — 루틴 단발 대화가 아닌 메인 세션(위임·루틴 작업 내역이 쌓이는 곳)
   const selectBot = useCallback((a: Agent) => {
-    const latest = conversations.find((c) => c.agent_id === a.id);
+    const latest = conversations.find((c) => c.agent_id === a.id && c.mode !== "routine") ?? conversations.find((c) => c.agent_id === a.id);
     if (latest) loadConversation(latest.id);
     else { newConversation(); setPendingAgent(a); }
     if (window.innerWidth < 768) setSidebarOpen(false);

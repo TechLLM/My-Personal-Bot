@@ -36,14 +36,14 @@ export async function runRoutine(r: any): Promise<string> {
     .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
   const out = state.result ?? "(결과 없음)";
 
-  // 결과를 대화로 저장
-  const convId = uid();
-  const t = now();
+  // 결과를 담당 봇의 메인 세션에 기록 — 봇 세션을 열면 루틴 수행 내역(도구 칩 포함)이 보임
   const title = `루틴 · ${agent.name} · ${r.name}`;
-  db.prepare("INSERT INTO conversations (id, title, model, mode, agent_id, created_at, updated_at) VALUES (?, ?, ?, 'routine', ?, ?, ?)").run(convId, title, useModel, agent.id, t, t);
-  const uId = uid();
-  db.prepare("INSERT INTO messages (id, conversation_id, parent_id, role, content, created_at) VALUES (?, ?, NULL, 'user', ?, ?)").run(uId, convId, `[루틴] ${r.prompt}`, t);
-  db.prepare("INSERT INTO messages (id, conversation_id, parent_id, role, content, model, created_at) VALUES (?, ?, ?, 'assistant', ?, ?, ?)").run(uid(), convId, uId, out, useModel, t);
+  {
+    const { appendToAgentSession } = await import("./routes/chat");
+    const { agentSessionConvId } = await import("./team");
+    const runMeta = JSON.stringify({ type: "tools", events: state.toolLog.map((l) => ({ type: "read", title: l.tool, url: "" })) });
+    appendToAgentSession(agentSessionConvId(agent.id), `[루틴] ${r.name}\n${r.prompt}`, out, useModel, runMeta);
+  }
   // 루틴 결과도 설정된 알림 채널로 발송
   if (out) {
     const { notifyResult } = await import("./notify");

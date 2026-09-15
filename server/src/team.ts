@@ -61,15 +61,19 @@ export function getAgent(id: string | null | undefined): Agent | null {
   return (db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent | null) ?? null;
 }
 
-// 대장 봇의 세션 — 봇 보고·텔레그램 지시가 여기 쌓여 사용자에게 보임
-export function bossSessionConvId(bossId: string): string {
-  const row = db.prepare("SELECT id FROM conversations WHERE agent_id = ? ORDER BY updated_at DESC LIMIT 1").get(bossId) as { id: string } | null;
+// 봇의 메인 세션 — 보고·위임 실행·루틴 결과가 여기 쌓여 사용자에게 보임
+// (루틴 단발 대화(mode='routine')는 메인 세션이 아니므로 제외)
+export function agentSessionConvId(agentId: string): string {
+  const row = db.prepare("SELECT id FROM conversations WHERE agent_id = ? AND (mode IS NULL OR mode != 'routine') ORDER BY updated_at DESC LIMIT 1").get(agentId) as { id: string } | null;
   if (row) return row.id;
   const id = uid();
   const t = now();
-  db.prepare("INSERT INTO conversations (id, title, model, mode, agent_id, created_at, updated_at) VALUES (?, ?, NULL, 'bot', ?, ?, ?)").run(id, "대장 세션", bossId, t, t);
+  const nm = (db.prepare("SELECT name FROM agents WHERE id = ?").get(agentId) as any)?.name ?? "봇";
+  db.prepare("INSERT INTO conversations (id, title, model, mode, agent_id, created_at, updated_at) VALUES (?, ?, NULL, 'bot', ?, ?, ?)").run(id, `${nm} 세션`, agentId, t, t);
   return id;
 }
+
+export const bossSessionConvId = agentSessionConvId;
 
 export interface ToolLogEntry {
   tool: string;
@@ -159,10 +163,11 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     await runAgent(state, target, () => {}, signal ?? AbortSignal.timeout(240_000));
     db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
       .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
-    // 대장에게 지시·보고한 내용은 대장 세션에도 기록 — 사용자가 대장 세션에서 확인
-    if (target.is_boss) {
+    // 대상 봇의 메인 세션에 실행 내역을 기록 — 봇 세션을 열면 실제 수행한 작업(도구 칩 포함)이 보임
+    {
       const { appendToAgentSession } = await import("./routes/chat");
-      appendToAgentSession(bossSessionConvId(target.id), `[${caller?.name ?? "봇"} → 대장 보고] ${String(args.instruction ?? "")}`, state.result ?? "(결과 없음)", target.model);
+      const runMeta = JSON.stringify({ type: "tools", events: state.toolLog.map((l) => ({ type: "read", title: l.tool, url: "" })) });
+      appendToAgentSession(agentSessionConvId(target.id), `[${caller?.name ?? "사용자"} 지시] ${String(args.instruction ?? "")}`, state.result ?? "(결과 없음)", target.model, runMeta);
     }
     return `[${target.name} 실행 결과 — ${state.status === "done" ? "완료" : "실패"}]\n${state.result ?? "(결과 없음)"}`;
   }
