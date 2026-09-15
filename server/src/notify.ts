@@ -20,35 +20,34 @@ export async function sendTelegram(text: string): Promise<string | null> {
   }
 }
 
-// 마크다운 보고서를 텔레그램 HTML로 정돈해 전송 — 표가 있거나 길면 HTML 문서도 함께 첨부
-// 모델과 무관하게 항상 같은 포맷으로 도착하게 하는 고정 출력층
+// 마크다운 보고서를 텔레그램 HTML 메시지로 정돈해 전송 — 메시지 자체가 HTML 포맷
+// 별도 문서 파일을 만들지 않음. 길면 메시지를 나눠서 보내고, HTML 파싱 실패 시 평문 폴백
 export async function sendTelegramReport(title: string, mdReport: string): Promise<string | null> {
   const token = getSetting("telegram_bot_token");
   const chatId = getSetting("telegram_chat_id");
   if (!token || !chatId) return "봇 토큰/채팅 ID 미설정";
   try {
-    const { mdToTelegramHtml, mdToHtmlDocument, cleanOutput } = await import("./report");
+    const { mdToTelegramHtml, cleanOutput } = await import("./report");
     const clean = cleanOutput(mdReport);
     const html = `<b>■ ${title.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</b>\n\n` + mdToTelegramHtml(clean);
-    const hasTable = /^\s*\|.*\|\s*$/m.test(clean);
-    const text = html.length > 4000 ? html.slice(0, 3900) + "\n…(전체는 첨부 문서)" : html;
-    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true }),
-    });
-    if (!res.ok) {
-      // HTML 파싱 실패 시 평문으로 폴백
-      return sendTelegram(`[MyBot] ${title}\n\n${clean}`);
+    // 텔레그램 메시지 한도 4096자 — 줄 단위로 나눠 여러 메시지로 전송
+    const chunks: string[] = [];
+    let buf = "";
+    for (const line of html.split("\n")) {
+      if (buf.length + line.length + 1 > 3900) { chunks.push(buf); buf = ""; }
+      buf += (buf ? "\n" : "") + line;
     }
-    // 표가 포함됐거나 본문이 길면 정돈된 HTML 문서를 함께 첨부 — 텔레그램에서 실제 표로 열람 가능
-    if (hasTable || clean.length > 3500) {
-      const doc = mdToHtmlDocument(`[MyBot] ${title}`, clean);
-      const form = new FormData();
-      form.append("chat_id", chatId);
-      form.append("caption", `${title} — 전체 보고서`);
-      form.append("document", new Blob([doc], { type: "text/html" }), "report.html");
-      await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: "POST", body: form }).catch(() => {});
+    if (buf) chunks.push(buf);
+    for (const text of chunks) {
+      const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true }),
+      });
+      if (!res.ok) {
+        // HTML 파싱 실패 시 평문으로 폴백
+        return sendTelegram(`[MyBot] ${title}\n\n${clean}`);
+      }
     }
     return null;
   } catch (e) {
