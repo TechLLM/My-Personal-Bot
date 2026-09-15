@@ -135,7 +135,7 @@ export function Composer({
       )}
       <textarea
         ref={ref}
-        className="w-full resize-none bg-transparent px-2 py-1 text-[15px] outline-none placeholder:text-zinc-600 max-h-48"
+        className="w-full resize-none bg-transparent px-2 py-1 text-base md:text-[15px] outline-none placeholder:text-zinc-600 max-h-48"
         rows={1}
         placeholder={mode === "deepsearch" ? "DeepSearch: 웹을 뒤져 종합 리포트 생성…" : mode === "image" ? "생성할 이미지를 설명하세요…" : mode === "team" ? "팀 모드: 대장 봇이 역할 봇들에게 작업을 분배합니다…" : "무엇이든 물어보세요"}
         value={text}

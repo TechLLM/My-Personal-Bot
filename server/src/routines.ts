@@ -29,7 +29,7 @@ export async function runRoutine(r: any): Promise<string> {
     id: agent.id, runId,
     name: agent.name, avatar: agent.avatar ?? "🤖",
     role: agent.role_prompt, task: `예약된 정기 업무입니다. 수행하고 결과를 보고하세요.\n\n${r.prompt}`,
-    model: useModel, status: "running", steps: 0, toolLog: [],
+    model: useModel, status: "running", steps: 0, toolLog: [], depth: 0,
   };
   await runAgent(state, agent, () => {}, AbortSignal.timeout(300_000));
   db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")

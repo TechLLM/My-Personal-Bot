@@ -21,13 +21,17 @@ export function Sidebar({
   onDelete: (id: string) => void;
   onOpenSettings: () => void;
   open: boolean;
+  onClose: () => void;
   workspaces: { id: string; name: string }[];
   workspaceId: string;
   onWorkspaceChange: (id: string) => void;
 }) {
   if (!open) return null;
   return (
-    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950">
+    <>
+      {/* 모바일: 사이드바는 오버레이 — 배경 탭으로 닫힘 */}
+      <div className="fixed inset-0 z-30 bg-black/60 md:hidden" onClick={onClose} />
+      <aside className="fixed inset-y-0 left-0 z-40 flex h-full w-[80vw] max-w-72 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950 md:static md:z-auto md:w-64">
       <div className="flex items-center gap-2 p-3">
         <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-zinc-100 text-sm font-bold text-zinc-900">M</div>
         <span className="font-semibold text-sm">MyBot</span>
@@ -73,6 +77,7 @@ export function Sidebar({
           className="w-full rounded-lg px-2.5 py-2 text-left text-xs text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
         ><span className="flex items-center gap-1.5"><Settings size={13} strokeWidth={1.8} /> 설정 · 엔드포인트 · 검색</span></button>
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }

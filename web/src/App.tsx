@@ -25,7 +25,7 @@ export default function App() {
   const [streaming, setStreaming] = useState(false);
   const [searchEvents, setSearchEvents] = useState<SearchEvent[]>([]);
   const [teamEvents, setTeamEvents] = useState<TeamEvent[]>([]);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 768); // 모바일은 닫힌 채 시작
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [routineAgentIds, setRoutineAgentIds] = useState<Set<string>>(new Set());
@@ -81,6 +81,14 @@ export default function App() {
     setSearchEvents([]);
     setTeamEvents([]);
   }, []);
+
+  // 봇 선택 = 그 봇의 세션으로 진입 — 최근 대화가 있으면 이어가고, 없으면 새 대화를 그 봇에 귀속
+  const selectBot = useCallback((a: Agent) => {
+    const latest = conversations.find((c) => c.agent_id === a.id);
+    if (latest) loadConversation(latest.id);
+    else { newConversation(); setPendingAgent(a); }
+    if (window.innerWidth < 768) setSidebarOpen(false);
+  }, [conversations, loadConversation, newConversation]);
 
   const patchMessage = useCallback((id: string, patch: Partial<Message>) => {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
@@ -259,8 +267,8 @@ export default function App() {
       <Sidebar
         conversations={workspaceId ? conversations.filter((c) => (c as any).workspace_id === workspaceId) : conversations}
         currentId={convId}
-        onSelect={loadConversation}
-        onNew={newConversation}
+        onSelect={(id) => { loadConversation(id); if (window.innerWidth < 768) setSidebarOpen(false); }}
+        onNew={() => { newConversation(); if (window.innerWidth < 768) setSidebarOpen(false); }}
         onDelete={(id) => {
           api.deleteConversation(id).then(() => {
             refreshConversations();
@@ -269,13 +277,14 @@ export default function App() {
         }}
         onOpenSettings={() => setSettingsOpen(true)}
         open={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
         workspaces={workspaces}
         workspaceId={workspaceId}
         onWorkspaceChange={setWorkspaceId}
       />
       <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center gap-2 border-b border-zinc-800/60 px-4 py-2.5">
-          <button className="text-zinc-500 hover:text-zinc-200" onClick={() => setSidebarOpen(!sidebarOpen)}><Menu size={16} strokeWidth={1.8} /></button>
+        <header className="flex items-center gap-2 border-b border-zinc-800/60 px-3 py-2 sm:px-4 sm:py-2.5">
+          <button className="-ml-1 p-1.5 text-zinc-500 hover:text-zinc-200" onClick={() => setSidebarOpen(!sidebarOpen)}><Menu size={16} strokeWidth={1.8} /></button>
           <span className="text-sm text-zinc-400 truncate">
             {convId ? conversations.find((c) => c.id === convId)?.title ?? "대화" : pendingAgent ? `${pendingAgent.name}와의 새 대화` : "봇 선택"}
           </span>
@@ -296,7 +305,7 @@ export default function App() {
         <div ref={scrollRef} className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-3xl px-4 py-6">
             {empty && !pendingAgent && (
-              <BotLobby agents={agents} models={models} routineAgentIds={routineAgentIds} onSelect={setPendingAgent} onRefresh={refreshAgents} />
+              <BotLobby agents={agents} models={models} routineAgentIds={routineAgentIds} onSelect={selectBot} onRefresh={refreshAgents} />
             )}
             {empty && pendingAgent && (
               <div className="mt-[25vh] text-center">
@@ -331,7 +340,7 @@ export default function App() {
           </div>
         </div>
 
-        <div className="px-4 pb-14 pt-1">
+        <div className="px-3 pt-1 sm:px-4 pb-[calc(3.5rem+env(safe-area-inset-bottom))]">
           <div className="mx-auto max-w-3xl">
             <Composer models={models} model={model} onModelChange={setModel} onSend={send} onStop={stop} streaming={streaming} personas={personas} personaId={personaId} onPersonaChange={setPersonaId} skills={skills} />
           </div>
