@@ -423,6 +423,7 @@ export const chatRoute = new Hono()
               send("search", ev);
             };
             const calledTools = new Set<string>();
+            let popupShown = false; // request_credentials가 실제로 팝업을 생성했는지 (저장 계정 재사용 시 false)
             // 위임된 하위 봇들을 누적해 team_plan으로 보냄 — 화면에 봇 카드·작업 애니메이션이 실시간으로 표시됨
             const delegated = new Map<string, any>();
             const teamEmit = (ev: any) => {
@@ -446,6 +447,7 @@ export const chatRoute = new Hono()
               try {
                 if (builtinNames.has(tc.name)) {
                   out = await callBuiltin(tc.name, args, conv?.agent_id, signal, 0, teamEmit);
+                  if (tc.name === "request_credentials" && !out.includes("이미 저장")) popupShown = true;
                 } else if (tc.name.startsWith("browser_") || tc.name === "ego_run") {
                   browserUsed = true;
                   out = await browserTool(browserKey, tc.name, args);
@@ -498,20 +500,26 @@ export const chatRoute = new Hono()
           }
 
           // 자가교정 — 도구 호출 없이 작업 완료·팝업 표시를 주장한 환각 응답을 실제 도구 호출로 보정
-          const claimsPopup = /팝업|보안.{0,6}입력|입력.{0,4}(창|띄)/.test(content) && /계정|비밀번호|로그인|아이디/.test(content);
-          const claimsAction = calledTools.size === 0 && /(삭제|생성|지시|등록|전송|예약|전달|수정|처리|만들|보내)[가-힣]{0,3}\s*(했|함|됐|됨|할게|하겠|진행|완료|대상)/.test(content);
-          const needsFix = (claimsPopup && !calledTools.has("request_credentials")) || claimsAction;
+          // + 빈/손상된 최종 응답(모델이 깨진 문자열만 출력)도 재시도
+          const meaningfulLen = (content.match(/[가-힣A-Za-z0-9]/g) ?? []).length;
+          const degenerate = meaningfulLen < 8;
+          const claimsPopup = !degenerate && /팝업|보안.{0,6}입력|입력.{0,4}(창|띄)/.test(content) && /계정|비밀번호|로그인|아이디/.test(content);
+          const claimsAction = !degenerate && calledTools.size === 0 && /(삭제|생성|지시|등록|전송|예약|전달|수정|처리|만들|보내)[가-힣]{0,3}\s*(했|함|됐|됨|할게|하겠|진행|완료|대상)/.test(content);
+          const needsFix = (claimsPopup && !calledTools.has("request_credentials")) || claimsAction || degenerate;
           if (needsFix && Date.now() < deadline) {
             history.push({ role: "assistant", content });
             history.push({ role: "user", content: claimsPopup
               ? "[시스템] 방금 응답에서 계정 입력 팝업을 띄우겠다고 했지만 request_credentials 도구가 실제로 호출되지 않았습니다. 지금 즉시 request_credentials를 호출해 팝업을 실제로 띄우세요. site에는 언급된 서비스 이름을 넣으세요."
-              : "[시스템] 방금 응답에서 작업을 수행했다고 주장했지만 도구 호출이 전혀 없었습니다. 주장한 작업을 지금 실제 도구로 수행하고, 수행할 수 없는 부분은 없다고 정직하게 정정하세요." });
+              : degenerate
+                ? "[시스템] 방금 응답이 비어 있거나 손상된 문자열이었습니다. 사용자의 요청을 다시 처리하세요 — 작업이 필요하면 도구를 실제로 호출해 수행하고 결과를 확인한 뒤, 정상적인 문장으로 답변하세요."
+                : "[시스템] 방금 응답에서 작업을 수행했다고 주장했지만 도구 호출이 전혀 없었습니다. 주장한 작업을 지금 실제 도구로 수행하고, 수행할 수 없는 부분은 없다고 정직하게 정정하세요." });
+            let fixText = "";
             for (let fixRound = 0; fixRound < 2 && Date.now() < deadline; fixRound++) {
               const fix = await chatOnce(endpoint, realModel, history, {
                 signal, tools: openaiTools,
                 ...(claimsPopup && fixRound === 0 ? { toolChoice: { type: "function", function: { name: "request_credentials" } } } : {}), // 팝업 주장은 강제 호출
               }).catch(() => null);
-              if (!fix?.toolCalls?.length) break;
+              if (!fix?.toolCalls?.length) { if (fix?.content) fixText = fix.content; break; }
               history.push({ role: "assistant", content: fix.content || "", tool_calls: fix.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })) } as any);
               for (const tc of fix.toolCalls) {
                 const out = await execTool(tc);
@@ -527,9 +535,14 @@ export const chatRoute = new Hono()
               const url = src.match(/https?:\/\/[^\s)"'<>]+/)?.[0];
               await callBuiltin("request_credentials", { site, url, reason: "봇이 요청한 계정 입력" }, conv?.agent_id, signal).catch(() => "");
               calledTools.add("request_credentials");
+              popupShown = true;
               emitTool("request_credentials");
             }
-            if (calledTools.has("request_credentials") && claimsPopup) content += "\n\n> ✅ 보안 입력 팝업을 지금 띄웠습니다 — 팝업에 계정을 입력해 주세요.";
+            // 보정 라운드가 만든 정상 답변이 있으면 손상·허위 응답을 교체
+            const fixOk = (fixText.match(/[가-힣A-Za-z0-9]/g) ?? []).length >= 8;
+            if (degenerate) content = fixOk ? fixText : "⚠️ 응답 생성에 실패했습니다 — 같은 지시를 다시 보내주세요.";
+            else if (fixOk && claimsAction) content = fixText;
+            else if (popupShown && claimsPopup) content += "\n\n> ✅ 보안 입력 팝업을 지금 띄웠습니다 — 팝업에 계정을 입력해 주세요.";
             else if (calledTools.size) content += "\n\n> ⤵ 위에 보고한 작업을 실제 도구로 수행했습니다 — 세부 결과는 실제 실행 결과와 다를 수 있습니다.";
             if (toolEvents.length) searchMeta = { ...(searchMeta ?? {}), type: searchMeta?.type ?? "tools", events: toolEvents };
           }
