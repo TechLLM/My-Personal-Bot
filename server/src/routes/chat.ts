@@ -299,7 +299,7 @@ export const chatRoute = new Hono()
             const skillMatch = content.match(/^\/([^\s]+)\s*([\s\S]*)$/);
             if (skillMatch) {
               const { getSkill } = await import("./workspaces");
-              const skill = getSkill(skillMatch[1]);
+              const skill = getSkill(skillMatch[1], conv?.agent_id);
               if (skill) content = skill.prompt + skillMatch[2];
             }
             // 텍스트 파일 첨부 → 내용 주입
@@ -353,6 +353,49 @@ export const chatRoute = new Hono()
                 return { role: m.role as "user" | "assistant", content: m.content };
               }),
           ];
+
+          // 그룹채팅 모드 — 멤버 봇들이 차례로 응답 (@멘션으로 특정 봇만 지정 가능)
+          if (conv?.group_id && userMsg) {
+            const { groupMembers } = await import("./groups");
+            const { runAgent, defaultModel, agentSessionConvId } = await import("../team");
+            const { modelLabel } = await import("../providers");
+            const { normalizeReport } = await import("../report");
+            let members = groupMembers(conv.group_id);
+            const mentionNames = [...userMsg.content.matchAll(/@([^\s@,]+)/g)].map((m) => m[1].trim()).filter(Boolean);
+            if (mentionNames.length) {
+              const norm = (s: string) => s.replace(/\s/g, "").toLowerCase();
+              const mentioned = members.filter((a: any) => mentionNames.some((n) => norm(a.name).includes(norm(n)) || norm(n).includes(norm(a.name))));
+              if (mentioned.length) members = mentioned;
+            }
+            const recentCtx = path.slice(-8).map((m) => `${m.role === "user" ? "사용자" : "봇"}: ${(m.content ?? "").slice(0, 250)}`).join("\n");
+            let lastMsgId = userMsg.id;
+            for (const bot of members) {
+              send("team", { type: "agent_join", agent: { id: bot.id, name: bot.name, avatar: bot.avatar, role: bot.role_prompt, task: userMsg.content.slice(0, 200), model: bot.model, model_label: modelLabel(bot.model ?? defaultModel()) } });
+              send("team", { type: "agent_start", agentId: bot.id });
+              const runId = uid();
+              db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, ?, ?, 'running', ?)")
+                .run(runId, bot.id, convId, `[그룹 대화] ${userMsg.content.slice(0, 150)}`, now());
+              const state: any = {
+                id: bot.id, runId, name: bot.name, avatar: bot.avatar ?? "🤖", role: bot.role_prompt,
+                task: `[그룹 대화 메시지 — 다른 봇 멤버들도 같은 대화를 봅니다. 당신의 역할에 맞게 응답·작업하고 보고하세요]\n\n[그룹 최근 대화]\n${recentCtx}\n\n[사용자 메시지]\n${userMsg.content}`,
+                model: bot.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: 0,
+              };
+              await runAgent(state, bot, (ev: any) => send("team", ev), AbortSignal.timeout(540_000));
+              db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
+                .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
+              const meta = JSON.stringify({ type: "tools", events: state.toolLog.map((l: any) => ({ type: "read", title: l.tool, url: "" })) });
+              const report = await normalizeReport(bot.name, userMsg.content, state.result ?? "(결과 없음)", state.toolLog.map((l: any) => l.tool));
+              const botMsg = insertMessage(convId!, lastMsgId, "assistant", report, null, bot.name, meta);
+              lastMsgId = botMsg.id;
+              send("assistant_message", { message: withSiblings(botMsg) });
+              send("team", { type: "agent_done", agentId: bot.id, status: state.status, result: (state.result ?? "").slice(0, 4000) });
+              // 봇 자기 세션에도 동일하게 기록 — 봇별 작업 이력 유지
+              appendToAgentSession(agentSessionConvId(bot.id), `[그룹 대화 지시] ${userMsg.content}`, report, bot.model, meta);
+            }
+            q.convTouch.run(now(), convId!);
+            send("done", { message: withSiblings(q.msgGet.get(lastMsgId) as Msg) });
+            return;
+          }
 
           const asstMsg = insertMessage(convId!, userMsg ? userMsg.id : parentId, "assistant", "");
           send("assistant_message", { message: withSiblings(asstMsg) });
@@ -466,10 +509,14 @@ export const chatRoute = new Hono()
               }
               calledTools.add(tc.name);
               emitTool(tc.name);
+              // 승인 경계 — 위험 액션은 실행하지 않고 사용자 승인 큐에 올림
+              const { gateApproval } = await import("../approvals");
+              const gate = gateApproval(tc.name, args, conv?.agent_id ?? null, content ?? "");
+              if (gate) return gate;
               try {
                 if (builtinNames.has(tc.name)) {
-                  // agent_direct는 중첩 실행이라 자체 상한으로 관리 — 나머지는 120초 호출 타임아웃
-                  out = tc.name === "agent_direct"
+                  // agent_direct·agent_message는 중첩 실행이라 자체 상한으로 관리 — 나머지는 120초 호출 타임아웃
+                  out = tc.name === "agent_direct" || tc.name === "agent_message"
                     ? await callBuiltin(tc.name, args, conv?.agent_id, signal, 0, teamEmit)
                     : await withToolTimeout(callBuiltin(tc.name, args, conv?.agent_id, signal, 0, teamEmit));
                   if (tc.name === "request_credentials" && !out.includes("이미 저장")) popupShown = true;

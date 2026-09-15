@@ -140,8 +140,55 @@ CREATE TABLE IF NOT EXISTS conversation_summaries (
 );
 `);
 
+db.exec(`
+-- 승인 경계 — 외부 영향 액션 실행 전 사용자 승인 큐 (그록 Auto Review 대응)
+CREATE TABLE IF NOT EXISTS approval_requests (
+  id TEXT PRIMARY KEY,
+  tool TEXT NOT NULL,
+  args TEXT,
+  summary TEXT,
+  agent_id TEXT,
+  resume TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  result TEXT,
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER
+);
+-- pattern(정규식)이 도구명에 매치 → action: require(승인 필요) / allow(항상 허용). require가 우선
+CREATE TABLE IF NOT EXISTS approval_rules (
+  id TEXT PRIMARY KEY,
+  pattern TEXT NOT NULL,
+  action TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+-- 봇 간 비동기 메시지 — 보낸 봇은 기다리지 않고, 받는 봇이 백그라운드 처리 후 회신
+CREATE TABLE IF NOT EXISTS agent_messages (
+  id TEXT PRIMARY KEY,
+  from_agent_id TEXT,
+  to_agent_id TEXT NOT NULL,
+  content TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  reply TEXT,
+  created_at INTEGER NOT NULL,
+  done_at INTEGER
+);
+-- 그룹채팅 — 여러 봇이 하나의 대화에 참여 (@멘션으로 특정 봇 지정 가능)
+CREATE TABLE IF NOT EXISTS groups (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  agent_ids TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+`);
+
 try { db.exec("ALTER TABLE messages ADD COLUMN attachments TEXT"); } catch {}
 try { db.exec("ALTER TABLE routines ADD COLUMN agent_id TEXT"); } catch {}
+try { db.exec("ALTER TABLE routines ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'schedule'"); } catch {}
+try { db.exec("ALTER TABLE routines ADD COLUMN email_filter TEXT"); } catch {}
+try { db.exec("ALTER TABLE skills ADD COLUMN agent_id TEXT"); } catch {}
+try { db.exec("ALTER TABLE agents ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE agents ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE conversations ADD COLUMN group_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE conversations ADD COLUMN agent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE memories ADD COLUMN agent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN is_boss INTEGER NOT NULL DEFAULT 0"); } catch {}

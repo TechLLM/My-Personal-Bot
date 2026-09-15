@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type Agent, type Model } from "../api";
-import { Crown, AlarmClock, Plus, MessageSquare, ChevronDown, ChevronUp } from "lucide-react";
+import { Crown, AlarmClock, Plus, MessageSquare, ChevronDown, ChevronUp, Copy, Pin, EyeOff, Eye } from "lucide-react";
 import { AgentIcon } from "./icons";
 
 // 첫 화면: 봇 선택/생성이 진입점 — 봇이 곧 워크플로어
@@ -92,10 +92,27 @@ export function BotLobby({
               {routineAgentIds.has(a.id) && (
                 <AlarmClock size={11} className="shrink-0 text-amber-400/80" />
               )}
-              <button
-                className="ml-auto flex shrink-0 items-center gap-1 rounded-full bg-zinc-100 px-2.5 py-1 text-[11px] font-medium text-zinc-900 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-white"
-                onClick={() => onSelect(a)}
-              ><MessageSquare size={11} /> 대화</button>
+              <span className="ml-auto flex shrink-0 items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button
+                  className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+                  title="핀 고정 — 목록 상단에 표시"
+                  onClick={() => api.updateAgent(a.id, { pinned: a.pinned ? 0 : 1 }).then(onRefresh).catch(() => {})}
+                ><Pin size={11} className={a.pinned ? "text-amber-400" : ""} /></button>
+                <button
+                  className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+                  title="복제 — 역할·모델·스킬만 복사 (대화·기억은 복사되지 않음)"
+                  onClick={() => api.duplicateAgent(a.id).then(onRefresh).catch(() => {})}
+                ><Copy size={11} /></button>
+                <button
+                  className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+                  title={a.hidden ? "숨김 해제" : "숨기기 — 사이드바에서 감춤"}
+                  onClick={() => api.updateAgent(a.id, { hidden: a.hidden ? 0 : 1 }).then(onRefresh).catch(() => {})}
+                >{a.hidden ? <Eye size={11} /> : <EyeOff size={11} />}</button>
+                <button
+                  className="flex items-center gap-1 rounded-full bg-zinc-100 px-2.5 py-1 text-[11px] font-medium text-zinc-900 hover:bg-white"
+                  onClick={() => onSelect(a)}
+                ><MessageSquare size={11} /> 대화</button>
+              </span>
             </div>
             <div className="mt-1 text-[11px] text-zinc-500 truncate">{a.role_prompt || "범용 봇"}</div>
             <div className="mt-0.5 font-mono text-[10px] text-zinc-600">{a.model_label ?? a.model ?? "subagent"}</div>

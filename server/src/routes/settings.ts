@@ -3,7 +3,8 @@ import { db, getSetting, setSetting } from "../db";
 
 const KNOWN = ["system_prompt", "search_provider", "searxng_url", "tavily_key", "brave_key", "exa_key", "jina_key", "image_endpoint", "image_key", "image_model", "memory_enabled", "access_code", "default_model",
   "notify_telegram", "telegram_bot_token", "telegram_chat_id", "telegram_listen",
-  "notify_email", "smtp_host", "smtp_port", "smtp_user", "smtp_pass", "smtp_from", "email_to"];
+  "notify_email", "smtp_host", "smtp_port", "smtp_user", "smtp_pass", "smtp_from", "email_to",
+  "imap_host", "imap_port", "imap_user", "imap_pass", "imap_tls"];
 
 export const settingsRoute = new Hono()
   .get("/", (c) => {

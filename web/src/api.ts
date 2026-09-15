@@ -99,7 +99,43 @@ export const api = {
   deleteSite: (id: string) => mybotFetch(`/api/sites/${id}`, { method: "DELETE" }).then(j),
   siteRequests: () => mybotFetch("/api/sites/requests").then(j) as Promise<{ requests: SiteRequest[] }>,
   dismissSiteRequest: (id: string) => mybotFetch(`/api/sites/requests/${id}/dismiss`, { method: "POST" }).then(j),
+  // 승인 경계 — 위험 액션 승인 큐
+  approvals: () => mybotFetch("/api/approvals").then(j) as Promise<{ requests: ApprovalRequest[]; rules: ApprovalRule[] }>,
+  approveRequest: (id: string, always = false) =>
+    mybotFetch(`/api/approvals/${id}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ always }) }).then(j),
+  denyRequest: (id: string, always = false) =>
+    mybotFetch(`/api/approvals/${id}/deny`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ always }) }).then(j),
+  // 그룹채팅
+  groups: () => mybotFetch("/api/groups").then(j) as Promise<{ groups: Group[] }>,
+  createGroup: (name: string, agent_ids: string[]) =>
+    mybotFetch("/api/groups", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, agent_ids }) }).then(j),
+  deleteGroup: (id: string) => mybotFetch(`/api/groups/${id}`, { method: "DELETE" }).then(j),
+  groupConversation: (id: string) => mybotFetch(`/api/groups/${id}/conversation`, { method: "POST" }).then(j) as Promise<{ conversation_id: string }>,
+  duplicateAgent: (id: string) => mybotFetch(`/api/agents/${id}/duplicate`, { method: "POST" }).then(j),
 };
+
+export interface ApprovalRequest {
+  id: string;
+  tool: string;
+  summary: string;
+  agent_name: string | null;
+  created_at: number;
+}
+
+export interface ApprovalRule {
+  id: string;
+  pattern: string;
+  action: "require" | "allow";
+  created_at: number;
+}
+
+export interface Group {
+  id: string;
+  name: string;
+  agent_ids: string[];
+  members: { id: string; name: string; avatar: string | null; role_prompt: string; model: string | null }[];
+  created_at: number;
+}
 
 export interface SiteRequest {
   id: string;
@@ -119,6 +155,9 @@ export interface Agent {
   persistent: number;
   is_boss: number;
   is_lead: number;
+  parent_id?: string | null;
+  pinned?: number;
+  hidden?: number;
   created_at: number;
 }
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, streamChat, runTeam, mybotFetch, type Agent, type Conversation, type Endpoint, type Message, type Model, type TeamPlanTask, type SiteRequest } from "./api";
+import { api, streamChat, runTeam, mybotFetch, type Agent, type Conversation, type Endpoint, type Message, type Model, type TeamPlanTask, type SiteRequest, type Group, type ApprovalRequest } from "./api";
 import { Sidebar } from "./components/Sidebar";
 import { Composer, type Mode, type Persona } from "./components/Composer";
 import { MessageItem } from "./components/MessageItem";
@@ -7,6 +7,7 @@ import { SearchTrace, type SearchEvent } from "./components/SearchTrace";
 import { TeamTrace, type TeamEvent } from "./components/TeamTrace";
 import { SettingsModal } from "./components/SettingsModal";
 import { CredentialModal } from "./components/CredentialModal";
+import { ApprovalModal } from "./components/ApprovalModal";
 import { BotLobby } from "./components/BotLobby";
 import { Menu, Crown } from "lucide-react";
 import { AgentIcon } from "./components/icons";
@@ -36,6 +37,9 @@ export default function App() {
   const [defaultModel, setDefaultModel] = useState(""); // 설정의 기본 AI 모델 — 새 봇의 기본값
   const [createSignal, setCreateSignal] = useState(0); // 로비의 생성 마법사를 여는 신호 ("+ 새 봇")
   const [credRequests, setCredRequests] = useState<SiteRequest[]>([]); // 봇이 요청한 계정 입력 대기열
+  const [approvals, setApprovals] = useState<ApprovalRequest[]>([]); // 봇의 위험 액션 승인 대기열
+  const [groups, setGroups] = useState<Group[]>([]); // 그룹채팅 목록
+  const [activeGroupId, setActiveGroupId] = useState<string | null>(null); // 현재 열린 그룹 대화
   const [runningInfo, setRunningInfo] = useState<Record<string, string | null>>({}); // 서버에서 실행 중인 봇: id → 현재 도구 — 사이드바 실시간 작업 표시용
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -64,6 +68,7 @@ export default function App() {
     }).catch(() => {});
     mybotFetch("/api/workspaces").then((r) => r.json()).then((d) => setWorkspaces(d.workspaces)).catch(() => {});
     mybotFetch("/api/skills").then((r) => r.json()).then((d) => setSkills(d.skills)).catch(() => {});
+    api.groups().then((d) => setGroups(d.groups)).catch(() => {});
     mybotFetch("/api/settings").then((r) => r.json()).then((d) => setDefaultModel(d.settings?.default_model ?? "")).catch(() => {});
     refreshConversations();
     refreshAgents();
@@ -78,6 +83,14 @@ export default function App() {
     const poll = () => api.siteRequests().then((d) => setCredRequests(d.requests)).catch(() => {});
     poll();
     const t = setInterval(poll, 8000);
+    return () => clearInterval(t);
+  }, []);
+
+  // 승인 경계 — 위험 액션 승인 대기열을 폴링해 팝업 표시
+  useEffect(() => {
+    const poll = () => api.approvals().then((d) => setApprovals(d.requests)).catch(() => {});
+    poll();
+    const t = setInterval(poll, 6000);
     return () => clearInterval(t);
   }, []);
 
@@ -108,11 +121,30 @@ export default function App() {
 
   // 봇 선택 = 그 봇의 메인 세션으로 진입 — 루틴 단발 대화가 아닌 메인 세션(위임·루틴 작업 내역이 쌓이는 곳)
   const selectBot = useCallback((a: Agent) => {
+    setActiveGroupId(null);
     const latest = conversations.find((c) => c.agent_id === a.id && c.mode !== "routine") ?? conversations.find((c) => c.agent_id === a.id);
     if (latest) loadConversation(latest.id);
     else { newConversation(); setPendingAgent(a); }
     if (window.innerWidth < 768) setSidebarOpen(false);
   }, [conversations, loadConversation, newConversation]);
+
+  // 그룹 선택 = 그룹 대화로 진입 — 없으면 서버가 대화를 새로 만듦
+  const selectGroup = useCallback((g: Group) => {
+    setPendingAgent(null);
+    api.groupConversation(g.id).then((d) => {
+      setActiveGroupId(g.id);
+      refreshConversations();
+      loadConversation(d.conversation_id);
+    }).catch(() => {});
+    if (window.innerWidth < 768) setSidebarOpen(false);
+  }, [loadConversation, refreshConversations]);
+
+  const createGroup = useCallback((name: string, agentIds: string[]) => {
+    api.createGroup(name, agentIds).then((d) => {
+      setGroups((prev) => [...prev, d.group]);
+      selectGroup(d.group);
+    }).catch(() => {});
+  }, [selectGroup]);
 
   // 현재 세션의 담당 봇 — 있으면 모델 피커는 봇의 모델을 보여주고 변경 시 봇에 저장됨
   const currentConv = conversations.find((c) => c.id === convId) ?? null;
@@ -330,8 +362,12 @@ export default function App() {
     <div className="flex h-full">
       <Sidebar
         agents={agents}
+        groups={groups}
         activeAgentId={activeAgent?.id ?? null}
+        activeGroupId={activeGroupId}
         onSelectBot={selectBot}
+        onSelectGroup={selectGroup}
+        onCreateGroup={createGroup}
         onNew={() => { newConversation(); setCreateSignal((s) => s + 1); if (window.innerWidth < 768) setSidebarOpen(false); }}
         onOpenSettings={() => setSettingsOpen(true)}
         open={sidebarOpen}
@@ -416,6 +452,12 @@ export default function App() {
         <CredentialModal
           request={credRequests[0]}
           onDone={() => setCredRequests((prev) => prev.filter((r) => r.id !== credRequests[0].id))}
+        />
+      )}
+      {!credRequests[0] && approvals[0] && (
+        <ApprovalModal
+          request={approvals[0]}
+          onDone={() => setApprovals((prev) => prev.filter((r) => r.id !== approvals[0].id))}
         />
       )}
     </div>

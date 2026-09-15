@@ -26,6 +26,8 @@ export interface Agent {
   is_boss: number;
   is_lead: number;
   parent_id: string | null;
+  pinned: number;
+  hidden: number;
   created_at: number;
 }
 
@@ -141,14 +143,15 @@ export const BUILTIN_TOOLS = [
   { type: "function", function: { name: "read_file", description: "팀 작업 디렉터리의 파일을 읽습니다", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } },
   { type: "function", function: { name: "write_file", description: "팀 작업 디렉터리에 파일을 저장합니다", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } } },
   { type: "function", function: { name: "list_files", description: "팀 작업 디렉터리의 파일 목록", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "routine_add", description: "예약 작업(루틴)을 등록합니다. 사용자가 반복·정기 작업을 요청할 때 사용하세요. 이 봇의 담당 업무로 등록됩니다", parameters: { type: "object", properties: { name: { type: "string", description: "루틴 이름" }, prompt: { type: "string", description: "매번 실행할 작업 지시" }, schedule: { type: "string", description: "every:30m | every:Nh | daily:HH:MM" } }, required: ["name", "prompt", "schedule"] } } },
+  { type: "function", function: { name: "routine_add", description: "예약 작업(루틴)을 등록합니다. 사용자가 반복·정기 작업을 요청할 때 사용하세요. 이 봇의 담당 업무로 등록됩니다. trigger: schedule(시간 기반) 또는 email(메일 도착 기반 — IMAP 설정 필요, email_from/email_subject 필터)", parameters: { type: "object", properties: { name: { type: "string", description: "루틴 이름" }, prompt: { type: "string", description: "매번 실행할 작업 지시" }, schedule: { type: "string", description: "every:30m | every:Nh | daily:HH:MM (trigger=schedule일 때)" }, trigger: { type: "string", description: "schedule | email" }, email_from: { type: "string", description: "트리거할 발신자 이메일 (trigger=email)" }, email_subject: { type: "string", description: "트리거할 제목 키워드 (trigger=email)" } }, required: ["name", "prompt"] } } },
   { type: "function", function: { name: "routine_list", description: "등록된 예약 작업 목록", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "routine_delete", description: "예약 작업 삭제 (id는 routine_list로 확인)", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } },
   { type: "function", function: { name: "memory_save", description: "중요한 사실·결정·진행 상태·사용자 선호를 이 봇의 장기기억(SSD)에 저장합니다 — 대화가 끝나거나 세션이 압축돼도 유지됩니다. 나중에 필요할 정보를 배우거나 작업 중간 상태를 남길 때 사용하세요.", parameters: { type: "object", properties: { content: { type: "string", description: "기억할 내용 (한 줄 요약)" } }, required: ["content"] } } },
   { type: "function", function: { name: "request_credentials", description: "지금 진행 중인 작업이 계정이 없어 중단된 경우에만 사용자에게 보안 입력 팝업을 띄웁니다 (예: browser_login 실패, 로그인이 꼭 필요한 페이지). 나중에 필요할 것 같다고 미리 요청하지 마세요 — 봇 생성·일반 지시·'언젠가 필요할' 용도로는 절대 사용 금지. 입력된 계정은 암호화되어 사이트 계정에 저장되고 browser_login으로 사용됩니다. 채팅으로 비밀번호를 직접 받지 말고 반드시 이 도구를 사용하세요.", parameters: { type: "object", properties: { site: { type: "string", description: "서비스·사이트 이름 (예: 다우오피스)" }, url: { type: "string", description: "로그인 페이지 URL (아는 경우)" }, reason: { type: "string", description: "왜 필요한지 사용자에게 보여줄 설명" }, task: { type: "string", description: "계정 입력 후 자동으로 이어서 진행할 원래 작업" } }, required: ["site"] } } },
   // 봇 간 협업 — 모든 봇이 사용 가능
   { type: "function", function: { name: "agent_list", description: "전체 봇 목록과 각 봇의 역할·모델·상태를 확인합니다", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "agent_direct", description: "다른 봇에게 즉시 업무를 지시하고 결과를 받습니다. 위임·협업·CEO에게 상향 보고에 사용 — 대장(CEO)에게내면 대장 세션에도 기록돼 사용자에게 보입니다", parameters: { type: "object", properties: { name: { type: "string", description: "지시할 봇 이름" }, instruction: { type: "string", description: "구체적 업무 지시" } }, required: ["name", "instruction"] } } },
+  { type: "function", function: { name: "agent_direct", description: "다른 봇에게 즉시 업무를 지시하고 결과를 받습니다. 위임·협업·CEO에게 상향 보고에 사용 — 대장(CEO)에게 내면 대장 세션에도 기록돼 사용자에게 보입니다. names 배열로 여러 봇에게 동시에 지시하면 병렬로 실행돼 결과가 합쳐져 돌아옵니다 (각각 다른 instruction을 주려면 instructions 배열 사용)", parameters: { type: "object", properties: { name: { type: "string", description: "지시할 봇 이름" }, names: { type: "array", items: { type: "string" }, description: "동시에 지시할 봇 이름 목록 — 병렬 실행" }, instruction: { type: "string", description: "구체적 업무 지시" }, instructions: { type: "array", items: { type: "string" }, description: "봇별 지시 (names와 같은 순서)" } }, required: ["instruction"] } } },
+  { type: "function", function: { name: "agent_message", description: "다른 봇에게 비동기 메시지를 보냅니다 — 결과를 기다리지 않고 받는 봇이 백그라운드로 처리한 뒤 회신이 이 세션에 기록됩니다. 지금 결과가 필요하면 agent_direct, 던져놓고 나중에 회신받을 작업이면 이 도구를 사용하세요", parameters: { type: "object", properties: { to: { type: "string", description: "받을 봇 이름" }, content: { type: "string", description: "전달할 업무·질문 내용" } }, required: ["to", "content"] } } },
 ];
 
 // 봇 관리 권한 — 관리자(CEO)는 전체, 팀장은 자기 하위 봇만 생성·수정·삭제 가능
@@ -190,36 +193,64 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     return `봇 생성됨: ${created.name} (모델: ${modelLabel(created.model ?? defaultModel())}, 상위: 당신) — agent_direct로 즉시 업무를 지시하세요.`;
   }
   if (name === "agent_direct") {
-    const target = findAgentByName(String(args.name ?? ""));
-    if (!target) return `봇 없음: ${args.name} — agent_list로 이름을 확인하세요`;
-    if (target.id === agentId) return "자기 자신에게는 지시할 수 없습니다";
+    // names 배열로 여러 봇에 동시 지시 가능 (병렬 팬아웃 — 그록 멀티에이전트 대응)
+    const names: string[] = Array.isArray(args.names) ? args.names.map(String).filter(Boolean) : [String(args.name ?? "")].filter(Boolean);
+    if (!names.length) return "오류: name 또는 names 필요";
     if (depth >= 2) return "위임 깊이 제한(2단계) — 이 봇에게 직접 수행하라고 지시하세요";
     const caller = agentId ? getAgent(agentId) : null;
-    const runId = uid();
-    db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, NULL, ?, 'running', ?)").run(runId, target.id, `[${caller?.name ?? "사용자"} 지시] ${String(args.instruction ?? "").slice(0, 200)}`, now());
-    const state: TeamAgentState = {
-      id: target.id, runId, name: target.name, avatar: target.avatar ?? "🤖",
-      role: target.role_prompt, task: `${caller?.name ?? "사용자"} 봇이 지시한 업무입니다. 수행하고 결과를 보고하세요.\n\n${args.instruction}`,
-      model: target.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: depth + 1,
+    const instruction = String(args.instruction ?? "");
+    const perInstruction = (v: unknown, i: number) => Array.isArray(args.instructions) ? String(args.instructions[i] ?? instruction) : instruction;
+
+    const runOne = async (nm: string, i: number): Promise<string> => {
+      const target = findAgentByName(nm);
+      if (!target) return `봇 없음: ${nm} — agent_list로 이름을 확인하세요`;
+      if (target.id === agentId) return "자기 자신에게는 지시할 수 없습니다";
+      const inst = perInstruction(args.instructions, i);
+      const runId = uid();
+      db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, NULL, ?, 'running', ?)").run(runId, target.id, `[${caller?.name ?? "사용자"} 지시] ${inst.slice(0, 200)}`, now());
+      const state: TeamAgentState = {
+        id: target.id, runId, name: target.name, avatar: target.avatar ?? "🤖",
+        role: target.role_prompt, task: `${caller?.name ?? "사용자"} 봇이 지시한 업무입니다. 수행하고 결과를 보고하세요.\n\n${inst}`,
+        model: target.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: depth + 1,
+      };
+      // 화면에 하위 봇 작업이 실시간으로 보이도록 이벤트 전파 (봇 카드 + 작업 애니메이션)
+      emit?.({ type: "agent_join", agent: { id: target.id, name: target.name, avatar: target.avatar, role: target.role_prompt, task: inst.slice(0, 200), model: target.model, model_label: modelLabel(target.model ?? defaultModel()) } });
+      emit?.({ type: "agent_start", agentId: target.id });
+      // 외부 신호를 전파해 중첩 실행이 바깥 데드라인을 넘지 않게 함 (내부 8분 상한은 runAgent 자체에도 있음)
+      await runAgent(state, target, emit ?? (() => {}), signal ?? AbortSignal.timeout(540_000));
+      emit?.({ type: "agent_done", agentId: target.id, status: state.status, result: (state.result ?? "").slice(0, 4000) });
+      db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
+        .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
+      // 대상 봇의 메인 세션에 실행 내역을 기록 — 정규화된 보고서 형식으로 저장해 봇 화면이 정돈되게 표시됨
+      {
+        const { appendToAgentSession } = await import("./routes/chat");
+        const { normalizeReport } = await import("./report");
+        const runMeta = JSON.stringify({ type: "tools", events: state.toolLog.map((l) => ({ type: "read", title: l.tool, url: "" })) });
+        const task = `[${caller?.name ?? "사용자"} 지시] ${inst}`;
+        const report = await normalizeReport(target.name, inst, state.result ?? "(결과 없음)", state.toolLog.map((l) => l.tool));
+        appendToAgentSession(agentSessionConvId(target.id), task, report, target.model, runMeta);
+      }
+      return `[${target.name} 실행 결과 — ${state.status === "done" ? "완료" : "실패"}]\n${state.result ?? "(결과 없음)"}`;
     };
-    // 화면에 하위 봇 작업이 실시간으로 보이도록 이벤트 전파 (봇 카드 + 작업 애니메이션)
-    emit?.({ type: "agent_join", agent: { id: target.id, name: target.name, avatar: target.avatar, role: target.role_prompt, task: String(args.instruction ?? "").slice(0, 200), model: target.model, model_label: modelLabel(target.model ?? defaultModel()) } });
-    emit?.({ type: "agent_start", agentId: target.id });
-    // 외부 신호를 전파해 중첩 실행이 바깥 데드라인을 넘지 않게 함 (내부 4분 상한은 runAgent 자체에도 있음)
-    await runAgent(state, target, emit ?? (() => {}), signal ?? AbortSignal.timeout(540_000));
-    emit?.({ type: "agent_done", agentId: target.id, status: state.status, result: (state.result ?? "").slice(0, 4000) });
-    db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
-      .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
-    // 대상 봇의 메인 세션에 실행 내역을 기록 — 정규화된 보고서 형식으로 저장해 봇 화면이 정돈되게 표시됨
-    {
-      const { appendToAgentSession } = await import("./routes/chat");
-      const { normalizeReport } = await import("./report");
-      const runMeta = JSON.stringify({ type: "tools", events: state.toolLog.map((l) => ({ type: "read", title: l.tool, url: "" })) });
-      const task = `[${caller?.name ?? "사용자"} 지시] ${String(args.instruction ?? "")}`;
-      const report = await normalizeReport(target.name, String(args.instruction ?? ""), state.result ?? "(결과 없음)", state.toolLog.map((l) => l.tool));
-      appendToAgentSession(agentSessionConvId(target.id), task, report, target.model, runMeta);
-    }
-    return `[${target.name} 실행 결과 — ${state.status === "done" ? "완료" : "실패"}]\n${state.result ?? "(결과 없음)"}`;
+
+    // 단일 지시는 순차, 다중 지시는 병렬로 동시 실행 — 결과를 합쳐 반환
+    const results = await Promise.all(names.map((nm, i) => runOne(nm, i)));
+    return results.join("\n\n---\n\n");
+  }
+  if (name === "agent_message") {
+    // 비동기 핸드오프 — 보낸 봇은 기다리지 않고, 받는 봇이 백그라운드로 처리 후 회신
+    const target = findAgentByName(String(args.to ?? args.name ?? ""));
+    if (!target) return `봇 없음: ${args.to ?? args.name} — agent_list로 이름을 확인하세요`;
+    if (target.id === agentId) return "자기 자신에게는 보낼 수 없습니다";
+    const content = String(args.content ?? args.message ?? "").trim();
+    if (!content) return "오류: content 필요";
+    const caller = agentId ? getAgent(agentId) : null;
+    const msgId = uid();
+    db.prepare("INSERT INTO agent_messages (id, from_agent_id, to_agent_id, content, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)")
+      .run(msgId, agentId ?? null, target.id, content.slice(0, 2000), now());
+    const { dispatchAgentMessage } = await import("./approvals");
+    dispatchAgentMessage(msgId); // 백그라운드 디스패치 — 결과를 기다리지 않음
+    return `메시지 전달됨: ${target.name}이 백그라운드로 처리를 시작했습니다 — 완료되면 회신이 이 세션에 기록됩니다. 다른 작업을 이어서 진행하세요.`;
   }
   if (name === "memory_save") {
     const content = String(args.content ?? "").trim();
@@ -267,12 +298,18 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
   }
   if (name === "routine_add") {
     const { nextRunAt } = await import("./routines");
-    const schedule = String(args.schedule ?? "");
-    if (!nextRunAt(schedule)) return `schedule 형식 오류 — every:30m, every:2h, daily:08:30 같은 형식으로 입력하세요 (받은 값: ${schedule})`;
+    const isEmail = String(args.trigger ?? "") === "email";
+    if (isEmail) {
+      if (!args.email_from && !args.email_subject) return "오류: 이메일 트리거는 email_from 또는 email_subject가 필요합니다";
+    } else {
+      const schedule = String(args.schedule ?? "");
+      if (!nextRunAt(schedule)) return `schedule 형식 오류 — every:30m, every:2h, daily:08:30 같은 형식으로 입력하세요 (받은 값: ${schedule})`;
+    }
     const id = uid();
-    db.prepare("INSERT INTO routines (id, name, prompt, schedule, model, agent_id, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)")
-      .run(id, String(args.name ?? "루틴").slice(0, 50), String(args.prompt ?? ""), schedule, null, agentId ?? null, now());
-    return `루틴 등록됨: ${args.name} (${schedule}) — 담당 봇: ${agentId ? "이 봇" : "대장"}`;
+    const emailFilter = isEmail ? JSON.stringify({ from: args.email_from ?? null, subject: args.email_subject ?? null }) : null;
+    db.prepare("INSERT INTO routines (id, name, prompt, schedule, model, agent_id, enabled, trigger_type, email_filter, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)")
+      .run(id, String(args.name ?? "루틴").slice(0, 50), String(args.prompt ?? ""), isEmail ? "email" : String(args.schedule), null, agentId ?? null, isEmail ? "email" : "schedule", emailFilter, now());
+    return `루틴 등록됨: ${args.name} (${isEmail ? `메일 트리거 — 발신:${args.email_from ?? "전체"} 제목:${args.email_subject ?? "전체"}` : args.schedule}) — 담당 봇: ${agentId ? "이 봇" : "대장"}${isEmail ? ". IMAP 설정(imap_host/user/pass)이 서버 설정에 있어야 동작합니다" : ""}`;
   }
   if (name === "routine_list") {
     const rows = db.prepare("SELECT r.id, r.name, r.schedule, r.enabled, a.name agent_name FROM routines r LEFT JOIN agents a ON a.id = r.agent_id ORDER BY r.created_at").all() as any[];
@@ -408,7 +445,10 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
             messages.push({ role: "tool", tool_call_id: tc.id, content: out });
             continue;
           }
-          out = tc.name === "agent_direct"
+          // 승인 경계 — 위험 액션은 실행하지 않고 사용자 승인 큐에 올림
+          const { gateApproval } = await import("./approvals");
+          const gate = gateApproval(tc.name, args, agent.id, state.task);
+          out = gate ?? (tc.name === "agent_direct" || tc.name === "agent_message"
             ? await callBuiltin(tc.name, args, agent.id, signal, state.depth, trackEmit) // 위임은 자체 시간 상한으로 관리
             : await withToolTimeout(
                 builtinNames.has(tc.name)
@@ -416,7 +456,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
                   : tc.name.startsWith("browser_") || tc.name === "ego_run"
                     ? browserTool(state.runId, tc.name, args)
                     : mcpCall(tc.name, args),
-              );
+              ));
           if (/^(도구 오류|알 수 없는 도구|브라우저 오류):/.test(out)) { ok = false; errMsg = out.slice(0, 120); }
         } catch (e) {
           ok = false;
@@ -665,7 +705,7 @@ export const teamRoute = new Hono()
 const withAgentMeta = (a: any) => ({ ...a, model_label: modelLabel(a.model ?? defaultModel()) });
 
 export const agentsRoute = new Hono()
-  .get("/", (c) => c.json({ agents: (db.prepare("SELECT * FROM agents ORDER BY is_boss DESC, created_at").all() as any[]).map(withAgentMeta) }))
+  .get("/", (c) => c.json({ agents: (db.prepare("SELECT * FROM agents ORDER BY is_boss DESC, pinned DESC, created_at").all() as any[]).map(withAgentMeta) }))
   .get("/running", (c) => c.json({ running: [...runningAgents].map((id) => ({ id, tool: agentActivity.get(id) || null })) }))
   .post("/", async (c) => {
     const b = await c.req.json();
@@ -682,9 +722,24 @@ export const agentsRoute = new Hono()
     const a = db.prepare("SELECT * FROM agents WHERE id = ?").get(c.req.param("id")) as Agent | null;
     if (!a) return c.json({ error: "not found" }, 404);
     if (b.model && !(await listAllModelIds()).has(b.model)) return c.json({ error: `인증된 모델이 아닙니다: ${b.model}` }, 400);
-    db.prepare("UPDATE agents SET name = ?, role_prompt = ?, model = ?, avatar = ? WHERE id = ?")
-      .run(b.name ?? a.name, b.role_prompt ?? a.role_prompt, b.model ?? a.model, b.avatar ?? a.avatar, a.id);
+    db.prepare("UPDATE agents SET name = ?, role_prompt = ?, model = ?, avatar = ?, pinned = ?, hidden = ? WHERE id = ?")
+      .run(b.name ?? a.name, b.role_prompt ?? a.role_prompt, b.model ?? a.model, b.avatar ?? a.avatar,
+        b.pinned === undefined ? a.pinned : (b.pinned ? 1 : 0), b.hidden === undefined ? a.hidden : (b.hidden ? 1 : 0), a.id);
     return c.json({ agent: withAgentMeta(db.prepare("SELECT * FROM agents WHERE id = ?").get(a.id)) });
+  })
+  // 봇 복제 — 프로필·역할·모델·스킬 배정만 복사, 대화 기록·장기기억은 복사하지 않음 (그록과 동일)
+  .post("/:id/duplicate", (c) => {
+    const a = db.prepare("SELECT * FROM agents WHERE id = ?").get(c.req.param("id")) as Agent | null;
+    if (!a) return c.json({ error: "not found" }, 404);
+    const id = uid();
+    db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, parent_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(id, uniqueName(`${a.name} 사본`), a.role_prompt, a.model, `face:${id}`, a.tools, a.persistent, a.parent_id, now());
+    // 이 봇 전용으로 배정된 스킬도 같은 조건으로 복사
+    const skills = db.prepare("SELECT * FROM skills WHERE agent_id = ?").all(a.id) as any[];
+    for (const s of skills) {
+      try { db.prepare("INSERT INTO skills (id, name, prompt, agent_id, created_at) VALUES (?, ?, ?, ?, ?)").run(uid(), s.name, s.prompt, id, now()); } catch {}
+    }
+    return c.json({ agent: withAgentMeta(db.prepare("SELECT * FROM agents WHERE id = ?").get(id)) });
   })
   // CEO 지정: 이 봇이 모든 봇의 관리자가 됨 (기존 CEO는 해제)
   .post("/:id/boss", (c) => {

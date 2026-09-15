@@ -53,11 +53,51 @@ export async function runRoutine(r: any): Promise<string> {
   return out;
 }
 
+// 이메일 트리거 — IMAP으로 새 메일을 폴링해 필터(from/subject) 매칭 시 루틴 발화 (그록 이벤트 트리거 대응)
+let emailChecking = false;
+async function checkEmailTriggers() {
+  const rows = db.prepare("SELECT * FROM routines WHERE enabled = 1 AND trigger_type = 'email'").all() as any[];
+  if (!rows.length) return;
+  const { getSetting } = await import("./db");
+  const host = getSetting("imap_host"), user = getSetting("imap_user"), pass = getSetting("imap_pass");
+  if (!host || !user || !pass) return;
+  const { ImapFlow } = await import("imapflow");
+  const client = new ImapFlow({ host, port: Number(getSetting("imap_port") || 993), secure: getSetting("imap_tls") !== "0", auth: { user, pass }, logger: false });
+  try {
+    await client.connect();
+    const lock = await client.getMailboxLock("INBOX");
+    try {
+      for (const r of rows) {
+        const filter = JSON.parse(r.email_filter ?? "{}") as { from?: string; subject?: string };
+        const criteria: any = { seen: false };
+        if (filter.from) criteria.from = filter.from;
+        if (filter.subject) criteria.subject = filter.subject;
+        const uids = await client.search(criteria);
+        if (!uids || !(uids as number[]).length) continue;
+        for (const uidN of (uids as number[]).slice(0, 5)) {
+          const msg = await client.fetchOne(String(uidN), { envelope: true });
+          const subj = (msg && msg.envelope?.subject) || "";
+          const from = (msg && msg.envelope?.from?.[0]?.address) || "";
+          // 실제 메일 내용을 프롬프트에 포함해 봇이 맥락을 알고 작업
+          const task = { ...r, prompt: `${r.prompt}\n\n[트리거된 메일]\n발신: ${from}\n제목: ${subj}` };
+          db.prepare("UPDATE routines SET last_run_at = ? WHERE id = ?").run(Date.now(), r.id);
+          await client.messageFlagsAdd(String(uidN), ["\\Seen"]).catch(() => {});
+          runRoutine(task).catch((e) => console.error(`[routine ${r.name}]`, (e as Error).message));
+        }
+      }
+    } finally { lock.release(); }
+    await client.logout();
+  } catch (e) {
+    console.error("[mybot] 이메일 트리거 확인 실패:", (e as Error).message);
+    try { await client.logout(); } catch {}
+  }
+}
+
 let timer: ReturnType<typeof setInterval> | null = null;
 export function startScheduler() {
   if (timer) return;
   timer = setInterval(async () => {
-    const rows = db.prepare("SELECT * FROM routines WHERE enabled = 1").all() as any[];
+    const rows = db.prepare("SELECT * FROM routines WHERE enabled = 1 AND trigger_type != 'email'").all() as any[];
     const nowMs = Date.now();
     for (const r of rows) {
       const next = nextRunAt(r.schedule, r.last_run_at ?? r.created_at);
@@ -66,6 +106,10 @@ export function startScheduler() {
         runRoutine(r).catch((e) => console.error(`[routine ${r.name}]`, e.message));
       }
     }
+    if (!emailChecking) {
+      emailChecking = true;
+      checkEmailTriggers().finally(() => { emailChecking = false; });
+    }
   }, 30_000);
 }
 
@@ -73,10 +117,17 @@ export const routinesRoute = new Hono()
   .get("/", (c) => c.json({ routines: db.prepare("SELECT * FROM routines ORDER BY created_at").all() }))
   .post("/", async (c) => {
     const b = await c.req.json();
-    if (!b.name?.trim() || !b.prompt?.trim() || !b.schedule) return c.json({ error: "name/prompt/schedule 필요" }, 400);
-    if (!nextRunAt(b.schedule)) return c.json({ error: "schedule 형식: every:30m, every:2h, daily:08:30" }, 400);
+    const isEmail = b.trigger_type === "email";
+    if (!b.name?.trim() || !b.prompt?.trim()) return c.json({ error: "name/prompt 필요" }, 400);
+    if (isEmail) {
+      const f = b.email_filter ?? {};
+      if (!f.from && !f.subject) return c.json({ error: "email_filter의 from 또는 subject 필요" }, 400);
+    } else if (!b.schedule || !nextRunAt(b.schedule)) {
+      return c.json({ error: "schedule 형식: every:30m, every:2h, daily:08:30" }, 400);
+    }
     const id = uid();
-    db.prepare("INSERT INTO routines (id, name, prompt, schedule, model, agent_id, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)").run(id, b.name, b.prompt, b.schedule, b.model ?? "main", b.agent_id || null, now());
+    db.prepare("INSERT INTO routines (id, name, prompt, schedule, model, agent_id, enabled, trigger_type, email_filter, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)")
+      .run(id, b.name, b.prompt, isEmail ? "email" : b.schedule, b.model ?? "main", b.agent_id || null, isEmail ? "email" : "schedule", isEmail ? JSON.stringify(b.email_filter) : null, now());
     return c.json({ routine: db.prepare("SELECT * FROM routines WHERE id = ?").get(id) });
   })
   .post("/:id/toggle", (c) => {

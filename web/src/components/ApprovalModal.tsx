@@ -1,0 +1,55 @@
+import { useState } from "react";
+import { api, type ApprovalRequest } from "../api";
+import { ShieldAlert, Check, X, Ban } from "lucide-react";
+
+// 승인 경계 — 봇이 위험 액션(발신·삭제·결제 류)을 실행하기 전 사용자 승인을 받는 팝업.
+// 그록봇 Auto Review 대응: Allow once / Deny / Always allow. 승인 시 서버가 저장된 도구를 실행하고 봇 작업을 재개한다.
+export function ApprovalModal({ request, onDone }: { request: ApprovalRequest; onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
+
+  const act = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    try { await fn(); onDone(); } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div className="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl">
+        <div className="mb-4 flex items-start gap-3">
+          <div className="rounded-xl bg-amber-500/10 p-2 text-amber-400"><ShieldAlert size={18} /></div>
+          <div className="flex-1">
+            <h2 className="text-sm font-semibold">봇이 승인을 요청했습니다</h2>
+            <p className="mt-0.5 text-xs leading-relaxed text-zinc-500">
+              {request.agent_name ? <b className="text-zinc-300">{request.agent_name}</b> : "봇"}이 외부 영향이 있는 작업을 실행하려 합니다.
+            </p>
+          </div>
+        </div>
+        <div className="rounded-lg bg-zinc-800/70 px-3 py-2.5">
+          <div className="font-mono text-[11px] text-amber-300/90">{request.tool}</div>
+          <div className="mt-1 break-all text-xs leading-relaxed text-zinc-400">{request.summary}</div>
+        </div>
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          <button onClick={() => act(() => api.approveRequest(request.id))} disabled={busy}
+            className="flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 py-2 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-40">
+            <Check size={13} /> 승인
+          </button>
+          <button onClick={() => act(() => api.denyRequest(request.id))} disabled={busy}
+            className="flex items-center justify-center gap-1.5 rounded-lg bg-zinc-800 py-2 text-xs text-zinc-300 hover:bg-zinc-700 disabled:opacity-40">
+            <X size={13} /> 거부
+          </button>
+          <button onClick={() => act(() => api.approveRequest(request.id, true))} disabled={busy}
+            className="flex items-center justify-center gap-1.5 rounded-lg bg-zinc-800 py-2 text-[11px] text-zinc-400 hover:text-zinc-200 disabled:opacity-40">
+            <Check size={12} /> 이 도구 항상 허용
+          </button>
+          <button onClick={() => act(() => api.denyRequest(request.id, true))} disabled={busy}
+            className="flex items-center justify-center gap-1.5 rounded-lg bg-zinc-800 py-2 text-[11px] text-zinc-500 hover:text-zinc-300 disabled:opacity-40">
+            <Ban size={12} /> 이 도구 항상 승인 필요
+          </button>
+        </div>
+        <p className="mt-3 text-[10px] leading-relaxed text-zinc-600">
+          승인하면 서버가 이 작업을 실제로 실행하고 봇의 원래 업무를 자동으로 이어갑니다.
+        </p>
+      </div>
+    </div>
+  );
+}

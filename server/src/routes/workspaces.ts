@@ -34,23 +34,33 @@ db.exec(`INSERT OR IGNORE INTO skills (id, name, prompt, created_at) VALUES
   ('sk_review', '리뷰', '다음 코드를 리뷰해줘. 버그-성능-가독성-보안 순으로:\n\n', ${now()})`);
 
 export const skillsRoute = new Hono()
-  .get("/", (c) => c.json({ skills: db.prepare("SELECT * FROM skills ORDER BY created_at").all() }))
+  .get("/", (c) => c.json({ skills: db.prepare("SELECT s.*, a.name agent_name FROM skills s LEFT JOIN agents a ON a.id = s.agent_id ORDER BY s.created_at").all() }))
   .post("/", async (c) => {
     const b = await c.req.json();
     if (!b.name?.trim()) return c.json({ error: "name 필요" }, 400);
     const id = uid();
     try {
-      db.prepare("INSERT INTO skills (id, name, prompt, created_at) VALUES (?, ?, ?, ?)").run(id, b.name.trim().replace(/^\//, ""), b.prompt ?? "", now());
+      db.prepare("INSERT INTO skills (id, name, prompt, agent_id, created_at) VALUES (?, ?, ?, ?, ?)").run(id, b.name.trim().replace(/^\//, ""), b.prompt ?? "", b.agent_id ?? null, now());
     } catch {
       return c.json({ error: "같은 이름의 스킬이 있습니다" }, 400);
     }
     return c.json({ skill: db.prepare("SELECT * FROM skills WHERE id = ?").get(id) });
+  })
+  // 봇별 활성화 — agent_id 지정 시 그 봇 전용, null이면 전체 공유
+  .patch("/:id", async (c) => {
+    const s = db.prepare("SELECT * FROM skills WHERE id = ?").get(c.req.param("id")) as any;
+    if (!s) return c.json({ error: "not found" }, 404);
+    const b = await c.req.json();
+    db.prepare("UPDATE skills SET prompt = ?, agent_id = ? WHERE id = ?")
+      .run(b.prompt ?? s.prompt, b.agent_id === undefined ? s.agent_id : b.agent_id, s.id);
+    return c.json({ skill: db.prepare("SELECT * FROM skills WHERE id = ?").get(s.id) });
   })
   .delete("/:id", (c) => {
     db.prepare("DELETE FROM skills WHERE id = ?").run(c.req.param("id"));
     return c.json({ ok: true });
   });
 
-export function getSkill(name: string): { prompt: string } | null {
-  return (db.prepare("SELECT * FROM skills WHERE name = ?").get(name) as any) ?? null;
+// agentId 지정 시: 공유 스킬(agent_id NULL) + 해당 봇 전용 스킬만 사용 가능
+export function getSkill(name: string, agentId?: string | null): { prompt: string } | null {
+  return (db.prepare("SELECT * FROM skills WHERE name = ? AND (agent_id IS NULL OR agent_id IS ?)").get(name, agentId ?? null) as any) ?? null;
 }
