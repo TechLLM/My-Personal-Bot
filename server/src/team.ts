@@ -9,7 +9,7 @@ import { webSearch } from "./search";
 import { mcpConfigured, mcpTools, mcpCall } from "./mcp";
 import { BROWSER_TOOLS, browserTool, closeAgentPage } from "./browser";
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 
 // 에이전트 공용 작업 디렉터리 — 파일 도구는 여기로 샌드박스
 export const WORK_DIR = join(import.meta.dir, "..", "data", "workspace");
@@ -38,7 +38,7 @@ export const BOSS_NAME = "대장";
 // 새 봇의 기본 모델 — 설정의 default_model 우선, 없으면 subagent 별칭
 export const defaultModel = () => getSetting("default_model") || "subagent";
 
-const BOSS_ROLE = "당신은 MyBot의 CEO(총괄 관리자) 봇입니다. 사용자의 모든 업무 지시를 받는 총괄 책임자이며, 모든 봇에 대한 전체 권한을 가집니다. 스스로 도구(웹검색·파일·브라우저·MCP)를 사용해 직접 수행하거나, 필요하면 전문 역할 봇들에게 분배하고 결과를 종합해 보고합니다. 봇 관리: agent_create로 새 전문 봇 생성, agent_list로 전체 봇 현황 확인, agent_direct로 임의 봇에게 즉시 업무 지시(결과를 받아 종합), agent_update로 봇의 역할·모델 수정 및 팀장 지정/해제(lead 옵션)·하위 봇 한도 조정(max_children, 기본 4), agent_delete로 불필요한 봇 정리. 조직이 커지면 분야별 팀장을 지정하세요 — 팀장은 자기 하위 봇을 생성·지시·취합해 당신에게 보고합니다. 사용자가 반복적·정기적 작업을 요청하면 routine_add 도구로 예약 작업으로 등록하세요 — 일회성 실행으로 처리하지 마세요. 이전 대화와 기억한 맥락을 바탕으로 업무의 연속성을 유지하세요.";
+const BOSS_ROLE = "당신은 MyBot의 CEO(총괄 관리자) 봇입니다. 사용자의 모든 업무 지시를 받는 총괄 책임자이며, 모든 봇에 대한 전체 권한을 가집니다. 스스로 도구(웹검색·파일·브라우저·MCP)를 사용해 직접 수행하거나, 필요하면 전문 역할 봇들에게 분배하고 결과를 종합해 보고합니다. 봇 관리: agent_create로 새 전문 봇 생성, agent_list로 전체 봇 현황 확인, agent_direct로 임의 봇에게 즉시 업무 지시(결과를 받아 종합), agent_update로 봇의 이름 변경(new_name)·역할·모델 수정 및 팀장 지정/해제(lead 옵션)·하위 봇 한도 조정(max_children, 기본 4), agent_delete로 불필요한 봇 정리. 조직이 커지면 분야별 팀장을 지정하세요 — 팀장은 자기 하위 봇을 생성·지시·취합해 당신에게 보고합니다. 사용자가 반복적·정기적 작업을 요청하면 routine_add 도구로 예약 작업으로 등록하세요 — 일회성 실행으로 처리하지 마세요. 이전 대화와 기억한 맥락을 바탕으로 업무의 연속성을 유지하세요.";
 
 // 사용자가 지정한 CEO 봇 반환 — 없으면 대장 시드
 export function ensureBossAgent(): Agent {
@@ -52,7 +52,7 @@ export function ensureBossAgent(): Agent {
     // 팀장 지정 지침이 없으면 갱신 (사용자가 직접 쓴 역할문이면 뒤에 덧붙임)
     const role = a.role_prompt.includes("MyBot의 CEO")
       ? BOSS_ROLE
-      : `${a.role_prompt}\n\n[CEO 권한] 당신은 모든 봇의 관리자입니다. agent_create(봇 생성), agent_list(봇 현황), agent_direct(봇에게 즉시 지시), agent_update(역할·모델 수정·lead 옵션으로 팀장 지정/해제·max_children으로 하위 봇 한도 조정), agent_delete(봇 삭제), routine_add(예약 등록) 도구를 사용할 수 있습니다. 팀장은 자기 하위 봇을 생성·지시·취합해 당신에게 보고합니다.`;
+      : `${a.role_prompt}\n\n[CEO 권한] 당신은 모든 봇의 관리자입니다. agent_create(봇 생성), agent_list(봇 현황), agent_direct(봇에게 즉시 지시), agent_update(이름 변경·역할·모델 수정·lead 옵션으로 팀장 지정/해제·max_children으로 하위 봇 한도 조정), agent_delete(봇 삭제), routine_add(예약 등록) 도구를 사용할 수 있습니다. 팀장은 자기 하위 봇을 생성·지시·취합해 당신에게 보고합니다.`;
     db.prepare("UPDATE agents SET role_prompt = ? WHERE id = ?").run(role, a.id);
     a.role_prompt = role;
   }
@@ -158,7 +158,7 @@ export const BUILTIN_TOOLS = [
 // 봇 관리 권한 — 관리자(CEO)는 전체, 팀장은 자기 하위 봇만 생성·수정·삭제 가능
 export const MANAGE_TOOLS = [
   { type: "function", function: { name: "agent_create", description: "새 전문 봇을 만듭니다. 작업이 커지면 전문 봇을 만들어 위임하세요. 생성한 봇은 당신의 하위 봇이 됩니다", parameters: { type: "object", properties: { name: { type: "string", description: "봇 이름" }, role: { type: "string", description: "페르소나·역할 지침" }, model: { type: "string", description: "subagent|fast|code|main (비우면 설정의 기본 모델)" } }, required: ["name", "role"] } } },
-  { type: "function", function: { name: "agent_update", description: "봇의 역할 지침·모델을 수정하거나 팀장으로 지정/해제합니다 (lead·max_children 지정은 관리자만 가능)", parameters: { type: "object", properties: { name: { type: "string" }, role: { type: "string" }, model: { type: "string" }, lead: { type: "boolean", description: "true=팀장 지정, false=팀장 해제 (관리자만)" }, max_children: { type: "number", description: "팀장이 생성 가능한 하위 봇 한도 (관리자만, 기본 4)" } }, required: ["name"] } } },
+  { type: "function", function: { name: "agent_update", description: "봇의 이름·역할 지침·모델을 수정하거나 팀장으로 지정/해제합니다 (관리자는 자신 포함 전체, 팀장은 자기 하위 봇만. lead·max_children 지정은 관리자만 가능)", parameters: { type: "object", properties: { name: { type: "string", description: "대상 봇의 현재 이름" }, new_name: { type: "string", description: "변경할 새 이름" }, role: { type: "string" }, model: { type: "string" }, lead: { type: "boolean", description: "true=팀장 지정, false=팀장 해제 (관리자만)" }, max_children: { type: "number", description: "팀장이 생성 가능한 하위 봇 한도 (관리자만, 기본 4)" } }, required: ["name"] } } },
   { type: "function", function: { name: "agent_delete", description: "봇을 삭제합니다. 관리자는 모든 봇, 팀장은 자기 하위 봇만 삭제 가능 (관리자 봇은 삭제 불가)", parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } } },
 ];
 
@@ -288,11 +288,23 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
       return `권한 없음: 팀장은 자기 하위 봇만 수정할 수 있습니다 (${target.name}의 상위 봇이 아님)`;
     if ((args.lead !== undefined || args.max_children !== undefined) && caller && !caller.is_boss)
       return "권한 없음: 팀장 지정·해제·한도 변경은 관리자(CEO)만 가능합니다";
+    // 이름 변경 — 관리자는 모든 봇(자신 포함), 팀장은 자기 하위 봇만 (위 권한 체크가 보장)
+    let renamed: string | null = null;
+    if (args.new_name !== undefined) {
+      const nn = String(args.new_name).trim().slice(0, 30);
+      if (!nn) return "오류: new_name이 비어 있습니다";
+      if (nn !== target.name && db.prepare("SELECT 1 FROM agents WHERE name = ?").get(nn)) return `오류: 이미 존재하는 이름입니다 — ${nn}`;
+      renamed = nn;
+    }
     const mc = args.max_children !== undefined && (!caller || caller.is_boss) ? Math.max(0, Number(args.max_children) || 0) : target.max_children;
-    db.prepare("UPDATE agents SET role_prompt = ?, model = ?, is_lead = ?, max_children = ? WHERE id = ?")
-      .run(args.role ? String(args.role) : target.role_prompt, args.model ? String(args.model) : target.model,
+    db.prepare("UPDATE agents SET name = ?, role_prompt = ?, model = ?, is_lead = ?, max_children = ? WHERE id = ?")
+      .run(renamed ?? target.name, args.role ? String(args.role) : target.role_prompt, args.model ? String(args.model) : target.model,
         args.lead !== undefined && (!caller || caller.is_boss) ? (args.lead ? 1 : 0) : target.is_lead, mc ?? null, target.id);
-    return `봇 수정됨: ${target.name}${args.lead !== undefined && (!caller || caller.is_boss) ? (args.lead ? " — 팀장 지정" : " — 팀장 해제") : ""}${args.max_children !== undefined && (!caller || caller.is_boss) ? ` — 하위 봇 한도 ${mc}개` : ""}`;
+    // 이름 기반 작업 폴더(agents/<이름>/MEMORY.md)도 함께 이동 — 메모리 유지
+    if (renamed && renamed !== target.name) {
+      try { renameSync(join(WORK_DIR, "agents", target.name), join(WORK_DIR, "agents", renamed)); } catch {}
+    }
+    return `봇 수정됨: ${target.name}${renamed && renamed !== target.name ? ` → ${renamed}` : ""}${args.lead !== undefined && (!caller || caller.is_boss) ? (args.lead ? " — 팀장 지정" : " — 팀장 해제") : ""}${args.max_children !== undefined && (!caller || caller.is_boss) ? ` — 하위 봇 한도 ${mc}개` : ""}`;
   }
   if (name === "agent_delete") {
     const target = findAgentByName(String(args.name ?? ""));
@@ -402,7 +414,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
       content: `당신은 전문 에이전트 "${agent.name}"입니다.\n역할: ${agent.role_prompt}\n\n[현재 시각] ${new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul", year: "numeric", month: "long", day: "numeric", weekday: "long", hour: "2-digit", minute: "2-digit" })} (한국 표준시) — "오늘/최근" 표현과 검색 결과의 연도는 반드시 이 시각 기준으로 판별하세요.\n\n지시받은 작업을 수행하세요. 필요하면 도구(web_search, 브라우저, 파일, MCP)를 사용하세요. 브라우저 도구는 사용자의 로그인 세션을 공유하므로 로그인이 필요한 사이트도 열 수 있습니다.\n\n${isBoss
         ? "당신은 관리자(CEO)입니다 — 모든 봇에 대한 전체 권한을 가집니다: agent_create(봇 생성), agent_update(역할·모델 수정·팀장 지정/해제), agent_delete(봇 삭제), agent_direct(임의 봇에게 지시). 조직이 커지면 agent_update의 lead 옵션으로 팀장을 지정하고, 팀장이 하위 봇 생성·지시·취합을 담당하게 하세요."
         : isLead
-          ? "당신은 팀장입니다 — 자기 하위 봇에 대한 관리 권한을 가집니다: agent_create(하위 봇 생성 — 생성된 봇은 당신의 팀 소속, 최대 4개까지. 초과가 필요하면 관리자에게 요청), agent_update·agent_delete(하위 봇만), agent_direct(하위 봇에게 지시하고 결과를 취합해 지시한 쪽에 보고). 한도에 도달하면 더 만들지 말고 있는 봇들에게 지시하세요."
+          ? "당신은 팀장입니다 — 자기 하위 봇에 대한 관리 권한을 가집니다: agent_create(하위 봇 생성 — 생성된 봇은 당신의 팀 소속, 최대 4개까지. 초과가 필요하면 관리자에게 요청), agent_update(하위 봇의 이름 변경·역할·모델 수정), agent_delete(하위 봇 삭제), agent_direct(하위 봇에게 지시하고 결과를 취합해 지시한 쪽에 보고). 한도에 도달하면 더 만들지 말고 있는 봇들에게 지시하세요."
           : "다른 봇과 협업할 수 있습니다: agent_list로 봇 목록 확인, agent_direct로 봇에게 위임하고 결과를 받으세요. 새 봇 생성이 필요하면 관리자(CEO)나 팀장에게 요청하세요 — 봇 생성 권한은 관리자·팀장에게만 있습니다."}\n파일은 공유 작업 디렉터리로 주고받습니다.\n최종 답변은 지시한 쪽에 보고하는 결과 보고서로 작성하세요 — 핵심 결과와 근거를 간결하게.\n결과를 CEO(관리자)에게 전달·보고하려면 agent_list에서 [CEO] 봇 이름을 확인해 agent_direct로 지시하세요 — 대장 세션에 기록돼 사용자에게 보입니다.\n\n[중요] 실제 작업(봇 생성·지시·검색·파일)은 반드시 도구를 호출해 수행하고 결과를 확인한 뒤 완료를 보고하세요. 도구 호출 없이 '했다'고 주장하지 마세요. 지금 작업이 계정 부재로 중단된 경우에만 request_credentials 도구로 사용자 입력 팝업을 띄우세요 — 미리 요청하거나 봇 생성에는 사용하지 마세요. 채팅으로 비밀번호를 받지 마세요. 중요한 업무 노트·결정·진행 상태는 memory_save로 장기기억에 남기거나 agents/${agent.name}/MEMORY.md 파일에 직접 기록하세요 — 작업 시작 시 먼저 읽어 맥락을 잇는 것을 권장합니다.
 
 [보고서 형식 — 반드시 준수] 최종 보고서는 이모지 없이 아래 섹션으로 작성하세요: ## 요약 (1~2문장) / ## 결과 (실제 수집 데이터 — 마크다운 표·목록·링크) / ## 미확인 (확인 못한 항목, 없으면 '없음') / ## 다음 단계 (이어갈 작업, 없으면 '없음'). 도구로 실제 확인한 데이터만 ## 결과에 쓰세요 — 추측이나 기억에 의존한 내용을 사실처럼 쓰지 말고, 확인하지 못한 항목은 반드시 ## 미확인에 명시하세요. 지시받은 범위만 수행·보고하세요 — 이전 작업의 결과를 이번 결과처럼 섞어 쓰지 마세요.`,
