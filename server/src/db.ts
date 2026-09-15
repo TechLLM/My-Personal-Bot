@@ -111,13 +111,23 @@ CREATE TABLE IF NOT EXISTS agent_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_runs_agent ON agent_runs(agent_id, created_at);
 
--- 봇이 브라우저로 자동 로그인할 사이트 계정 (비밀번호는 로컬 DB에만 저장)
+-- 봇이 브라우저로 자동 로그인할 사이트 계정 (비밀번호는 AES-256-GCM 암호화, 로컬 DB에만 저장)
 CREATE TABLE IF NOT EXISTS site_logins (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   url TEXT NOT NULL,
   username TEXT NOT NULL,
   password TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+-- 봇이 사용자에게 요청한 계정 입력 — 팝업으로 수집, 완료/거절 시 상태 변경
+CREATE TABLE IF NOT EXISTS credential_requests (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  url TEXT,
+  reason TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
   created_at INTEGER NOT NULL
 );
 `);

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, streamChat, runTeam, mybotFetch, type Agent, type Conversation, type Endpoint, type Message, type Model, type TeamPlanTask } from "./api";
+import { api, streamChat, runTeam, mybotFetch, type Agent, type Conversation, type Endpoint, type Message, type Model, type TeamPlanTask, type SiteRequest } from "./api";
 import { Sidebar } from "./components/Sidebar";
 import { Composer, type Mode, type Persona } from "./components/Composer";
 import { MessageItem } from "./components/MessageItem";
 import { SearchTrace, type SearchEvent } from "./components/SearchTrace";
 import { TeamTrace, type TeamEvent } from "./components/TeamTrace";
 import { SettingsModal } from "./components/SettingsModal";
+import { CredentialModal } from "./components/CredentialModal";
 import { BotLobby } from "./components/BotLobby";
 import { Menu, Crown } from "lucide-react";
 import { AgentIcon } from "./components/icons";
@@ -33,6 +34,7 @@ export default function App() {
   const [pendingAgent, setPendingAgent] = useState<Agent | null>(null); // 새 세션을 담당할 봇 (첫 전송 시 귀속)
   const [defaultModel, setDefaultModel] = useState(""); // 설정의 기본 AI 모델 — 새 봇의 기본값
   const [createSignal, setCreateSignal] = useState(0); // 로비의 생성 마법사를 여는 신호 ("+ 새 봇")
+  const [credRequests, setCredRequests] = useState<SiteRequest[]>([]); // 봇이 요청한 계정 입력 대기열
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -68,6 +70,14 @@ export default function App() {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages, searchEvents]);
+
+  // 봇이 request_credentials로 요청한 계정 입력을 주기적으로 확인해 팝업 표시
+  useEffect(() => {
+    const poll = () => api.siteRequests().then((d) => setCredRequests(d.requests)).catch(() => {});
+    poll();
+    const t = setInterval(poll, 8000);
+    return () => clearInterval(t);
+  }, []);
 
   const loadConversation = useCallback((id: string) => {
     setConvId(id);
@@ -372,6 +382,12 @@ export default function App() {
         )}
       </main>
       {settingsOpen && <SettingsModal endpoints={endpoints} models={models} onClose={() => { setSettingsOpen(false); api.models().then((d) => { setModels(d.models); setEndpoints(d.endpoints); }); mybotFetch("/api/settings").then((r) => r.json()).then((d) => setDefaultModel(d.settings?.default_model ?? "")).catch(() => {}); }} />}
+      {credRequests[0] && (
+        <CredentialModal
+          request={credRequests[0]}
+          onDone={() => setCredRequests((prev) => prev.filter((r) => r.id !== credRequests[0].id))}
+        />
+      )}
     </div>
   );
 }

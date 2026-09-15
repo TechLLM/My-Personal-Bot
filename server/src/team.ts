@@ -107,6 +107,7 @@ export const BUILTIN_TOOLS = [
   { type: "function", function: { name: "routine_add", description: "예약 작업(루틴)을 등록합니다. 사용자가 반복·정기 작업을 요청할 때 사용하세요. 이 봇의 담당 업무로 등록됩니다", parameters: { type: "object", properties: { name: { type: "string", description: "루틴 이름" }, prompt: { type: "string", description: "매번 실행할 작업 지시" }, schedule: { type: "string", description: "every:30m | every:Nh | daily:HH:MM" } }, required: ["name", "prompt", "schedule"] } } },
   { type: "function", function: { name: "routine_list", description: "등록된 예약 작업 목록", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "routine_delete", description: "예약 작업 삭제 (id는 routine_list로 확인)", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } },
+  { type: "function", function: { name: "request_credentials", description: "사이트 계정·비밀번호 같은 개인정보가 필요할 때 사용자에게 보안 입력 팝업을 띄웁니다. 입력된 계정은 암호화되어 사이트 계정에 저장되고 browser_login으로 사용됩니다. 채팅으로 비밀번호를 직접 받지 말고 반드시 이 도구를 사용하세요.", parameters: { type: "object", properties: { site: { type: "string", description: "서비스·사이트 이름 (예: 다우오피스)" }, url: { type: "string", description: "로그인 페이지 URL (아는 경우)" }, reason: { type: "string", description: "왜 필요한지 사용자에게 보여줄 설명" } }, required: ["site"] } } },
   // 봇 간 협업 — 모든 봇이 사용 가능 (생성한 봇의 관리자가 됨)
   { type: "function", function: { name: "agent_create", description: "새 전문 봇을 만듭니다. 작업이 커지거나 내 역할 범위를 벗어나면 전문 봇을 만들어 위임하세요. 생성한 봇은 당신의 하위 봇이 됩니다", parameters: { type: "object", properties: { name: { type: "string", description: "봇 이름" }, role: { type: "string", description: "페르소나·역할 지침" }, model: { type: "string", description: "subagent|fast|code|main (비우면 설정의 기본 모델)" } }, required: ["name", "role"] } } },
   { type: "function", function: { name: "agent_list", description: "전체 봇 목록과 각 봇의 역할·모델·상태를 확인합니다", parameters: { type: "object", properties: {} } } },
@@ -160,6 +161,16 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
       appendToAgentSession(bossSessionConvId(target.id), `[${caller?.name ?? "봇"} → 대장 보고] ${String(args.instruction ?? "")}`, state.result ?? "(결과 없음)", target.model);
     }
     return `[${target.name} 실행 결과 — ${state.status === "done" ? "완료" : "실패"}]\n${state.result ?? "(결과 없음)"}`;
+  }
+  if (name === "request_credentials") {
+    const nm = String(args.site ?? "").trim();
+    if (!nm) return "오류: site 필요";
+    const dup = db.prepare("SELECT id FROM credential_requests WHERE status = 'pending' AND name = ?").get(nm);
+    if (!dup) {
+      db.prepare("INSERT INTO credential_requests (id, name, url, reason, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)")
+        .run(uid(), nm.slice(0, 50), String(args.url ?? ""), String(args.reason ?? "").slice(0, 200), now());
+    }
+    return `사용자 화면에 "${nm}" 계정 입력 팝업을 띄웠습니다. 입력된 계정은 암호화되어 사이트 계정에 저장되며, 이후 browser_login(site: "${nm}")으로 자동 로그인에 사용할 수 있습니다. 사용자에게 "화면에 나타난 팝업에 계정을 입력해 달라"고 안내한 뒤 이번 응답을 마치세요 — 입력이 완료되면 사용자가 다시 지시할 것입니다. 절대 채팅으로 비밀번호를 직접 받지 마세요.`;
   }
   if (name === "agent_update") {
     const target = db.prepare("SELECT * FROM agents WHERE name = ?").get(String(args.name ?? "")) as Agent | null;
@@ -251,7 +262,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
   const messages: any[] = [
     {
       role: "system",
-      content: `당신은 전문 에이전트 "${agent.name}"입니다.\n역할: ${agent.role_prompt}\n\n지시받은 작업을 수행하세요. 필요하면 도구(web_search, 브라우저, 파일, MCP)를 사용하세요. 브라우저 도구는 사용자의 로그인 세션을 공유하므로 로그인이 필요한 사이트도 열 수 있습니다.\n\n다른 봇과 유기적으로 협업할 수 있습니다: agent_list로 봇 목록 확인, agent_create로 전문 봇 생성(당신이 관리자가 됨), agent_direct로 봇에게 즉시 위임하고 결과를 받으세요. 작업이 크면 쪼개서 위임하세요. 파일은 공유 작업 디렉터리로 주고받습니다.\n최종 답변은 지시한 쪽에 보고하는 결과 보고서로 작성하세요 — 핵심 결과와 근거를 간결하게.\n결과를 CEO(관리자)에게 전달·보고하려면 agent_list에서 [CEO] 봇 이름을 확인해 agent_direct로 지시하세요 — 대장 세션에 기록돼 사용자에게 보입니다.\n\n[중요] 실제 작업(봇 생성·지시·검색·파일)은 반드시 도구를 호출해 수행하고 결과를 확인한 뒤 완료를 보고하세요. 도구 호출 없이 '했다'고 주장하지 마세요.`,
+      content: `당신은 전문 에이전트 "${agent.name}"입니다.\n역할: ${agent.role_prompt}\n\n지시받은 작업을 수행하세요. 필요하면 도구(web_search, 브라우저, 파일, MCP)를 사용하세요. 브라우저 도구는 사용자의 로그인 세션을 공유하므로 로그인이 필요한 사이트도 열 수 있습니다.\n\n다른 봇과 유기적으로 협업할 수 있습니다: agent_list로 봇 목록 확인, agent_create로 전문 봇 생성(당신이 관리자가 됨), agent_direct로 봇에게 즉시 위임하고 결과를 받으세요. 작업이 크면 쪼개서 위임하세요. 파일은 공유 작업 디렉터리로 주고받습니다.\n최종 답변은 지시한 쪽에 보고하는 결과 보고서로 작성하세요 — 핵심 결과와 근거를 간결하게.\n결과를 CEO(관리자)에게 전달·보고하려면 agent_list에서 [CEO] 봇 이름을 확인해 agent_direct로 지시하세요 — 대장 세션에 기록돼 사용자에게 보입니다.\n\n[중요] 실제 작업(봇 생성·지시·검색·파일)은 반드시 도구를 호출해 수행하고 결과를 확인한 뒤 완료를 보고하세요. 도구 호출 없이 '했다'고 주장하지 마세요. 계정·비밀번호가 필요하면 request_credentials 도구로 사용자 입력 팝업을 띄우세요 — 채팅으로 비밀번호를 받지 마세요.`,
     },
     { role: "user", content: state.task },
   ];

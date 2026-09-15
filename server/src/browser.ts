@@ -146,7 +146,7 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
         // 설정에 등록된 계정으로 자동 로그인 — 비밀번호는 서버에만 있고 모델 컨텍스트로 안 나감
         const siteName = String(args.site ?? "");
         const site = db.prepare("SELECT * FROM site_logins WHERE name LIKE ?").get(`%${siteName}%`) as any;
-        if (!site) return `등록된 사이트 계정 없음: "${siteName}". 설정 → 사이트 계정에서 먼저 등록하세요.`;
+        if (!site) return `등록된 사이트 계정 없음: "${siteName}". request_credentials 도구로 사용자에게 계정 입력을 요청하거나, 설정 → 사이트 계정에서 먼저 등록하세요.`;
         await page.goto(site.url, { waitUntil: "domcontentloaded", timeout: 30000 });
         await page.waitForTimeout(1500);
         // 로그인 폼 탐색 — iframe 안 폼도 지원 (그룹웨어 다수)
@@ -165,7 +165,10 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
           const f = scope.locator(sel).first();
           if (await f.count().catch(() => 0)) { await f.fill(site.username, { timeout: 5000 }).catch(() => {}); break; }
         }
-        await pass.fill(site.password, { timeout: 5000 });
+        const { decryptSecret } = await import("./crypto");
+        const password = decryptSecret(site.password);
+        if (!password) return "브라우저 오류: 저장된 비밀번호를 복호화할 수 없습니다 — 계정을 다시 등록하세요";
+        await pass.fill(password, { timeout: 5000 });
         const btn = scope.locator('button[type="submit"], input[type="submit"], button:has-text("로그인"), a:has-text("로그인"), button:has-text("Sign in"), button:has-text("Log in")').first();
         if (await btn.count().catch(() => 0)) await btn.click().catch(() => {});
         else await pass.press("Enter").catch(() => {});
@@ -218,16 +221,25 @@ export const BROWSER_TOOLS = [
   { type: "function", function: { name: "ego_run", description: "ego lite — 사용자의 실제 로그인된 브라우저에서 JavaScript를 실행합니다 (컴퓨트 유즈). 로그인 필요 사이트·복잡한 상호작용은 이 도구가 가장 강력합니다. script 안에서 쓸 수 있는 헬퍼: openOrReuseTab(url,{wait:true}), snapshotText()(요소를 [ref=N]으로 표시), click('@N' 또는 CSS), typeText(sel,text), fillInput(sel,text), pressKey('Enter'), scrollBy(픽셀), js('JS표현식'), captureScreenshot(), listTabs(), waitForElement(sel). 결과는 반드시 cliLog(...)로 출력하세요. 작업 공간은 자동으로 'mybot-{작업ID}' Space에서 실행됩니다.", parameters: { type: "object", properties: { script: { type: "string", description: "실행할 JS (top-level await 가능). 예: await openOrReuseTab('https://...', {wait:true}); cliLog(await snapshotText());" } }, required: ["script"] } } },
 ];
 
-// 등록된 사이트 계정 CRUD — 비밀번호는 목록/조회에서 절대 반환하지 않음 (write-only)
+// 등록된 사이트 계정 CRUD — 비밀번호는 암호화 저장, 목록/조회에서 절대 반환하지 않음 (write-only)
 export const sitesRoute = new Hono()
   .get("/", (c) => c.json({ sites: db.prepare("SELECT id, name, url, username, created_at FROM site_logins ORDER BY created_at").all() }))
+  // 봇이 요청한 계정 입력 (팝업 대기 목록)
+  .get("/requests", (c) => c.json({ requests: db.prepare("SELECT id, name, url, reason, created_at FROM credential_requests WHERE status = 'pending' ORDER BY created_at").all() }))
+  .post("/requests/:id/dismiss", (c) => {
+    db.prepare("UPDATE credential_requests SET status = 'dismissed' WHERE id = ?").run(c.req.param("id"));
+    return c.json({ ok: true });
+  })
   .post("/", async (c) => {
     const b = await c.req.json();
     if (!b.name || !b.url || !b.username || !b.password) return c.json({ error: "name/url/username/password 필요" }, 400);
     const { uid, now } = await import("./db");
+    const { encryptSecret } = await import("./crypto");
     const id = uid();
     db.prepare("INSERT INTO site_logins (id, name, url, username, password, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(id, String(b.name).slice(0, 50), String(b.url), String(b.username), String(b.password), now());
+      .run(id, String(b.name).slice(0, 50), String(b.url), String(b.username), encryptSecret(String(b.password)), now());
+    // 봇 요청으로 온 입력이면 요청을 완료 처리 — 팝업이 다시 뜨지 않음
+    if (b.request_id) db.prepare("UPDATE credential_requests SET status = 'done' WHERE id = ?").run(String(b.request_id));
     return c.json({ site: db.prepare("SELECT id, name, url, username, created_at FROM site_logins WHERE id = ?").get(id) });
   })
   .delete("/:id", (c) => {

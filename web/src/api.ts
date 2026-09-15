@@ -91,10 +91,20 @@ export const api = {
   deleteAgent: (id: string) => mybotFetch(`/api/agents/${id}`, { method: "DELETE" }).then(j),
   setAgentBoss: (id: string) => mybotFetch(`/api/agents/${id}/boss`, { method: "POST" }).then(j),
   sites: () => mybotFetch("/api/sites").then(j) as Promise<{ sites: SiteLogin[] }>,
-  addSite: (s: { name: string; url: string; username: string; password: string }) =>
+  addSite: (s: { name: string; url: string; username: string; password: string; request_id?: string }) =>
     mybotFetch("/api/sites", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(s) }).then(j),
   deleteSite: (id: string) => mybotFetch(`/api/sites/${id}`, { method: "DELETE" }).then(j),
+  siteRequests: () => mybotFetch("/api/sites/requests").then(j) as Promise<{ requests: SiteRequest[] }>,
+  dismissSiteRequest: (id: string) => mybotFetch(`/api/sites/requests/${id}/dismiss`, { method: "POST" }).then(j),
 };
+
+export interface SiteRequest {
+  id: string;
+  name: string;
+  url: string | null;
+  reason: string | null;
+  created_at: number;
+}
 
 export interface Agent {
   id: string;

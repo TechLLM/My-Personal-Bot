@@ -45,6 +45,13 @@ api.route("/sites", sitesRoute);
 api.route("/team", teamRoute);
 api.route("/notify", notifyRoute);
 seedPersonas();
+// 구형 평문 비밀번호를 AES-256-GCM으로 일괄 암호화 (1회성 마이그레이션)
+{
+  const { encryptSecret } = await import("./crypto");
+  const legacy = db.prepare("SELECT id, password FROM site_logins WHERE password NOT LIKE 'enc:v1:%'").all() as { id: string; password: string }[];
+  for (const row of legacy) db.prepare("UPDATE site_logins SET password = ? WHERE id = ?").run(encryptSecret(row.password), row.id);
+  if (legacy.length) console.log(`[mybot] 사이트 계정 비밀번호 ${legacy.length}건 암호화 완료`);
+}
 // 대장 봇 시드 + 기존 대화를 대장에게 귀속 (봇 중심 모델)
 const boss = ensureBossAgent();
 db.prepare("UPDATE conversations SET agent_id = ? WHERE agent_id IS NULL").run(boss.id);

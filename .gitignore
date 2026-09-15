@@ -10,3 +10,4 @@ data/browser-profile
 server/data/browser-profile
 data/workspace
 server/data/workspace
+server/data/*.key
