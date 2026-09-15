@@ -78,4 +78,22 @@ app.get("/*", async (c) => {
 });
 
 console.log(`[mybot] listening on http://127.0.0.1:${PORT}`);
+
+// HTTPS 리스너 — server/.certs에 mkcert 인증서가 있으면 함께 연다 (HTTP도 그대로 유지)
+// 인증서 생성: bun scripts/gen-cert.ts / 브라우저 신뢰: 각 기기에 mkcert 루트 CA 설치
+const certDir = join(import.meta.dir, "..", ".certs");
+const [certFile, keyFile] = [join(certDir, "cert.pem"), join(certDir, "key.pem")];
+if (await Bun.file(certFile).exists() && await Bun.file(keyFile).exists()) {
+  const httpsPort = Number(process.env.MYBOT_HTTPS_PORT ?? 5443);
+  Bun.serve({
+    port: httpsPort,
+    fetch: app.fetch,
+    idleTimeout: 255,
+    tls: { cert: Bun.file(certFile), key: Bun.file(keyFile) },
+  });
+  console.log(`[mybot] listening on https://0.0.0.0:${httpsPort}`);
+} else {
+  console.log("[mybot] HTTPS 비활성 — 인증서가 없습니다 (생성: bun scripts/gen-cert.ts)");
+}
+
 export default { port: PORT, fetch: app.fetch, idleTimeout: 255 };
