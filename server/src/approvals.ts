@@ -28,7 +28,13 @@ export function approvalDecision(tool: string): "require" | "allow" {
 
 // 도구 실행 전 호출 — 승인 필요면 요청을 만들고 안내 문자열 반환, 아니면 null
 export function gateApproval(tool: string, args: Record<string, unknown>, agentId: string | null, resumeTask: string): string | null {
-  if (approvalDecision(tool) !== "require") return null;
+  let required = approvalDecision(tool) === "require";
+  // 팀장의 봇 생성은 승인 필요 — 팝업 없이 봇이 폭증하는 것을 차단. 관리자(CEO)는 면제
+  if (!required && tool === "agent_create" && agentId) {
+    const a = db.prepare("SELECT is_boss FROM agents WHERE id = ?").get(agentId) as any;
+    if (a && !a.is_boss) required = true;
+  }
+  if (!required) return null;
   const argsJson = canonicalArgs(args);
   // 최근에 이미 승인·실행된 동일 호출 — 승인 재개 봇의 재시도가 같은 팝업을 반복해 띄우는 것을 차단.
   // 재실행은 하지 않고 이전 실행 결과를 그대로 돌려준다 (비멱등 도구의 이중 실행 방지).
