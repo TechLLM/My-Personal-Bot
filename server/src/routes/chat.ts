@@ -423,6 +423,16 @@ export const chatRoute = new Hono()
               send("search", ev);
             };
             const calledTools = new Set<string>();
+            // 위임된 하위 봇들을 누적해 team_plan으로 보냄 — 화면에 봇 카드·작업 애니메이션이 실시간으로 표시됨
+            const delegated = new Map<string, any>();
+            const teamEmit = (ev: any) => {
+              if (ev.type === "agent_join" && ev.agent) {
+                delegated.set(ev.agent.id, ev.agent);
+                send("team", { type: "team_plan", agents: [...delegated.values()] });
+                return;
+              }
+              send("team", ev);
+            };
             const execTool = async (tc: { id: string; name: string; arguments: string }): Promise<string> => {
               let out = "";
               let args: Record<string, unknown>;
@@ -435,7 +445,7 @@ export const chatRoute = new Hono()
               emitTool(tc.name);
               try {
                 if (builtinNames.has(tc.name)) {
-                  out = await callBuiltin(tc.name, args, conv?.agent_id, signal);
+                  out = await callBuiltin(tc.name, args, conv?.agent_id, signal, 0, teamEmit);
                 } else if (tc.name.startsWith("browser_") || tc.name === "ego_run") {
                   browserUsed = true;
                   out = await browserTool(browserKey, tc.name, args);

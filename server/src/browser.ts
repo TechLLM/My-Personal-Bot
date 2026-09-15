@@ -3,6 +3,7 @@ import { chromium, type BrowserContext, type Frame, type Page } from "playwright
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { db } from "./db";
+import type { TeamAgentState } from "./team";
 
 // ego(lite) 방식 증류: 별도 브라우저가 아니라 MyBot이 직접 구동하는 영속 Chromium.
 // - headed(실제 창)로 실행해 headless 탐지 신호 제거
@@ -235,11 +236,45 @@ export const sitesRoute = new Hono()
     if (!b.name || !b.url || !b.username || !b.password) return c.json({ error: "name/url/username/password 필요" }, 400);
     const { uid, now } = await import("./db");
     const { encryptSecret } = await import("./crypto");
-    const id = uid();
-    db.prepare("INSERT INTO site_logins (id, name, url, username, password, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(id, String(b.name).slice(0, 50), String(b.url), String(b.username), encryptSecret(String(b.password)), now());
-    // 봇 요청으로 온 입력이면 요청을 완료 처리 — 팝업이 다시 뜨지 않음
-    if (b.request_id) db.prepare("UPDATE credential_requests SET status = 'done' WHERE id = ?").run(String(b.request_id));
+    // 같은 이름의 계정이 있으면 갱신 — 재입력 시 중복 행이 쌓이지 않음
+    const siteName = String(b.name).slice(0, 50);
+    const existing = db.prepare("SELECT id FROM site_logins WHERE name = ?").get(siteName) as any;
+    const id = existing?.id ?? uid();
+    if (existing)
+      db.prepare("UPDATE site_logins SET url = ?, username = ?, password = ? WHERE id = ?")
+        .run(String(b.url), String(b.username), encryptSecret(String(b.password)), id);
+    else
+      db.prepare("INSERT INTO site_logins (id, name, url, username, password, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(id, siteName, String(b.url), String(b.username), encryptSecret(String(b.password)), now());
+    // 봇 요청으로 온 입력이면 요청을 완료 처리하고 요청한 봇의 작업을 자동 재개
+    if (b.request_id) {
+      db.prepare("UPDATE credential_requests SET status = 'done' WHERE id = ?").run(String(b.request_id));
+      const req = db.prepare("SELECT * FROM credential_requests WHERE id = ?").get(String(b.request_id)) as any;
+      if (req?.agent_id) {
+        const { getAgent, runAgent, agentSessionConvId, defaultModel } = await import("./team");
+        const agent = getAgent(req.agent_id);
+        if (agent) {
+          const runId = uid();
+          db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, NULL, ?, 'running', ?)")
+            .run(runId, agent.id, `[계정 입력됨] ${req.name} — 작업 자동 재개`, now());
+          const state: TeamAgentState = {
+            id: agent.id, runId, name: agent.name, avatar: agent.avatar ?? "🤖", role: agent.role_prompt,
+            task: `사용자가 "${req.name}" 계정을 보안 팝업에 입력했습니다. 계정은 암호화되어 저장됐고 browser_login(site: "${req.name}")으로 로그인할 수 있습니다. 이어서 원래 업무를 진행하고 결과를 보고하세요.\n\n원래 작업: ${req.resume || req.reason || "(없음)"}`,
+            model: agent.model ?? defaultModel(), status: "running", steps: 0, toolLog: [] as any[], depth: 0,
+          };
+          (async () => {
+            await runAgent(state as any, agent, () => {}, AbortSignal.timeout(240_000));
+            db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
+              .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
+            const { appendToAgentSession } = await import("./routes/chat");
+            const meta = JSON.stringify({ type: "tools", events: state.toolLog.map((l) => ({ type: "read", title: l.tool, url: "" })) });
+            appendToAgentSession(agentSessionConvId(agent.id), `[계정 입력 완료 — 작업 자동 재개] ${req.name}`, state.result ?? "(결과 없음)", agent.model, meta);
+            const { notifyResult } = await import("./notify");
+            notifyResult(`계정 입력됨 — ${agent.name} 작업 재개`, state.result ?? "(결과 없음)");
+          })().catch((e) => console.error("[mybot] 계정 입력 후 재개 실패:", (e as Error).message));
+        }
+      }
+    }
     return c.json({ site: db.prepare("SELECT id, name, url, username, created_at FROM site_logins WHERE id = ?").get(id) });
   })
   .delete("/:id", (c) => {

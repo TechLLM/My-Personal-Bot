@@ -113,7 +113,7 @@ export const BUILTIN_TOOLS = [
   { type: "function", function: { name: "routine_list", description: "등록된 예약 작업 목록", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "routine_delete", description: "예약 작업 삭제 (id는 routine_list로 확인)", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } },
   { type: "function", function: { name: "memory_save", description: "중요한 사실·결정·진행 상태·사용자 선호를 이 봇의 장기기억(SSD)에 저장합니다 — 대화가 끝나거나 세션이 압축돼도 유지됩니다. 나중에 필요할 정보를 배우거나 작업 중간 상태를 남길 때 사용하세요.", parameters: { type: "object", properties: { content: { type: "string", description: "기억할 내용 (한 줄 요약)" } }, required: ["content"] } } },
-  { type: "function", function: { name: "request_credentials", description: "사이트 계정·비밀번호 같은 개인정보가 필요할 때 사용자에게 보안 입력 팝업을 띄웁니다. 입력된 계정은 암호화되어 사이트 계정에 저장되고 browser_login으로 사용됩니다. 채팅으로 비밀번호를 직접 받지 말고 반드시 이 도구를 사용하세요.", parameters: { type: "object", properties: { site: { type: "string", description: "서비스·사이트 이름 (예: 다우오피스)" }, url: { type: "string", description: "로그인 페이지 URL (아는 경우)" }, reason: { type: "string", description: "왜 필요한지 사용자에게 보여줄 설명" } }, required: ["site"] } } },
+  { type: "function", function: { name: "request_credentials", description: "사이트 계정·비밀번호 같은 개인정보가 필요할 때 사용자에게 보안 입력 팝업을 띄웁니다. 입력된 계정은 암호화되어 사이트 계정에 저장되고 browser_login으로 사용됩니다. 채팅으로 비밀번호를 직접 받지 말고 반드시 이 도구를 사용하세요.", parameters: { type: "object", properties: { site: { type: "string", description: "서비스·사이트 이름 (예: 다우오피스)" }, url: { type: "string", description: "로그인 페이지 URL (아는 경우)" }, reason: { type: "string", description: "왜 필요한지 사용자에게 보여줄 설명" }, task: { type: "string", description: "계정 입력 후 자동으로 이어서 진행할 원래 작업" } }, required: ["site"] } } },
   // 봇 간 협업 — 모든 봇이 사용 가능
   { type: "function", function: { name: "agent_list", description: "전체 봇 목록과 각 봇의 역할·모델·상태를 확인합니다", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "agent_direct", description: "다른 봇에게 즉시 업무를 지시하고 결과를 받습니다. 위임·협업·CEO에게 상향 보고에 사용 — 대장(CEO)에게내면 대장 세션에도 기록돼 사용자에게 보입니다", parameters: { type: "object", properties: { name: { type: "string", description: "지시할 봇 이름" }, instruction: { type: "string", description: "구체적 업무 지시" } }, required: ["name", "instruction"] } } },
@@ -126,7 +126,7 @@ export const MANAGE_TOOLS = [
   { type: "function", function: { name: "agent_delete", description: "봇을 삭제합니다. 관리자는 모든 봇, 팀장은 자기 하위 봇만 삭제 가능 (관리자 봇은 삭제 불가)", parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } } },
 ];
 
-export async function callBuiltin(name: string, args: Record<string, unknown>, agentId?: string | null, signal?: AbortSignal, depth = 0): Promise<string> {
+export async function callBuiltin(name: string, args: Record<string, unknown>, agentId?: string | null, signal?: AbortSignal, depth = 0, emit?: (ev: any) => void): Promise<string> {
   // --- 봇 협업·관리 도구 ---
   if (name === "agent_list") {
     const rows = db.prepare("SELECT a.*, (SELECT COUNT(*) FROM agent_runs r WHERE r.agent_id = a.id) run_count, p.name parent_name FROM agents a LEFT JOIN agents p ON p.id = a.parent_id ORDER BY a.is_boss DESC, a.created_at").all() as any[];
@@ -159,8 +159,12 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
       role: target.role_prompt, task: `${caller?.name ?? "사용자"} 봇이 지시한 업무입니다. 수행하고 결과를 보고하세요.\n\n${args.instruction}`,
       model: target.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: depth + 1,
     };
+    // 화면에 하위 봇 작업이 실시간으로 보이도록 이벤트 전파 (봇 카드 + 작업 애니메이션)
+    emit?.({ type: "agent_join", agent: { id: target.id, name: target.name, avatar: target.avatar, role: target.role_prompt, task: String(args.instruction ?? "").slice(0, 200), model: target.model, model_label: modelLabel(target.model ?? defaultModel()) } });
+    emit?.({ type: "agent_start", agentId: target.id });
     // 외부 신호를 전파해 중첩 실행이 바깥 데드라인을 넘지 않게 함 (내부 4분 상한은 runAgent 자체에도 있음)
-    await runAgent(state, target, () => {}, signal ?? AbortSignal.timeout(240_000));
+    await runAgent(state, target, emit ?? (() => {}), signal ?? AbortSignal.timeout(240_000));
+    emit?.({ type: "agent_done", agentId: target.id, status: state.status, result: (state.result ?? "").slice(0, 4000) });
     db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
       .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
     // 대상 봇의 메인 세션에 실행 내역을 기록 — 봇 세션을 열면 실제 수행한 작업(도구 칩 포함)이 보임
@@ -182,12 +186,15 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
   if (name === "request_credentials") {
     const nm = String(args.site ?? "").trim();
     if (!nm) return "오류: site 필요";
+    // 이미 저장된 계정이면 팝업 없이 재사용 — 한 번 입력하면 계속 기억됨
+    const saved = db.prepare("SELECT name FROM site_logins WHERE name LIKE ?").get(`%${nm}%`) as any;
+    if (saved) return `"${saved.name}" 계정이 이미 저장되어 있습니다 — 팝업 없이 바로 browser_login(site: "${saved.name}")을 호출하세요. 사용자에게 다시 묻지 마세요.`;
     const dup = db.prepare("SELECT id FROM credential_requests WHERE status = 'pending' AND name = ?").get(nm);
     if (!dup) {
-      db.prepare("INSERT INTO credential_requests (id, name, url, reason, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)")
-        .run(uid(), nm.slice(0, 50), String(args.url ?? ""), String(args.reason ?? "").slice(0, 200), now());
+      db.prepare("INSERT INTO credential_requests (id, name, url, reason, status, agent_id, resume, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)")
+        .run(uid(), nm.slice(0, 50), String(args.url ?? ""), String(args.reason ?? "").slice(0, 200), agentId ?? null, String(args.task ?? "").slice(0, 500), now());
     }
-    return `사용자 화면에 "${nm}" 계정 입력 팝업을 띄웠습니다. 입력된 계정은 암호화되어 사이트 계정에 저장되며, 이후 browser_login(site: "${nm}")으로 자동 로그인에 사용할 수 있습니다. 사용자에게 "화면에 나타난 팝업에 계정을 입력해 달라"고 안내한 뒤 이번 응답을 마치세요 — 입력이 완료되면 사용자가 다시 지시할 것입니다. 절대 채팅으로 비밀번호를 직접 받지 마세요.`;
+    return `사용자 화면에 "${nm}" 계정 입력 팝업을 띄웠습니다. 입력된 계정은 암호화되어 저장되고, 사용자가 입력을 완료하면 작업이 자동으로 재개됩니다. 이번 응답은 "화면의 팝업에 계정을 입력해 달라"고만 안내하고 마치세요 — 절대 채팅으로 비밀번호를 직접 받지 마세요.`;
   }
   if (name === "agent_update") {
     const target = db.prepare("SELECT * FROM agents WHERE name = ?").get(String(args.name ?? "")) as Agent | null;
@@ -337,7 +344,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
             continue;
           }
           out = builtinNames.has(tc.name)
-            ? await callBuiltin(tc.name, args, agent.id, signal, state.depth)
+            ? await callBuiltin(tc.name, args, agent.id, signal, state.depth, emit)
             : tc.name.startsWith("browser_") || tc.name === "ego_run"
               ? await browserTool(state.runId, tc.name, args)
               : await mcpCall(tc.name, args);
