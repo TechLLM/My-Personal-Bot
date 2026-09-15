@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import nodemailer from "nodemailer";
-import { getSetting } from "./db";
+import { db, uid, now, getSetting, setSetting } from "./db";
 
 // 텔레그램 봇 API로 결과 전송. 실패 시 오류 문자열, 성공 시 null
 export async function sendTelegram(text: string): Promise<string | null> {
@@ -48,6 +48,93 @@ export function notifyResult(title: string, content: string) {
   if (getSetting("notify_email") === "1") {
     sendEmail(`[MyBot] ${title}`, content).then((e) => e && console.error("[notify]", e));
   }
+}
+
+// --- 텔레그램 수신 → 대장 봇 처리 → 대장 세션 기록 + 텔레그램 회신 ---
+// 설정 telegram_listen=1 일 때만 동작. 대장 봇이 도구·봇 생성·위임을 전부 사용 가능
+async function handleTelegramText(text: string): Promise<string> {
+  const { ensureBossAgent, runAgent, bossSessionConvId, defaultModel } = await import("./team");
+  type TeamAgentState = import("./team").TeamAgentState;
+  const { appendToAgentSession } = await import("./routes/chat");
+  const boss = ensureBossAgent();
+  const convId = bossSessionConvId(boss.id);
+
+  // 이전 텔레그램 교환을 맥락으로 — "이어서 해줘" 같은 지시가 동작하게
+  const msgs = (db.prepare("SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 24").all(convId) as any[]).reverse();
+  const ctx: string[] = [];
+  for (let i = 0; i < msgs.length; i++) {
+    if (msgs[i].role === "user" && msgs[i].content.startsWith("[텔레그램]")) {
+      ctx.push(`사용자: ${msgs[i].content.slice(7)}`);
+      if (msgs[i + 1]?.role === "assistant") ctx.push(`대장: ${msgs[i + 1].content.slice(0, 500)}`);
+    }
+  }
+  const ctxBlock = ctx.length ? `\n\n[이전 텔레그램 대화]\n${ctx.slice(-6).join("\n")}` : "";
+
+  const runId = uid();
+  db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, ?, ?, 'running', ?)")
+    .run(runId, boss.id, convId, `[텔레그램] ${text.slice(0, 200)}`, now());
+  const state = {
+    id: boss.id, runId, name: boss.name, avatar: boss.avatar ?? "🤖",
+    role: boss.role_prompt,
+    task: `사용자가 텔레그램으로 보낸 업무 지시입니다. 수행하고 결과를 보고하세요. 필요하면 봇을 만들거나 기존 봇에게 위임하세요.${ctxBlock}\n\n지시: ${text}`,
+    model: boss.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: 0,
+  } as TeamAgentState;
+  await runAgent(state, boss, () => {}, AbortSignal.timeout(240_000));
+  db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
+    .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
+  const out = state.result ?? "(결과 없음)";
+  appendToAgentSession(convId, `[텔레그램] ${text}`, out, boss.model);
+  return out;
+}
+
+let tgStarted = false;
+export function startTelegramBot() {
+  if (tgStarted) return;
+  tgStarted = true;
+  let offset = Number(getSetting("telegram_update_offset") || 0);
+  let webhookCleared = false;
+  (async () => {
+    for (;;) {
+      const token = getSetting("telegram_bot_token");
+      const chatId = getSetting("telegram_chat_id");
+      if (getSetting("telegram_listen") !== "1" || !token || !chatId) {
+        await Bun.sleep(5_000);
+        continue;
+      }
+      try {
+        const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=${offset}&timeout=25`, { signal: AbortSignal.timeout(35_000) });
+        if (res.status === 409 && !webhookCleared) {
+          // 다른 곳에서 webhook이 설정돼 있으면 getUpdates가 막힘 — 해제 후 폴링
+          webhookCleared = true;
+          await fetch(`https://api.telegram.org/bot${token}/deleteWebhook`, { method: "POST" }).catch(() => {});
+          continue;
+        }
+        if (!res.ok) { await Bun.sleep(10_000); continue; }
+        const data = (await res.json()) as any;
+        for (const u of data.result ?? []) {
+          offset = Math.max(offset, u.update_id + 1);
+          setSetting("telegram_update_offset", String(offset));
+          const text = u.message?.text;
+          if (!text || String(u.message.chat?.id) !== String(chatId)) continue; // 등록된 채팅만 허용
+          try {
+            await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ chat_id: chatId, action: "typing" }),
+            }).catch(() => {});
+            const out = await handleTelegramText(text);
+            const err = await sendTelegram(out);
+            if (err) console.error("[telegram]", err);
+          } catch (e) {
+            console.error("[telegram]", (e as Error).message);
+            sendTelegram(`지시 처리 중 오류: ${(e as Error).message}`).catch(() => {});
+          }
+        }
+      } catch {
+        await Bun.sleep(5_000);
+      }
+    }
+  })();
+  console.log("[mybot] telegram inbound listener started (telegram_listen 설정에 따라 활성)");
 }
 
 export const notifyRoute = new Hono()

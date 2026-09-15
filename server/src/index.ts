@@ -12,7 +12,7 @@ import { workspacesRoute, skillsRoute } from "./routes/workspaces";
 import { routinesRoute, startScheduler } from "./routines";
 import { agentsRoute, teamRoute, ensureBossAgent } from "./team";
 import { browserRoute, sitesRoute } from "./browser";
-import { notifyRoute } from "./notify";
+import { notifyRoute, startTelegramBot } from "./notify";
 
 const PORT = Number(process.env.MYBOT_PORT ?? 5274);
 
@@ -49,6 +49,7 @@ seedPersonas();
 const boss = ensureBossAgent();
 db.prepare("UPDATE conversations SET agent_id = ? WHERE agent_id IS NULL").run(boss.id);
 startScheduler();
+startTelegramBot();
 
 app.route("/api", api);
 

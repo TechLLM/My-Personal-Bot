@@ -58,6 +58,16 @@ export function getAgent(id: string | null | undefined): Agent | null {
   return (db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent | null) ?? null;
 }
 
+// 대장 봇의 세션 — 봇 보고·텔레그램 지시가 여기 쌓여 사용자에게 보임
+export function bossSessionConvId(bossId: string): string {
+  const row = db.prepare("SELECT id FROM conversations WHERE agent_id = ? ORDER BY updated_at DESC LIMIT 1").get(bossId) as { id: string } | null;
+  if (row) return row.id;
+  const id = uid();
+  const t = now();
+  db.prepare("INSERT INTO conversations (id, title, model, mode, agent_id, created_at, updated_at) VALUES (?, ?, NULL, 'bot', ?, ?, ?)").run(id, "대장 세션", bossId, t, t);
+  return id;
+}
+
 export interface ToolLogEntry {
   tool: string;
   ok: boolean;
@@ -98,7 +108,7 @@ export const BUILTIN_TOOLS = [
   // 봇 간 협업 — 모든 봇이 사용 가능 (생성한 봇의 관리자가 됨)
   { type: "function", function: { name: "agent_create", description: "새 전문 봇을 만듭니다. 작업이 커지거나 내 역할 범위를 벗어나면 전문 봇을 만들어 위임하세요. 생성한 봇은 당신의 하위 봇이 됩니다", parameters: { type: "object", properties: { name: { type: "string", description: "봇 이름" }, role: { type: "string", description: "페르소나·역할 지침" }, model: { type: "string", description: "subagent|fast|code|main (비우면 설정의 기본 모델)" } }, required: ["name", "role"] } } },
   { type: "function", function: { name: "agent_list", description: "전체 봇 목록과 각 봇의 역할·모델·상태를 확인합니다", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "agent_direct", description: "다른 봇에게 즉시 업무를 지시하고 결과를 받습니다. 위임·협업·CEO에게 상향 보고에 사용", parameters: { type: "object", properties: { name: { type: "string", description: "지시할 봇 이름" }, instruction: { type: "string", description: "구체적 업무 지시" } }, required: ["name", "instruction"] } } },
+  { type: "function", function: { name: "agent_direct", description: "다른 봇에게 즉시 업무를 지시하고 결과를 받습니다. 위임·협업·CEO에게 상향 보고에 사용 — 대장(CEO)에게내면 대장 세션에도 기록돼 사용자에게 보입니다", parameters: { type: "object", properties: { name: { type: "string", description: "지시할 봇 이름" }, instruction: { type: "string", description: "구체적 업무 지시" } }, required: ["name", "instruction"] } } },
 ];
 
 // CEO 봇 전용 — 봇 조직의 관리 권한 (수정·삭제)
@@ -142,6 +152,11 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     await runAgent(state, target, () => {}, signal ?? AbortSignal.timeout(240_000));
     db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
       .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
+    // 대장에게 지시·보고한 내용은 대장 세션에도 기록 — 사용자가 대장 세션에서 확인
+    if (target.is_boss) {
+      const { appendToAgentSession } = await import("./routes/chat");
+      appendToAgentSession(bossSessionConvId(target.id), `[${caller?.name ?? "봇"} → 대장 보고] ${String(args.instruction ?? "")}`, state.result ?? "(결과 없음)", target.model);
+    }
     return `[${target.name} 실행 결과 — ${state.status === "done" ? "완료" : "실패"}]\n${state.result ?? "(결과 없음)"}`;
   }
   if (name === "agent_update") {
@@ -234,7 +249,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
   const messages: any[] = [
     {
       role: "system",
-      content: `당신은 전문 에이전트 "${agent.name}"입니다.\n역할: ${agent.role_prompt}\n\n지시받은 작업을 수행하세요. 필요하면 도구(web_search, 브라우저, 파일, MCP)를 사용하세요. 브라우저 도구는 사용자의 로그인 세션을 공유하므로 로그인이 필요한 사이트도 열 수 있습니다.\n\n다른 봇과 유기적으로 협업할 수 있습니다: agent_list로 봇 목록 확인, agent_create로 전문 봇 생성(당신이 관리자가 됨), agent_direct로 봇에게 즉시 위임하고 결과를 받으세요. 작업이 크면 쪼개서 위임하세요. 파일은 공유 작업 디렉터리로 주고받습니다.\n최종 답변은 지시한 쪽에 보고하는 결과 보고서로 작성하세요 — 핵심 결과와 근거를 간결하게.`,
+      content: `당신은 전문 에이전트 "${agent.name}"입니다.\n역할: ${agent.role_prompt}\n\n지시받은 작업을 수행하세요. 필요하면 도구(web_search, 브라우저, 파일, MCP)를 사용하세요. 브라우저 도구는 사용자의 로그인 세션을 공유하므로 로그인이 필요한 사이트도 열 수 있습니다.\n\n다른 봇과 유기적으로 협업할 수 있습니다: agent_list로 봇 목록 확인, agent_create로 전문 봇 생성(당신이 관리자가 됨), agent_direct로 봇에게 즉시 위임하고 결과를 받으세요. 작업이 크면 쪼개서 위임하세요. 파일은 공유 작업 디렉터리로 주고받습니다.\n최종 답변은 지시한 쪽에 보고하는 결과 보고서로 작성하세요 — 핵심 결과와 근거를 간결하게.\n결과를 CEO(관리자)에게 전달·보고하려면 agent_list에서 [CEO] 봇 이름을 확인해 agent_direct로 지시하세요 — 대장 세션에 기록돼 사용자에게 보입니다.`,
     },
     { role: "user", content: state.task },
   ];

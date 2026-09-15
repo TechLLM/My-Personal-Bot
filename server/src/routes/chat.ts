@@ -50,11 +50,19 @@ function leafOf(convId: string): Msg | null {
   return path.length ? path[path.length - 1] : null;
 }
 
-function insertMessage(convId: string, parentId: string | null, role: string, content = "", attachments: string | null = null): Msg {
+function insertMessage(convId: string, parentId: string | null, role: string, content = "", attachments: string | null = null, model: string | null = null): Msg {
   const id = uid();
-  q.msgInsert.run(id, convId, parentId, role, content, null, null, null, null, null, attachments, now());
+  q.msgInsert.run(id, convId, parentId, role, content, null, model, null, null, null, attachments, now());
   q.msgSiblingsDeactivate.run(convId, parentId, id);
   return q.msgGet.get(id) as Msg;
+}
+
+// 외부 채널(텔레그램)·봇 보고를 봇 세션에 기록 — 사용자가 대장 세션에서 확인
+export function appendToAgentSession(convId: string, userText: string, assistantText: string, model?: string | null) {
+  const leaf = leafOf(convId);
+  const u = insertMessage(convId, leaf?.id ?? null, "user", userText);
+  insertMessage(convId, u.id, "assistant", assistantText, null, model ?? null);
+  q.convTouch.run(now(), convId);
 }
 
 function withSiblings(m: Msg) {

@@ -326,6 +326,10 @@ export function SettingsModal({ endpoints, models, onClose }: { endpoints: Endpo
           <Field k="telegram_bot_token" label="텔레그램 봇 토큰" ph="@BotFather에서 발급 (123456:ABC…)" />
           <Field k="telegram_chat_id" label="텔레그램 채팅 ID" ph="봇에게 말 건 뒤 getUpdates로 확인" />
           <label className="flex items-center gap-2 text-xs text-zinc-400">
+            <input type="checkbox" checked={s.telegram_listen === "1"} onChange={(e) => update({ telegram_listen: e.target.checked ? "1" : "0" })} />
+            텔레그램으로 대장봇에게 업무 지시 받기 — 봇이 메시지를 읽고 실행한 뒤 회신 (대장 세션에도 기록)
+          </label>
+          <label className="flex items-center gap-2 text-xs text-zinc-400">
             <input type="checkbox" checked={s.notify_email === "1"} onChange={(e) => update({ notify_email: e.target.checked ? "1" : "0" })} />
             답변을 이메일로도 받기
           </label>
