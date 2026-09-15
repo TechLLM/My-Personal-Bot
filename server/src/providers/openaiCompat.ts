@@ -17,26 +17,46 @@ export interface ChatResult {
 }
 
 // 비스트리밍 호출 (도구 루프·내부용)
+// HTTP 오류는 content로 위장하지 않고 throw — 네트워크/5xx/429는 1회 재시도 (사용자 abort 제외)
 export async function chatOnce(
   endpoint: Endpoint,
   model: string,
   messages: any[],
   opts: { signal?: AbortSignal; tools?: { type: string; function: { name: string; description?: string; parameters?: object } }[] } = {},
 ): Promise<ChatResult> {
-  const res = await fetch(`${endpoint.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(endpoint.apiKey ? { Authorization: `Bearer ${endpoint.apiKey}` } : {}),
-    },
-    body: JSON.stringify({ model, messages, stream: false, ...(opts.tools?.length ? { tools: opts.tools, tool_choice: "auto" } : {}) }),
-    signal: opts.signal ?? AbortSignal.timeout(120000),
-  });
-  if (!res.ok) return { content: `오류 ${res.status}: ${(await res.text()).slice(0, 300)}` };
-  const data = await res.json();
-  const msg = data.choices?.[0]?.message ?? {};
-  const toolCalls = (msg.tool_calls ?? []).map((tc: any) => ({ id: tc.id, name: tc.function?.name, arguments: tc.function?.arguments ?? "{}" }));
-  return { content: msg.content ?? "", toolCalls: toolCalls.length ? toolCalls : undefined };
+  const body = JSON.stringify({ model, messages, stream: false, ...(opts.tools?.length ? { tools: opts.tools, tool_choice: "auto" } : {}) });
+  let lastErr: Error | null = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (opts.signal?.aborted) break;
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
+    let res: Response;
+    try {
+      res = await fetch(`${endpoint.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(endpoint.apiKey ? { Authorization: `Bearer ${endpoint.apiKey}` } : {}),
+        },
+        body,
+        signal: opts.signal ?? AbortSignal.timeout(120000),
+      });
+    } catch (e) {
+      if ((e as Error).name === "AbortError" || opts.signal?.aborted) throw e;
+      lastErr = e as Error; // 네트워크 오류 → 재시도
+      continue;
+    }
+    if (!res.ok) {
+      const txt = (await res.text()).slice(0, 300);
+      const err = new Error(`오류 ${res.status}: ${txt}`);
+      if (res.status >= 500 || res.status === 429) { lastErr = err; continue; } // transient만 재시도
+      throw err; // 4xx는 즉시 실패
+    }
+    const data = await res.json();
+    const msg = data.choices?.[0]?.message ?? {};
+    const toolCalls = (msg.tool_calls ?? []).map((tc: any, i: number) => ({ id: tc.id ?? `call_${i}`, name: tc.function?.name, arguments: tc.function?.arguments ?? "{}" }));
+    return { content: msg.content ?? "", toolCalls: toolCalls.length ? toolCalls : undefined };
+  }
+  throw lastErr ?? new Error("chatOnce 실패");
 }
 
 export interface StreamEvent {

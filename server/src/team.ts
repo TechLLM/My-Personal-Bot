@@ -54,6 +54,13 @@ export function getAgent(id: string | null | undefined): Agent | null {
   return (db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent | null) ?? null;
 }
 
+export interface ToolLogEntry {
+  tool: string;
+  ok: boolean;
+  ms: number;
+  err?: string;
+}
+
 export interface TeamAgentState {
   id: string;
   runId: string;
@@ -65,6 +72,7 @@ export interface TeamAgentState {
   status: "running" | "done" | "error";
   result?: string;
   steps: number;
+  toolLog: ToolLogEntry[];
 }
 
 type Emit = (ev: object) => void;
@@ -92,7 +100,7 @@ export const BOSS_TOOLS = [
   { type: "function", function: { name: "agent_delete", description: "불필요한 봇을 삭제합니다 (CEO 봇은 삭제 불가)", parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } } },
 ];
 
-export async function callBuiltin(name: string, args: Record<string, unknown>, agentId?: string | null): Promise<string> {
+export async function callBuiltin(name: string, args: Record<string, unknown>, agentId?: string | null, signal?: AbortSignal): Promise<string> {
   // --- CEO 봇 관리 도구 ---
   if (name === "agent_list") {
     const rows = db.prepare("SELECT a.*, (SELECT COUNT(*) FROM agent_runs r WHERE r.agent_id = a.id) run_count FROM agents a ORDER BY a.is_boss DESC, a.created_at").all() as any[];
@@ -110,10 +118,12 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     const state: TeamAgentState = {
       id: target.id, runId, name: target.name, avatar: target.avatar ?? "🤖",
       role: target.role_prompt, task: `CEO 봇이 지시한 업무입니다. 수행하고 결과를 보고하세요.\n\n${args.instruction}`,
-      model: target.model ?? "subagent", status: "running", steps: 0,
+      model: target.model ?? "subagent", status: "running", steps: 0, toolLog: [],
     };
-    await runAgent(state, target, () => {}, AbortSignal.timeout(240_000));
-    db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, finished_at = ? WHERE id = ?").run(state.status, state.result ?? null, state.steps, now(), runId);
+    // 외부 신호를 전파해 중첩 실행이 바깥 데드라인을 넘지 않게 함 (내부 4분 상한은 runAgent 자체에도 있음)
+    await runAgent(state, target, () => {}, signal ?? AbortSignal.timeout(240_000));
+    db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
+      .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
     return `[${target.name} 실행 결과 — ${state.status === "done" ? "완료" : "실패"}]\n${state.result ?? "(결과 없음)"}`;
   }
   if (name === "agent_update") {
@@ -155,11 +165,15 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
   }
   if (name === "read_file") {
     const p = safePath(String(args.path ?? ""));
-    if (!existsSync(p)) return "파일 없음";
-    return readFileSync(p, "utf8").slice(0, 20000);
+    if (!existsSync(p)) return `파일 없음: ${args.path} — list_files로 실제 경로를 확인하세요`;
+    const full = readFileSync(p, "utf8");
+    const sliced = full.slice(0, 20000);
+    return full.length > 20000 ? `${sliced}\n\n…(잘림 — 전체 ${full.length}자 중 20000자. 필요한 부분만 다시 읽거나 요약하세요)` : sliced;
   }
   if (name === "write_file") {
-    writeFileSync(safePath(String(args.path ?? "")), String(args.content ?? ""));
+    const p = safePath(String(args.path ?? ""));
+    mkdirSync(join(p, ".."), { recursive: true }); // 하위 디렉터리 자동 생성 — ENOENT 재시도 방지
+    writeFileSync(p, String(args.content ?? ""));
     return `저장됨: ${args.path}`;
   }
   if (name === "list_files") return readdirSync(WORK_DIR).join("\n") || "(비어 있음)";
@@ -227,22 +241,49 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
       messages.push({ role: "assistant", content: res.content || "", tool_calls: res.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })) });
       for (const tc of res.toolCalls) {
         emit({ type: "agent_step", agentId: state.id, tool: tc.name });
+        const t0 = Date.now();
         let out: string;
+        let ok = true;
+        let errMsg: string | undefined;
         try {
-          const args = JSON.parse(tc.arguments || "{}");
+          let args: Record<string, unknown>;
+          try {
+            args = JSON.parse(tc.arguments || "{}");
+          } catch {
+            // 인자 JSON이 깨진 경우(잘림·이스케이프 오류) — 모델이 고칠 수 있게 구체적 힌트 반환
+            ok = false;
+            errMsg = "arguments JSON 파싱 실패";
+            out = `도구 오류: ${tc.name}의 인자 JSON이 깨져 있습니다(길이 ${tc.arguments.length}자). content가 크면 짧게 나눠 쓰고, 따옴표·줄바꿈을 올바르게 이스케이프한 유효한 JSON으로 다시 호출하세요.`;
+            state.toolLog.push({ tool: tc.name, ok, ms: Date.now() - t0, err: errMsg });
+            messages.push({ role: "tool", tool_call_id: tc.id, content: out });
+            continue;
+          }
           out = builtinNames.has(tc.name)
-            ? await callBuiltin(tc.name, args, agent.id)
+            ? await callBuiltin(tc.name, args, agent.id, signal)
             : tc.name.startsWith("browser_")
               ? await browserTool(state.runId, tc.name, args)
               : await mcpCall(tc.name, args);
+          if (/^(도구 오류|알 수 없는 도구|브라우저 오류):/.test(out)) { ok = false; errMsg = out.slice(0, 120); }
         } catch (e) {
-          out = `도구 오류: ${(e as Error).message}`;
+          ok = false;
+          errMsg = (e as Error).message;
+          out = `도구 오류: ${errMsg}`;
         }
+        state.toolLog.push({ tool: tc.name, ok, ms: Date.now() - t0, err: errMsg });
+        if (!ok) console.error(`[mybot] 도구 실패 — 봇:${agent.name} 도구:${tc.name} ${errMsg ?? ""}`);
         messages.push({ role: "tool", tool_call_id: tc.id, content: String(out).slice(0, 8000) });
       }
     }
+    // 단계 상한 도달 — 수집한 내용을 버리지 않고 도구 없이 최종 보고서 생성
+    emit({ type: "agent_step", agentId: state.id, tool: "단계 상한 — 결과 정리" });
+    messages.push({ role: "user", content: "도구 사용 단계 상한에 도달했습니다. 도구를 더 쓰지 말고, 지금까지 얻은 결과로 최종 보고서를 즉시 작성하세요." });
+    try {
+      const res = await chatOnce(endpoint, model, messages, { signal });
+      state.result = res.content || "(도구 단계 상한 — 결과 없음)";
+    } catch {
+      state.result = "(도구 단계 상한에 도달해 작업을 마무리합니다)";
+    }
     state.status = "done";
-    state.result = "(도구 단계 상한에 도달해 작업을 마무리합니다)";
   } catch (e) {
     state.status = "error";
     state.result = `에이전트 오류: ${(e as Error).message}`;
@@ -307,9 +348,24 @@ JSON 배열만 출력하세요. 각 항목은 둘 중 하나:
     { role: "user", content: task },
   ], { signal });
 
-  const m = planRes.content.match(/\[[\s\S]*\]/);
-  let tasks: PlanTask[] = [];
-  try { tasks = m ? JSON.parse(m[0]) : []; } catch { tasks = []; }
+  // JSON 배열 추출 — 문자열 안의 괄호를 무시하는 균형 스캔 (greedy regex는 여러 [ ] 있으면 깨짐)
+  const extractJsonArray = (text: string): PlanTask[] => {
+    const start = text.indexOf("[");
+    if (start === -1) return [];
+    let depth = 0, inStr = false, esc = false;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (inStr) { if (esc) esc = false; else if (ch === "\\") esc = true; else if (ch === '"') inStr = false; continue; }
+      if (ch === '"') inStr = true;
+      else if (ch === "[") depth++;
+      else if (ch === "]" && --depth === 0) {
+        try { return JSON.parse(text.slice(start, i + 1)); } catch { return []; }
+      }
+    }
+    return [];
+  };
+  const tasks0 = extractJsonArray(planRes.content);
+  let tasks: PlanTask[] = Array.isArray(tasks0) ? tasks0 : [];
   if (!Array.isArray(tasks) || !tasks.length) return null;
   tasks = tasks.slice(0, 4);
 
@@ -359,7 +415,7 @@ export async function runTeamTasks(
       id: agent.id, runId,
       name: agent.name, avatar: agent.avatar ?? "🤖",
       role: agent.role_prompt, task: t.task,
-      model: agent.model ?? "subagent", status: "running", steps: 0,
+      model: agent.model ?? "subagent", status: "running", steps: 0, toolLog: [],
     };
   });
   emit({ type: "team_plan", agents: states.map((s) => ({ id: s.id, name: s.name, avatar: s.avatar, role: s.role, task: s.task, model: s.model, model_label: modelLabel(s.model) })) });
@@ -368,8 +424,8 @@ export async function runTeamTasks(
     const agent = db.prepare("SELECT * FROM agents WHERE id = ?").get(s.id) as Agent;
     emit({ type: "agent_start", agentId: s.id });
     await runAgent(s, agent, emit, signal);
-    db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, finished_at = ? WHERE id = ?")
-      .run(s.status, s.result ?? null, s.steps, now(), s.runId);
+    db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
+      .run(s.status, s.result ?? null, s.steps, JSON.stringify(s.toolLog), now(), s.runId);
     emit({ type: "agent_done", agentId: s.id, status: s.status, result: (s.result ?? "").slice(0, 4000) });
   }));
 

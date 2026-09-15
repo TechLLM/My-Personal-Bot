@@ -18,6 +18,7 @@ interface SearchMeta {
   sources?: { url: string; title: string }[];
   steps?: number;
   agents?: TeamPlanAgent[];
+  events?: { type: string; title: string; url: string }[];
 }
 
 export function MessageItem({
@@ -177,6 +178,16 @@ export function MessageItem({
                 {a.model_label && <span className="font-mono text-[9px] text-zinc-600">{a.model_label}</span>}
                 <span className="text-zinc-600"> — {a.task.slice(0, 60)}{a.task.length > 60 ? "…" : ""}</span>
               </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {meta?.events && meta.events.length > 0 && (
+        <div className="mt-1 rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 py-2">
+          <div className="text-xs font-medium text-zinc-400 mb-1"><Bot size={11} className="inline -mt-0.5" /> 봇 도구 사용 {meta.events.filter((e) => !e.title.includes("라운드")).length}회</div>
+          <div className="flex flex-wrap gap-1">
+            {meta.events.filter((e) => !e.title.includes("라운드")).map((e, i) => (
+              <span key={i} className={`rounded-full px-2 py-0.5 text-[10px] ${e.title.startsWith("⚠") ? "bg-red-950/50 text-red-400" : "bg-zinc-800 text-zinc-500"}`}>{e.title}</span>
             ))}
           </div>
         </div>

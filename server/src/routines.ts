@@ -29,11 +29,11 @@ export async function runRoutine(r: any): Promise<string> {
     id: agent.id, runId,
     name: agent.name, avatar: agent.avatar ?? "🤖",
     role: agent.role_prompt, task: `예약된 정기 업무입니다. 수행하고 결과를 보고하세요.\n\n${r.prompt}`,
-    model: useModel, status: "running", steps: 0,
+    model: useModel, status: "running", steps: 0, toolLog: [],
   };
   await runAgent(state, agent, () => {}, AbortSignal.timeout(300_000));
-  db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, finished_at = ? WHERE id = ?")
-    .run(state.status, state.result ?? null, state.steps, now(), runId);
+  db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
+    .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
   const out = state.result ?? "(결과 없음)";
 
   // 결과를 대화로 저장

@@ -334,9 +334,15 @@ export const chatRoute = new Hono()
             const browserKey = `${convId}:${asstMsg.id}`;
             const deadline = Date.now() + 3 * 60_000; // 일반 대화 도구 루프 최대 3분
             let browserUsed = false;
+            const toolEvents: any[] = []; // search_meta에 누적 — 새로고침 후에도 도구 사용 내역 표시
+            const emitTool = (title: string) => {
+              const ev = { type: "read", title, url: "" };
+              toolEvents.push(ev);
+              send("search", ev);
+            };
             for (let round = 0; round < 4; round++) {
               if (Date.now() > deadline) break;
-              send("search", { type: "read", title: `봇 작업 중… (라운드 ${round + 1})`, url: "" });
+              emitTool(`봇 작업 중… (라운드 ${round + 1})`);
               const res = await chatOnce(endpoint, realModel, history, { signal, tools: openaiTools });
               if (!res.toolCalls?.length) {
                 if (res.content) history.push({ role: "assistant", content: res.content });
@@ -344,24 +350,38 @@ export const chatRoute = new Hono()
               }
               history.push({ role: "assistant", content: res.content || "", tool_calls: res.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })) } as any);
               for (const tc of res.toolCalls) {
-                send("search", { type: "read", title: tc.name, url: "" });
-                let out: string;
+                let out = "";
+                let args: Record<string, unknown> | null = null;
                 try {
-                  const args = JSON.parse(tc.arguments || "{}");
-                  if (builtinNames.has(tc.name)) {
-                    out = await callBuiltin(tc.name, args, conv?.agent_id);
-                  } else if (tc.name.startsWith("browser_")) {
-                    browserUsed = true;
-                    out = await browserTool(browserKey, tc.name, args);
-                  } else {
-                    out = await mcpCall(tc.name, args);
+                  args = JSON.parse(tc.arguments || "{}");
+                } catch {
+                  out = `도구 오류: ${tc.name}의 인자 JSON이 깨져 있습니다(길이 ${tc.arguments.length}자). content가 크면 짧게 나눠 쓰고, 따옴표·줄바꿈을 올바르게 이스케이프한 유효한 JSON으로 다시 호출하세요.`;
+                }
+                if (args) {
+                  emitTool(tc.name);
+                  try {
+                    if (builtinNames.has(tc.name)) {
+                      out = await callBuiltin(tc.name, args, conv?.agent_id, signal);
+                    } else if (tc.name.startsWith("browser_")) {
+                      browserUsed = true;
+                      out = await browserTool(browserKey, tc.name, args);
+                    } else {
+                      out = await mcpCall(tc.name, args);
+                    }
+                    if (/^(도구 오류|알 수 없는 도구|브라우저 오류):/.test(out)) {
+                      console.error(`[mybot] 도구 실패 — 도구:${tc.name} ${out.slice(0, 120)}`);
+                      emitTool(`⚠ ${tc.name} 실패`);
+                    }
+                  } catch (e) {
+                    out = `도구 오류: ${(e as Error).message}`;
+                    console.error(`[mybot] 도구 예외 — 도구:${tc.name} ${(e as Error).message}`);
+                    emitTool(`⚠ ${tc.name} 오류`);
                   }
-                } catch (e) {
-                  out = `도구 오류: ${(e as Error).message}`;
                 }
                 history.push({ role: "tool", tool_call_id: tc.id, content: String(out).slice(0, 8000) } as any);
               }
             }
+            if (toolEvents.length) searchMeta = { ...(searchMeta ?? {}), type: searchMeta?.type ?? "tools", events: toolEvents };
             if (browserUsed) closeAgentPage(browserKey).catch(() => {});
           }
 
