@@ -6,16 +6,20 @@ import { AgentIcon } from "./icons";
 // 첫 화면: 봇 선택/생성이 진입점 — 봇이 곧 워크플로어
 export function BotLobby({
   agents,
+  agentsLoaded,
   models,
   defaultModel,
   routineAgentIds,
+  createSignal,
   onSelect,
   onRefresh,
 }: {
   agents: Agent[];
+  agentsLoaded: boolean;
   models: Model[];
   defaultModel: string; // 설정의 기본 AI 모델 — 새 봇의 기본값
   routineAgentIds: Set<string>;
+  createSignal: number; // 증가할 때마다 생성 마법사를 엶
   onSelect: (a: Agent) => void;
   onRefresh: () => void;
 }) {
@@ -34,6 +38,16 @@ export function BotLobby({
   useEffect(() => {
     if (defaultModel && !modelTouched) setModel(defaultModel);
   }, [defaultModel, modelTouched]);
+
+  // 봇이 하나도 없으면 최초 워크플로 = 봇 생성 — 마법사를 자동으로 엶
+  useEffect(() => {
+    if (agentsLoaded && agents.length === 0) setCreating(true);
+  }, [agentsLoaded, agents.length]);
+
+  // 사이드바 "+ 새 봇" → 생성 마법사 열기
+  useEffect(() => {
+    if (createSignal > 0) setCreating(true);
+  }, [createSignal]);
 
   const NAME_A = ["민첩한", "꼼꼼한", "든든한", "영리한", "성실한", "차분한", "날카로운", "따뜻한"];
   const NAME_B = ["비서", "탐정", "사서", "분석가", "파수꾼", "도우미", "기록관", "전령"];
@@ -58,8 +72,12 @@ export function BotLobby({
     <div className="mt-[10vh]">
       <div className="text-center mb-6">
         <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-zinc-100 text-2xl font-bold text-zinc-900">M</div>
-        <h1 className="text-xl font-semibold text-zinc-200">봇을 선택하거나 새로 만드세요</h1>
-        <p className="mt-2 text-sm text-zinc-500">모든 대화는 봇이 담당합니다 — 봇을 고르면 그 봇의 기억·역할·도구로 일합니다</p>
+        <h1 className="text-xl font-semibold text-zinc-200">{agentsLoaded && agents.length === 0 ? "첫 봇을 만드세요" : "봇을 선택하거나 새로 만드세요"}</h1>
+        <p className="mt-2 text-sm text-zinc-500">
+          {agentsLoaded && agents.length === 0
+            ? "모든 대화는 봇이 담당합니다 — 먼저 봇을 만들어야 대화할 수 있습니다. CEO로 지정하면 다른 봇들을 관리합니다"
+            : "모든 대화는 봇이 담당합니다 — 봇을 고르면 그 봇의 기억·역할·도구로 일합니다"}
+        </p>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-w-2xl mx-auto">

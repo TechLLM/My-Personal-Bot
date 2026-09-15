@@ -19,8 +19,8 @@ const q = {
   msgInsert: db.prepare("INSERT INTO messages (id, conversation_id, parent_id, active, role, content, reasoning, model, search_meta, tokens_in, tokens_out, attachments, created_at) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)"),
   msgUpdate: db.prepare("UPDATE messages SET content = ?, reasoning = ?, model = ?, search_meta = ?, tokens_in = ?, tokens_out = ? WHERE id = ?"),
   msgGet: db.prepare("SELECT * FROM messages WHERE id = ?"),
-  msgChildren: db.prepare("SELECT * FROM messages WHERE parent_id IS ? ORDER BY created_at"),
-  msgSiblingsDeactivate: db.prepare("UPDATE messages SET active = 0 WHERE parent_id IS ? AND id != ?"),
+  msgChildren: db.prepare("SELECT * FROM messages WHERE conversation_id = ? AND parent_id IS ? ORDER BY created_at"),
+  msgSiblingsDeactivate: db.prepare("UPDATE messages SET active = 0 WHERE conversation_id = ? AND parent_id IS ? AND id != ?"),
   msgActivate: db.prepare("UPDATE messages SET active = 1 WHERE id = ?"),
 };
 
@@ -36,7 +36,7 @@ function activePath(convId: string): Msg[] {
   const path: Msg[] = [];
   let parent: string | null = null;
   for (let i = 0; i < 500; i++) {
-    const children: Msg[] = (q.msgChildren.all(parent) as Msg[]).filter((m: Msg) => m.conversation_id === convId);
+    const children = q.msgChildren.all(convId, parent) as Msg[];
     if (!children.length) break;
     const next: Msg = children.find((m: Msg) => m.active) ?? children[children.length - 1];
     path.push(next);
@@ -53,12 +53,12 @@ function leafOf(convId: string): Msg | null {
 function insertMessage(convId: string, parentId: string | null, role: string, content = "", attachments: string | null = null): Msg {
   const id = uid();
   q.msgInsert.run(id, convId, parentId, role, content, null, null, null, null, null, attachments, now());
-  q.msgSiblingsDeactivate.run(parentId, id);
+  q.msgSiblingsDeactivate.run(convId, parentId, id);
   return q.msgGet.get(id) as Msg;
 }
 
 function withSiblings(m: Msg) {
-  const sibs = q.msgChildren.all(m.parent_id) as Msg[];
+  const sibs = q.msgChildren.all(m.conversation_id, m.parent_id) as Msg[];
   const idx = sibs.findIndex((s) => s.id === m.id);
   return { ...m, sibling_count: sibs.length, sibling_index: idx };
 }
@@ -163,7 +163,7 @@ export const chatRoute = new Hono()
     const m = q.msgGet.get(c.req.param("id")) as Msg | null;
     if (!m) return c.json({ error: "not found" }, 404);
     q.msgActivate.run(m.id);
-    q.msgSiblingsDeactivate.run(m.parent_id, m.id);
+    q.msgSiblingsDeactivate.run(m.conversation_id, m.parent_id, m.id);
     return c.json({ messages: activePath(m.conversation_id).map(withSiblings) });
   })
   .post("/conversations/:id/select", (c) => {

@@ -28,9 +28,11 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 768); // 모바일은 닫힌 채 시작
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [agentsLoaded, setAgentsLoaded] = useState(false); // 봇 목록 로드 완료 전엔 "봇 없음" UI를 띄우지 않음
   const [routineAgentIds, setRoutineAgentIds] = useState<Set<string>>(new Set());
   const [pendingAgent, setPendingAgent] = useState<Agent | null>(null); // 새 세션을 담당할 봇 (첫 전송 시 귀속)
   const [defaultModel, setDefaultModel] = useState(""); // 설정의 기본 AI 모델 — 새 봇의 기본값
+  const [createSignal, setCreateSignal] = useState(0); // 로비의 생성 마법사를 여는 신호 ("+ 새 봇")
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -39,7 +41,7 @@ export default function App() {
   }, []);
 
   const refreshAgents = useCallback(() => {
-    api.agents().then((d) => setAgents(d.agents)).catch(() => {});
+    api.agents().then((d) => { setAgents(d.agents); setAgentsLoaded(true); }).catch(() => {});
     mybotFetch("/api/routines").then((r) => r.json())
       .then((d) => setRoutineAgentIds(new Set<string>((d.routines ?? []).filter((r: any) => r.enabled && r.agent_id).map((r: any) => r.agent_id))))
       .catch(() => {});
@@ -110,8 +112,21 @@ export default function App() {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
   }, []);
 
-  const send = useCallback((text: string, mode: Mode, attachments: { url: string; name: string; mime: string }[]) => {
+  const send = useCallback(async (text: string, mode: Mode, attachments: { url: string; name: string; mime: string }[]) => {
     if (streaming) return;
+    // 봇 미선택 상태에서 전송 → CEO(관리자) 봇, 없으면 첫 봇의 세션으로 라우팅. 봇이 아예 없으면 전송 불가
+    let sendConvId = convId;
+    let sendAgent = pendingAgent;
+    if (!sendConvId && !sendAgent) {
+      sendAgent = agents.find((a) => a.is_boss) ?? agents[0] ?? null;
+      if (!sendAgent) return;
+      const existing = conversations.find((c) => c.agent_id === sendAgent!.id);
+      if (existing) {
+        sendConvId = existing.id;
+        setConvId(existing.id);
+        try { const d = await api.conversation(existing.id); setMessages(d.messages); } catch {}
+      } else setPendingAgent(sendAgent);
+    }
     setStreaming(true);
     setSearchEvents([]);
     setTeamEvents([]);
@@ -119,10 +134,10 @@ export default function App() {
     abortRef.current = abort;
 
     streamChat(
-      { conversationId: convId ?? undefined, content: text, model: effectiveModel, mode, attachments, personaId, workspaceId: workspaceId || undefined, agentId: convId ? undefined : pendingAgent?.id },
+      { conversationId: sendConvId ?? undefined, content: text, model: effectiveModel, mode, attachments, personaId, workspaceId: workspaceId || undefined, agentId: sendConvId ? undefined : sendAgent?.id },
       {
         onConversation: (id) => {
-          if (!convId) { setConvId(id); setPendingAgent(null); }
+          if (!sendConvId) { setConvId(id); setPendingAgent(null); }
         },
         onUserMessage: (m) => setMessages((prev) => [...prev, m]),
         onAssistantMessage: (m) => setMessages((prev) => [...prev, m]),
@@ -167,7 +182,7 @@ export default function App() {
       }
       setStreaming(false);
     });
-  }, [convId, effectiveModel, streaming, patchMessage, refreshConversations, refreshAgents, pendingAgent]);
+  }, [convId, effectiveModel, streaming, patchMessage, refreshConversations, refreshAgents, pendingAgent, agents, conversations, personaId, workspaceId]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -284,7 +299,7 @@ export default function App() {
         agents={agents}
         activeAgentId={activeAgent?.id ?? null}
         onSelectBot={selectBot}
-        onNew={() => { newConversation(); if (window.innerWidth < 768) setSidebarOpen(false); }}
+        onNew={() => { newConversation(); setCreateSignal((s) => s + 1); if (window.innerWidth < 768) setSidebarOpen(false); }}
         onOpenSettings={() => setSettingsOpen(true)}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
@@ -312,7 +327,7 @@ export default function App() {
         <div ref={scrollRef} className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-3xl px-4 py-6">
             {empty && !pendingAgent && (
-              <BotLobby agents={agents} models={models} defaultModel={defaultModel} routineAgentIds={routineAgentIds} onSelect={selectBot} onRefresh={refreshAgents} />
+              <BotLobby agents={agents} agentsLoaded={agentsLoaded} models={models} defaultModel={defaultModel} routineAgentIds={routineAgentIds} createSignal={createSignal} onSelect={selectBot} onRefresh={refreshAgents} />
             )}
             {empty && pendingAgent && (
               <div className="mt-[25vh] text-center">
@@ -347,11 +362,14 @@ export default function App() {
           </div>
         </div>
 
-        <div className="px-3 pt-1 sm:px-4 pb-[calc(3.5rem+env(safe-area-inset-bottom))]">
-          <div className="mx-auto max-w-3xl">
-            <Composer models={models} model={effectiveModel} onModelChange={changeModel} onSend={send} onStop={stop} streaming={streaming} personas={personas} personaId={personaId} onPersonaChange={setPersonaId} skills={skills} />
+        {/* 봇이 하나도 없으면 입력창 없음 — 첫 화면은 봇 생성부터 */}
+        {(!agentsLoaded || agents.length > 0 || convId || pendingAgent) && (
+          <div className="px-3 pt-1 sm:px-4 pb-[calc(3.5rem+env(safe-area-inset-bottom))]">
+            <div className="mx-auto max-w-3xl">
+              <Composer models={models} model={effectiveModel} onModelChange={changeModel} onSend={send} onStop={stop} streaming={streaming} personas={personas} personaId={personaId} onPersonaChange={setPersonaId} skills={skills} />
+            </div>
           </div>
-        </div>
+        )}
       </main>
       {settingsOpen && <SettingsModal endpoints={endpoints} models={models} onClose={() => { setSettingsOpen(false); api.models().then((d) => { setModels(d.models); setEndpoints(d.endpoints); }); mybotFetch("/api/settings").then((r) => r.json()).then((d) => setDefaultModel(d.settings?.default_model ?? "")).catch(() => {}); }} />}
     </div>
