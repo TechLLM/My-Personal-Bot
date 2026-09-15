@@ -196,6 +196,16 @@ async function resumeAgent(req: any, task: string) {
   const { getAgent, runAgent, agentSessionConvId, defaultModel } = await import("./team");
   const agent = getAgent(req.agent_id);
   if (!agent) return;
+  // 재개 폭주 방지 — 승인이 한꺼번에 처리되면 "원래 작업 재개" run이 봇당 수십 개 쌓인다.
+  // 최근 10분에 재개 run이 3개를 넘으면 run을 새로 돌리지 않고 결과만 세션에 기록한다
+  // (결과 자체는 approval_requests.result에도 남아 있고 세션 노트로 맥락이 유지된다).
+  const recentResumes = (db.prepare("SELECT COUNT(*) c FROM agent_runs WHERE agent_id = ? AND task LIKE '[승인 처리됨]%' AND created_at > ?").get(agent.id, now() - 10 * 60_000) as any)?.c ?? 0;
+  if (recentResumes >= 3) {
+    const { appendToAgentSession } = await import("./routes/chat");
+    const { normalizeReport } = await import("./report");
+    appendToAgentSession(agentSessionConvId(agent.id), `[승인 처리 — 결과 기록] ${req.tool}`, await normalizeReport(agent.name, req.resume || req.tool, task), agent.model, null);
+    return;
+  }
   const runId = uid();
   db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, NULL, ?, 'running', ?)")
     .run(runId, agent.id, `[승인 처리됨] ${req.tool} — 작업 재개`, now());
