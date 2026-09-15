@@ -588,12 +588,21 @@ export const chatRoute = new Hono()
           const leakedCalls = parseLeaked(content);
           const degenerate = meaningfulLen < 8;
           const claimsPopup = !degenerate && !leakedCalls.length && /팝업|보안.{0,6}입력|입력.{0,4}(창|띄)/.test(content) && /계정|비밀번호|로그인|아이디/.test(content);
-          const claimsAction = !degenerate && !leakedCalls.length && calledTools.size === 0 && /(삭제|생성|지시|등록|전송|예약|전달|수정|처리|만들|보내)[가-힣]{0,3}\s*(했|함|됐|됨|할게|하겠|진행|완료|대상)/.test(content);
           // 명시적 작업 지시를 받고도 도구 없이 되묻거나 보류·제안만 한 회피 응답 감지
           const lastUser = [...history].reverse().find((m) => m.role === "user" && typeof m.content === "string" && !m.content.startsWith("[시스템]"));
           const imperatives = lastUser ? /(알려|확인|처리|조회|정리|보내|만들|검색|읽어|살펴|보고|답변|해라|해줘|시켜)/.test(lastUser.content as string) : false;
+          // 변경 계열 도구가 실제로 호출됐는지 — 조회 도구만 호출하고 "삭제/등록했다"고 주장하는 것을 잡음
+          const mutatingCall = [...calledTools].some((t) => /_delete|_add|_create|_update|_remove|send_|approve/i.test(t));
+          const claimsAction = !degenerate && !leakedCalls.length && !mutatingCall && /(삭제|생성|지시|등록|전송|예약|전달|수정|처리|만들|보내|제거)[가-힣]{0,3}\s*(했|함|됐|됨|할게|하겠|진행|완료|대상|요청|전송)/.test(content);
+          // 지시 동사와 호출된 도구의 불일치 — "삭제해라"에 add/list만 호출하거나 삭제 주장만 한 경우
+          const wantsDelete = !!lastUser && /(삭제|제거|지워|없애)/.test(lastUser.content as string);
+          const deleteCalled = [...calledTools].some((t) => /_delete|_remove/i.test(t));
+          const claimsDeleted = /(삭제|제거|지워|없애)[가-힣]{0,4}\s*(했|함|됐|됨|완료|처리|요청|전송)/.test(content);
+          const actionMismatch = !degenerate && !leakedCalls.length && wantsDelete && !deleteCalled && (claimsDeleted || mutatingCall || /(할까요|주시면|선택해 주세요|원하시는|명시해|동작을 선택)/.test(content));
+          // 도구 호출 JSON이 텍스트로 새어나온 응답 — 요청 데이터에 {...,"action":"add"} 같은 조각
+          const jsonLeak = !degenerate && !leakedCalls.length && /"(action|arguments|assigned_bot)"\s*:\s*"|\{\s*"name"\s*:\s*"[^"]{2,}"\s*,\s*"trigger"/.test(content);
           const dodges = !degenerate && !leakedCalls.length && calledTools.size === 0 && imperatives && /(있나요|할까|드릴까|보낼까|처리할까|진행할까|마무리할게|종료할까|어떻게 할까|주시면|해 주시면)/.test(content);
-          const needsFix = (claimsPopup && !calledTools.has("request_credentials")) || claimsAction || degenerate || leakedCalls.length > 0 || dodges;
+          const needsFix = (claimsPopup && !calledTools.has("request_credentials")) || claimsAction || actionMismatch || jsonLeak || degenerate || leakedCalls.length > 0 || dodges;
           if (needsFix && Date.now() < deadline) {
             history.push({ role: "assistant", content });
             for (const tc of leakedCalls) {
@@ -604,7 +613,11 @@ export const chatRoute = new Hono()
               ? "[시스템] 방금 도구 호출이 텍스트 형식으로 출력되어 서버가 대신 실행했습니다. 위 도구 결과를 확인하고 작업을 계속하세요 — 추가 도구는 반드시 정식 도구 호출(function call)로 사용하고, 완료되면 정상 문장으로 답변하세요."
               : claimsPopup
                 ? "[시스템] 방금 응답에서 계정 입력 팝업을 띄우겠다고 했지만 request_credentials 도구가 실제로 호출되지 않았습니다. 지금 즉시 request_credentials를 호출해 팝업을 실제로 띄우세요. site에는 언급된 서비스 이름을 넣으세요."
-                : degenerate
+                : actionMismatch
+                  ? `[시스템] 사용자는 삭제/제거를 지시했지만 삭제 계열 도구(*_delete)가 호출되지 않았습니다 — 실제 호출된 도구: ${[...calledTools].join(", ") || "없음"}. routine_list로 삭제 대상 ID를 확인한 뒤 지금 즉시 *_delete 도구를 호출해 실제로 삭제하고, 삭제 후 목록을 다시 조회해 결과를 보고하세요. 호출 없이 "삭제했다"고 주장하면 안 됩니다.`
+                  : jsonLeak
+                    ? "[시스템] 방금 응답에 도구 호출 JSON이 텍스트로 출력됐습니다. JSON 조각을 출력하지 말고, 필요한 작업은 정식 도구 호출(function call)로 수행한 뒤 정상적인 문장으로 답변하세요."
+                    : degenerate
                   ? "[시스템] 방금 응답이 비어 있거나 손상된 문자열이었습니다. 사용자의 요청을 다시 처리하세요 — 작업이 필요하면 도구를 실제로 호출해 수행하고 결과를 확인한 뒤, 정상적인 문장으로 답변하세요."
                   : dodges
                     ? "[시스템] 사용자가 명시적으로 작업을 지시했는데 되묻거나 보류만 했습니다. 되묻지 말고 지금 도구를 호출해 지시된 작업을 실제로 수행하고 결과를 보고하세요."
@@ -647,7 +660,7 @@ export const chatRoute = new Hono()
             const fixStripped = fixText.replace(/<think>[\s\S]*?(<\/think>|$)/g, "").replace(/\]\([^)]*\)/g, "]").replace(/https?:\/\/\S+/g, "");
             const fixOk = (fixStripped.match(/[가-힣A-Za-z0-9]/g) ?? []).length >= 8;
             if (degenerate || leakedCalls.length) content = fixOk ? fixText : "⚠️ 응답 생성에 실패했습니다 — 같은 지시를 다시 보내주세요.";
-            else if (fixOk && (claimsAction || dodges)) content = fixText;
+            else if (fixOk && (claimsAction || dodges || actionMismatch || jsonLeak)) content = fixText;
             else if (popupShown && claimsPopup) content += "\n\n> ✅ 보안 입력 팝업을 지금 띄웠습니다 — 팝업에 계정을 입력해 주세요.";
             else if (calledTools.size) content += "\n\n> ⤵ 위에 보고한 작업을 실제 도구로 수행했습니다 — 세부 결과는 실제 실행 결과와 다를 수 있습니다.";
             if (toolEvents.length) searchMeta = { ...(searchMeta ?? {}), type: searchMeta?.type ?? "tools", events: toolEvents };
