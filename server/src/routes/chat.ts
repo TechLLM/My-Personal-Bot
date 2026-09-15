@@ -105,7 +105,12 @@ export function systemPrompt(mode: string, personaId?: string | null, workspaceI
       }
       const amems = recallMemories(agentId, queryText);
       if (amems.length) p += "\n\n[이 봇이 기억하는 업무 맥락]\n" + amems.map((m) => `- ${m}`).join("\n");
-      p += "\n\n[도구 사용 규칙 — 반드시 준수] 봇 생성(agent_create)·업무 지시(agent_direct)·검색·파일·브라우저 같은 실제 작업은 반드시 도구를 호출해 수행하고, 도구 결과를 확인한 뒤에만 완료를 보고하세요. 도구 호출 없이 '생성했다/지시했다/완료했다'고 주장하면 안 됩니다 — 도구 호출 없이는 아무 일도 일어나지 않습니다. 도구가 실패하거나 필요한 도구가 없으면 할 수 없다고 솔직히 답하세요. 계정·비밀번호 같은 개인정보가 필요하면 request_credentials 도구로 보안 입력 팝업을 띄우세요 — 채팅으로 비밀번호를 직접 요청하거나 받지 마세요. 중요한 사실·결정·진행 상태는 memory_save 도구로 장기기억에 남기거나 MEMORY.md 업무 노트에 직접 기록하세요.";
+      const orgRule = agent.is_boss
+        ? "당신은 관리자(CEO)입니다 — agent_create(봇 생성)·agent_update(역할·모델 수정, lead 옵션으로 팀장 지정/해제)·agent_delete(봇 삭제)·agent_direct(임의 봇 지시)로 전체 조직을 관리합니다. 조직이 크면 팀장을 지정해 하위 봇 관리를 위임하세요."
+        : agent.is_lead
+          ? "당신은 팀장입니다 — agent_create로 하위 봇을 생성하고(당신의 팀 소속), agent_update·agent_delete로 자기 하위 봇을 관리하며, agent_direct로 하위 봇에게 지시하고 결과를 취합해 지시한 쪽에 보고합니다. 다른 팀 봇의 수정·삭제 권한은 없습니다."
+          : "봇 생성·삭제 권한은 없습니다 — 새 봇이 필요하면 관리자(CEO)나 팀장에게 요청하세요. agent_list·agent_direct로 다른 봇과 협업할 수 있습니다.";
+      p += "\n\n[도구 사용 규칙 — 반드시 준수] " + orgRule + " 업무 지시(agent_direct)·검색·파일·브라우저 같은 실제 작업은 반드시 도구를 호출해 수행하고, 도구 결과를 확인한 뒤에만 완료를 보고하세요. 도구 호출 없이 '생성했다/지시했다/완료했다'고 주장하면 안 됩니다 — 도구 호출 없이는 아무 일도 일어나지 않습니다. 도구가 실패하거나 필요한 도구가 없으면 할 수 없다고 솔직히 답하세요. 계정·비밀번호 같은 개인정보가 필요하면 request_credentials 도구로 보안 입력 팝업을 띄우세요 — 채팅으로 비밀번호를 직접 요청하거나 받지 마세요. 중요한 사실·결정·진행 상태는 memory_save 도구로 장기기억에 남기거나 MEMORY.md 업무 노트에 직접 기록하세요.";
     }
   }
   if (workspaceId) {
@@ -399,14 +404,14 @@ export const chatRoute = new Hono()
           // 도구 루프: 봇이 모든 메시지를 처리 — 내장 도구(검색·파일) + 브라우저 + MCP 도구(설정 시)
           const { mcpConfigured, mcpTools, mcpCall } = await import("../mcp");
             const { BROWSER_TOOLS, browserTool, closeAgentPage } = await import("../browser");
-            const { BUILTIN_TOOLS, BOSS_TOOLS, callBuiltin, getAgent } = await import("../team");
+            const { BUILTIN_TOOLS, MANAGE_TOOLS, callBuiltin, getAgent } = await import("../team");
             const convAgent = getAgent(conv?.agent_id);
-            const openaiTools: any[] = [...BUILTIN_TOOLS, ...(convAgent?.is_boss ? BOSS_TOOLS : []), ...BROWSER_TOOLS];
+            const openaiTools: any[] = [...BUILTIN_TOOLS, ...(convAgent?.is_boss || convAgent?.is_lead ? MANAGE_TOOLS : []), ...BROWSER_TOOLS];
             if (mcpConfigured()) {
               const tools = await mcpTools();
               openaiTools.push(...tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } })));
             }
-            const builtinNames = new Set([...BUILTIN_TOOLS, ...BOSS_TOOLS].map((t) => t.function.name));
+            const builtinNames = new Set([...BUILTIN_TOOLS, ...MANAGE_TOOLS].map((t) => t.function.name));
             const { chatOnce } = await import("../providers/openaiCompat");
             const browserKey = `${convId}:${asstMsg.id}`;
             const deadline = Date.now() + 3 * 60_000; // 일반 대화 도구 루프 최대 3분
@@ -484,7 +489,7 @@ export const chatRoute = new Hono()
 
           // 자가교정 — 도구 호출 없이 작업 완료·팝업 표시를 주장한 환각 응답을 실제 도구 호출로 보정
           const claimsPopup = /팝업|보안.{0,6}입력|입력.{0,4}(창|띄)/.test(content) && /계정|비밀번호|로그인|아이디/.test(content);
-          const claimsAction = calledTools.size === 0 && /(삭제했|생성했|지시했|등록했|전송했|만들었|처리했|삭제됨|생성됨|등록됨|전달했|보냈)/.test(content);
+          const claimsAction = calledTools.size === 0 && /(삭제|생성|지시|등록|전송|예약|전달|수정|처리|만들|보내)[가-힣]{0,3}\s*(했|함|됐|됨|할게|하겠|진행|완료|대상)/.test(content);
           const needsFix = (claimsPopup && !calledTools.has("request_credentials")) || claimsAction;
           if (needsFix && Date.now() < deadline) {
             history.push({ role: "assistant", content });

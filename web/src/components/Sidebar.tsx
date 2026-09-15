@@ -46,8 +46,14 @@ export function Sidebar({
             title={`${a.role_prompt || "범용 봇"} — 클릭하면 이 봇의 세션으로 이동`}
           >
             <AgentIcon name={a.name} seed={a.avatar} size={17} className="shrink-0" />
-            <span className="truncate flex-1">{a.name}</span>
-            {!!a.is_boss && <Crown size={11} className="shrink-0 text-amber-400" />}
+            <span className="min-w-0 flex-1">
+              <span className="flex items-center gap-1">
+                <span className="truncate">{a.name}</span>
+                {!!a.is_boss && <Crown size={11} className="shrink-0 text-amber-400" />}
+                {!!a.is_lead && !a.is_boss && <span className="shrink-0 rounded bg-zinc-700 px-1 text-[9px] text-zinc-300">팀장</span>}
+              </span>
+              <span className="block truncate text-[10px] leading-tight text-zinc-500">{(a.role_prompt || "범용 봇").replace(/\s+/g, " ").slice(0, 42)}</span>
+            </span>
           </div>
         ))}
         <button

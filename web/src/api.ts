@@ -115,6 +115,7 @@ export interface Agent {
   avatar: string | null;
   persistent: number;
   is_boss: number;
+  is_lead: number;
   created_at: number;
 }
 
