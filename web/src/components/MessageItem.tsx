@@ -7,6 +7,9 @@ import { Brain, Bot, FileText, Volume2 } from "lucide-react";
 import { AgentIcon } from "./icons";
 import { WorkingStatus } from "./WorkingStatus";
 
+// 저장된 과거 메시지·스트리밍 중간에 섞인 장식 이모지를 렌더 단에서 제거 — 정돈된 선형 표기 유지
+const stripEmoji = (s: string) => s.replace(/\p{Extended_Pictographic}\uFE0F?/gu, "").replace(/\u200D/g, "");
+
 interface TeamPlanAgent {
   name: string; avatar: string; role: string; task: string; model: string; model_label?: string;
   status?: string; result?: string; existing?: boolean;
@@ -122,7 +125,7 @@ export function MessageItem({
       {streaming && !m.reasoning && !m.content && <WorkingStatus compact />}
       {m.content && (
         <div className="markdown text-[15px] leading-relaxed">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{m.content}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{stripEmoji(m.content)}</ReactMarkdown>
         </div>
       )}
       {meta?.type === "team" && meta.status === "pending" && meta.agents && (

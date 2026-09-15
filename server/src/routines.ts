@@ -42,7 +42,8 @@ export async function runRoutine(r: any): Promise<string> {
     const { appendToAgentSession } = await import("./routes/chat");
     const { agentSessionConvId } = await import("./team");
     const runMeta = JSON.stringify({ type: "tools", events: state.toolLog.map((l) => ({ type: "read", title: l.tool, url: "" })) });
-    appendToAgentSession(agentSessionConvId(agent.id), `[루틴] ${r.name}\n${r.prompt}`, out, useModel, runMeta);
+    const { normalizeReport } = await import("./report");
+    appendToAgentSession(agentSessionConvId(agent.id), `[루틴] ${r.name}\n${r.prompt}`, await normalizeReport(agent.name, r.prompt, out), useModel, runMeta);
   }
   // 루틴 결과도 설정된 알림 채널로 발송
   if (out) {

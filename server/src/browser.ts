@@ -288,7 +288,8 @@ export const sitesRoute = new Hono()
               .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
             const { appendToAgentSession } = await import("./routes/chat");
             const meta = JSON.stringify({ type: "tools", events: state.toolLog.map((l) => ({ type: "read", title: l.tool, url: "" })) });
-            appendToAgentSession(agentSessionConvId(agent.id), `[계정 입력 완료 — 작업 자동 재개] ${req.name}`, state.result ?? "(결과 없음)", agent.model, meta);
+            const { normalizeReport } = await import("./report");
+            appendToAgentSession(agentSessionConvId(agent.id), `[계정 입력 완료 — 작업 자동 재개] ${req.name}`, await normalizeReport(agent.name, req.resume || req.name, state.result ?? "(결과 없음)"), agent.model, meta);
             const { notifyResult } = await import("./notify");
             notifyResult(`계정 입력됨 — ${agent.name} 작업 재개`, state.result ?? "(결과 없음)");
           })().catch((e) => console.error("[mybot] 계정 입력 후 재개 실패:", (e as Error).message));

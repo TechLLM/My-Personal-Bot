@@ -3,6 +3,7 @@ import { db, uid, now, getSetting } from "../db";
 import { resolveModel } from "../providers";
 import { streamChat, type ChatMessage } from "../providers/openaiCompat";
 import { runDeepSearch } from "../deepsearch";
+import { cleanOutput } from "../report";
 import { WORK_DIR } from "../team";
 import { join } from "node:path";
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
@@ -110,7 +111,7 @@ export function systemPrompt(mode: string, personaId?: string | null, workspaceI
         : agent.is_lead
           ? "당신은 팀장입니다 — agent_create로 하위 봇을 생성하고(당신의 팀 소속), agent_update·agent_delete로 자기 하위 봇을 관리하며, agent_direct로 하위 봇에게 지시하고 결과를 취합해 지시한 쪽에 보고합니다. 다른 팀 봇의 수정·삭제 권한은 없습니다."
           : "봇 생성·삭제 권한은 없습니다 — 새 봇이 필요하면 관리자(CEO)나 팀장에게 요청하세요. agent_list·agent_direct로 다른 봇과 협업할 수 있습니다.";
-      p += "\n\n[도구 사용 규칙 — 반드시 준수] " + orgRule + " 업무 지시(agent_direct)·검색·파일·브라우저 같은 실제 작업은 반드시 도구를 호출해 수행하고, 도구 결과를 확인한 뒤에만 완료를 보고하세요. 도구 호출 없이 '생성했다/지시했다/완료했다'고 주장하면 안 됩니다 — 도구 호출 없이는 아무 일도 일어나지 않습니다. 도구가 실패하거나 필요한 도구가 없으면 할 수 없다고 솔직히 답하세요. 계정·비밀번호 같은 개인정보가 필요하면 request_credentials 도구로 보안 입력 팝업을 띄우세요 — 채팅으로 비밀번호를 직접 요청하거나 받지 마세요. 중요한 사실·결정·진행 상태는 memory_save 도구로 장기기억에 남기거나 MEMORY.md 업무 노트에 직접 기록하세요.";
+      p += "\n\n[도구 사용 규칙 — 반드시 준수] " + orgRule + " 업무 지시(agent_direct)·검색·파일·브라우저 같은 실제 작업은 반드시 도구를 호출해 수행하고, 도구 결과를 확인한 뒤에만 완료를 보고하세요. 도구 호출 없이 '생성했다/지시했다/완료했다'고 주장하면 안 됩니다 — 도구 호출 없이는 아무 일도 일어나지 않습니다. 도구가 실패하거나 필요한 도구가 없으면 할 수 없다고 솔직히 답하세요. 계정·비밀번호 같은 개인정보가 필요하면 request_credentials 도구로 보안 입력 팝업을 띄우세요 — 채팅으로 비밀번호를 직접 요청하거나 받지 마세요. 중요한 사실·결정·진행 상태는 memory_save 도구로 장기기억에 남기거나 MEMORY.md 업무 노트에 직접 기록하세요. 답변 형식: 이모지를 사용하지 마세요 — 섹션 제목(##), 표, 목록, ▸/■ 마커로 정돈된 문서 형태로 답하세요.";
     }
   }
   if (workspaceId) {
@@ -581,6 +582,7 @@ export const chatRoute = new Hono()
             if (toolEvents.length) searchMeta = { ...(searchMeta ?? {}), type: searchMeta?.type ?? "tools", events: toolEvents };
           }
 
+          content = cleanOutput(content); // 장식 이모지 제거·마커 치환 — 화면에 정돈된 결과만 저장
           q.msgUpdate.run(content, reasoning || null, usedModel, searchMeta ? JSON.stringify(searchMeta) : null, usage?.prompt_tokens ?? null, usage?.completion_tokens ?? null, asstMsg.id);
           send("done", { message: withSiblings(q.msgGet.get(asstMsg.id) as Msg) });
 
@@ -595,7 +597,7 @@ export const chatRoute = new Hono()
           // 설정된 알림 채널로 결과 발송 (기본은 채팅창만)
           if (content) {
             const { notifyResult } = await import("../notify");
-            notifyResult(conv?.title ?? "MyBot", content);
+            notifyResult(conv?.title ?? "MyBot", content, conv?.agent_name ?? "MyBot");
           }
         } catch (e: any) {
           if (e?.name !== "AbortError") send("error", { message: String(e?.message ?? e) });

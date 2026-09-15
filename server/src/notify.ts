@@ -20,6 +20,42 @@ export async function sendTelegram(text: string): Promise<string | null> {
   }
 }
 
+// 마크다운 보고서를 텔레그램 HTML로 정돈해 전송 — 표가 있거나 길면 HTML 문서도 함께 첨부
+// 모델과 무관하게 항상 같은 포맷으로 도착하게 하는 고정 출력층
+export async function sendTelegramReport(title: string, mdReport: string): Promise<string | null> {
+  const token = getSetting("telegram_bot_token");
+  const chatId = getSetting("telegram_chat_id");
+  if (!token || !chatId) return "봇 토큰/채팅 ID 미설정";
+  try {
+    const { mdToTelegramHtml, mdToHtmlDocument, cleanOutput } = await import("./report");
+    const clean = cleanOutput(mdReport);
+    const html = `<b>■ ${title.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</b>\n\n` + mdToTelegramHtml(clean);
+    const hasTable = /^\s*\|.*\|\s*$/m.test(clean);
+    const text = html.length > 4000 ? html.slice(0, 3900) + "\n…(전체는 첨부 문서)" : html;
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true }),
+    });
+    if (!res.ok) {
+      // HTML 파싱 실패 시 평문으로 폴백
+      return sendTelegram(`[MyBot] ${title}\n\n${clean}`);
+    }
+    // 표가 포함됐거나 본문이 길면 정돈된 HTML 문서를 함께 첨부 — 텔레그램에서 실제 표로 열람 가능
+    if (hasTable || clean.length > 3500) {
+      const doc = mdToHtmlDocument(`[MyBot] ${title}`, clean);
+      const form = new FormData();
+      form.append("chat_id", chatId);
+      form.append("caption", `${title} — 전체 보고서`);
+      form.append("document", new Blob([doc], { type: "text/html" }), "report.html");
+      await fetch(`https://api.telegram.org/bot${token}/sendDocument`, { method: "POST", body: form }).catch(() => {});
+    }
+    return null;
+  } catch (e) {
+    return `텔레그램 오류: ${(e as Error).message}`;
+  }
+}
+
 // SMTP로 결과 메일 전송
 export async function sendEmail(subject: string, text: string): Promise<string | null> {
   const host = getSetting("smtp_host");
@@ -41,9 +77,15 @@ export async function sendEmail(subject: string, text: string): Promise<string |
 }
 
 // 답변 완성 후 설정된 채널로 발송 (기본은 채팅창만 — 설정 켠 채널에 추가 발송)
-export function notifyResult(title: string, content: string) {
+// 텔레그램은 정규화된 보고서 형식으로 발송 — 모델과 무관하게 정돈된 포맷 보장
+export function notifyResult(title: string, content: string, agentName = "MyBot") {
   if (getSetting("notify_telegram") === "1") {
-    sendTelegram(`[MyBot] ${title}\n\n${content}`).then((e) => e && console.error("[notify]", e));
+    void (async () => {
+      const { normalizeReport } = await import("./report");
+      const report = await normalizeReport(agentName, title, content);
+      const e = await sendTelegramReport(title, report);
+      if (e) console.error("[notify]", e);
+    })();
   }
   if (getSetting("notify_email") === "1") {
     sendEmail(`[MyBot] ${title}`, content).then((e) => e && console.error("[notify]", e));
@@ -83,8 +125,13 @@ async function handleTelegramText(text: string): Promise<string> {
   db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
     .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
   const out = state.result ?? "(결과 없음)";
-  appendToAgentSession(convId, `[텔레그램] ${text}`, out, boss.model);
-  return out;
+  // 세션 기록과 텔레그램 회신 모두 정규화된 보고서 형식으로 — 이모지 제거·고정 섹션
+  const { normalizeReport } = await import("./report");
+  const report = await normalizeReport(boss.name, text, out);
+  appendToAgentSession(convId, `[텔레그램] ${text}`, report, boss.model);
+  const err = await sendTelegramReport(boss.name, report);
+  if (err) console.error("[telegram]", err);
+  return report;
 }
 
 let tgStarted = false;
@@ -121,9 +168,7 @@ export function startTelegramBot() {
               method: "POST", headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ chat_id: chatId, action: "typing" }),
             }).catch(() => {});
-            const out = await handleTelegramText(text);
-            const err = await sendTelegram(out);
-            if (err) console.error("[telegram]", err);
+            await handleTelegramText(text); // 정규화된 보고서 형식으로 텔레그램 회신까지 내부에서 처리
           } catch (e) {
             console.error("[telegram]", (e as Error).message);
             sendTelegram(`지시 처리 중 오류: ${(e as Error).message}`).catch(() => {});

@@ -193,11 +193,14 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     emit?.({ type: "agent_done", agentId: target.id, status: state.status, result: (state.result ?? "").slice(0, 4000) });
     db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
       .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
-    // 대상 봇의 메인 세션에 실행 내역을 기록 — 봇 세션을 열면 실제 수행한 작업(도구 칩 포함)이 보임
+    // 대상 봇의 메인 세션에 실행 내역을 기록 — 정규화된 보고서 형식으로 저장해 봇 화면이 정돈되게 표시됨
     {
       const { appendToAgentSession } = await import("./routes/chat");
+      const { normalizeReport } = await import("./report");
       const runMeta = JSON.stringify({ type: "tools", events: state.toolLog.map((l) => ({ type: "read", title: l.tool, url: "" })) });
-      appendToAgentSession(agentSessionConvId(target.id), `[${caller?.name ?? "사용자"} 지시] ${String(args.instruction ?? "")}`, state.result ?? "(결과 없음)", target.model, runMeta);
+      const task = `[${caller?.name ?? "사용자"} 지시] ${String(args.instruction ?? "")}`;
+      const report = await normalizeReport(target.name, String(args.instruction ?? ""), state.result ?? "(결과 없음)");
+      appendToAgentSession(agentSessionConvId(target.id), task, report, target.model, runMeta);
     }
     return `[${target.name} 실행 결과 — ${state.status === "done" ? "완료" : "실패"}]\n${state.result ?? "(결과 없음)"}`;
   }
@@ -330,7 +333,9 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
         ? "당신은 관리자(CEO)입니다 — 모든 봇에 대한 전체 권한을 가집니다: agent_create(봇 생성), agent_update(역할·모델 수정·팀장 지정/해제), agent_delete(봇 삭제), agent_direct(임의 봇에게 지시). 조직이 커지면 agent_update의 lead 옵션으로 팀장을 지정하고, 팀장이 하위 봇 생성·지시·취합을 담당하게 하세요."
         : isLead
           ? "당신은 팀장입니다 — 자기 하위 봇에 대한 관리 권한을 가집니다: agent_create(하위 봇 생성 — 생성된 봇은 당신의 팀 소속), agent_update·agent_delete(하위 봇만), agent_direct(하위 봇에게 지시하고 결과를 취합해 지시한 쪽에 보고)."
-          : "다른 봇과 협업할 수 있습니다: agent_list로 봇 목록 확인, agent_direct로 봇에게 위임하고 결과를 받으세요. 새 봇 생성이 필요하면 관리자(CEO)나 팀장에게 요청하세요 — 봇 생성 권한은 관리자·팀장에게만 있습니다."}\n파일은 공유 작업 디렉터리로 주고받습니다.\n최종 답변은 지시한 쪽에 보고하는 결과 보고서로 작성하세요 — 핵심 결과와 근거를 간결하게.\n결과를 CEO(관리자)에게 전달·보고하려면 agent_list에서 [CEO] 봇 이름을 확인해 agent_direct로 지시하세요 — 대장 세션에 기록돼 사용자에게 보입니다.\n\n[중요] 실제 작업(봇 생성·지시·검색·파일)은 반드시 도구를 호출해 수행하고 결과를 확인한 뒤 완료를 보고하세요. 도구 호출 없이 '했다'고 주장하지 마세요. 계정·비밀번호가 필요하면 request_credentials 도구로 사용자 입력 팝업을 띄우세요 — 채팅으로 비밀번호를 받지 마세요. 중요한 업무 노트·결정·진행 상태는 memory_save로 장기기억에 남기거나 agents/${agent.name}/MEMORY.md 파일에 직접 기록하세요 — 작업 시작 시 먼저 읽어 맥락을 잇는 것을 권장합니다.`,
+          : "다른 봇과 협업할 수 있습니다: agent_list로 봇 목록 확인, agent_direct로 봇에게 위임하고 결과를 받으세요. 새 봇 생성이 필요하면 관리자(CEO)나 팀장에게 요청하세요 — 봇 생성 권한은 관리자·팀장에게만 있습니다."}\n파일은 공유 작업 디렉터리로 주고받습니다.\n최종 답변은 지시한 쪽에 보고하는 결과 보고서로 작성하세요 — 핵심 결과와 근거를 간결하게.\n결과를 CEO(관리자)에게 전달·보고하려면 agent_list에서 [CEO] 봇 이름을 확인해 agent_direct로 지시하세요 — 대장 세션에 기록돼 사용자에게 보입니다.\n\n[중요] 실제 작업(봇 생성·지시·검색·파일)은 반드시 도구를 호출해 수행하고 결과를 확인한 뒤 완료를 보고하세요. 도구 호출 없이 '했다'고 주장하지 마세요. 계정·비밀번호가 필요하면 request_credentials 도구로 사용자 입력 팝업을 띄우세요 — 채팅으로 비밀번호를 받지 마세요. 중요한 업무 노트·결정·진행 상태는 memory_save로 장기기억에 남기거나 agents/${agent.name}/MEMORY.md 파일에 직접 기록하세요 — 작업 시작 시 먼저 읽어 맥락을 잇는 것을 권장합니다.
+
+[보고서 형식 — 반드시 준수] 최종 보고서는 이모지 없이 아래 섹션으로 작성하세요: ## 요약 (1~2문장) / ## 결과 (실제 수집 데이터 — 마크다운 표·목록·링크) / ## 미확인 (확인 못한 항목, 없으면 '없음') / ## 다음 단계 (이어갈 작업, 없으면 '없음').`,
     },
     { role: "user", content: state.task },
   ];
