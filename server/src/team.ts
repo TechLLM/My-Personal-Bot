@@ -186,6 +186,11 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     if (!nm) return "오류: name 필요";
     const caller = agentId ? getAgent(agentId) : null;
     if (caller && !caller.is_boss && !caller.is_lead) return "권한 없음: 봇 생성은 관리자(CEO) 또는 팀장만 가능합니다 — 관리자에게 요청하세요";
+    // 팀장은 하위 봇 최대 4개 — 초과는 관리자(CEO)만 가능
+    if (caller && !caller.is_boss) {
+      const kids = (db.prepare("SELECT COUNT(*) c FROM agents WHERE parent_id = ?").get(caller.id) as any).c;
+      if (kids >= 4) return `하위 봇 한도 도달: 팀장은 최대 4개까지 생성 가능 (현재 ${kids}개) — 추가 생성은 관리자(CEO)에게 요청하세요`;
+    }
     const id = uid();
     db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, is_boss, parent_id, created_at) VALUES (?, ?, ?, ?, ?, NULL, 1, 0, ?, ?)")
       .run(id, uniqueName(nm.slice(0, 30)), String(args.role ?? ""), String(args.model ?? defaultModel()), `face:${id}`, agentId ?? null, now());
