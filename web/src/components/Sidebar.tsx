@@ -1,8 +1,10 @@
 import type { Agent } from "../api";
 import { Settings, Crown, Plus } from "lucide-react";
 import { AgentIcon } from "./icons";
+import { toolWord, toolLabel } from "./WorkingStatus";
 
 // 사이드바 = 봇 목록. 각 봇이 하나의 세션 — 클릭하면 그 봇과 대화하는 창이 열림
+// 작업 중인 봇은 얼굴이 움직이고, 역할 설명 자리에 실시간 작업 상태(상태어 + 작업 내용)가 표시됨
 export function Sidebar({
   agents,
   activeAgentId,
@@ -12,7 +14,7 @@ export function Sidebar({
   open,
   onClose,
   workingId,
-  workingIds,
+  working,
 }: {
   agents: Agent[];
   activeAgentId: string | null;
@@ -22,7 +24,8 @@ export function Sidebar({
   open: boolean;
   onClose: () => void;
   workingId?: string | null;
-  workingIds?: Set<string>;
+  // 서버에서 실행 중인 봇: id → 마지막으로 사용한 도구 (실시간 작업 내용 표시용)
+  working?: Record<string, string | null>;
 }) {
   if (!open) return null;
   return (
@@ -40,7 +43,10 @@ export function Sidebar({
       </div>
       <div className="px-3 pt-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">봇</div>
       <div className="flex-1 overflow-y-auto p-2 pt-0 space-y-0.5">
-        {agents.map((a) => (
+        {agents.map((a) => {
+          const tool = working?.[a.id];
+          const isWorking = a.id === workingId || tool !== undefined;
+          return (
           <div
             key={a.id}
             className={`flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-sm ${
@@ -49,17 +55,26 @@ export function Sidebar({
             onClick={() => onSelectBot(a)}
             title={`${a.role_prompt || "범용 봇"} — 클릭하면 이 봇의 세션으로 이동`}
           >
-            <AgentIcon name={a.name} seed={a.avatar} size={17} className="shrink-0" working={a.id === workingId || workingIds?.has(a.id)} />
+            <AgentIcon name={a.name} seed={a.avatar} size={17} className="shrink-0" working={isWorking} />
             <span className="min-w-0 flex-1">
               <span className="flex items-center gap-1">
                 <span className="truncate">{a.name}</span>
                 {!!a.is_boss && <Crown size={11} className="shrink-0 text-amber-400" />}
                 {!!a.is_lead && !a.is_boss && <span className="shrink-0 rounded bg-zinc-700 px-1 text-[9px] text-zinc-300">팀장</span>}
               </span>
-              <span className="block truncate text-[10px] leading-tight text-zinc-500">{(a.role_prompt || "범용 봇").replace(/\s+/g, " ").slice(0, 42)}</span>
+              {isWorking ? (
+                <span className="flex items-center gap-1 truncate text-[10px] leading-tight">
+                  <span className="mb-spark text-sky-300/70"><i /><i /></span>
+                  <span className="mb-shimmer font-medium text-sky-300/90">{toolWord(tool ?? "") ?? "Working"}…</span>
+                  <span className="truncate text-zinc-500">{toolLabel(tool)}</span>
+                </span>
+              ) : (
+                <span className="block truncate text-[10px] leading-tight text-zinc-500">{(a.role_prompt || "범용 봇").replace(/\s+/g, " ").slice(0, 42)}</span>
+              )}
             </span>
           </div>
-        ))}
+          );
+        })}
         <button
           onClick={onNew}
           className="flex w-full items-center gap-2 rounded-lg border border-dashed border-zinc-800 px-2.5 py-1.5 text-xs text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"

@@ -43,7 +43,7 @@ export function cleanOutput(text: string): string {
 
 // ── 결과 정규화: 어떤 모델이 쓴 보고든 고정 섹션으로 재구성 (fast 모델) ──
 // 모델 품질과 무관하게 최소한의 정보(요약/결과/미확인/다음 단계)가 항상 담기게 함
-export async function normalizeReport(agentName: string, task: string, result: string): Promise<string> {
+export async function normalizeReport(agentName: string, task: string, result: string, tools?: string[]): Promise<string> {
   const cleaned = cleanOutput(result);
   try {
     const { endpoint, model } = resolveModel("fast");
@@ -53,6 +53,7 @@ export async function normalizeReport(agentName: string, task: string, result: s
         role: "system",
         content: `당신은 업무 보고서 포맷터입니다. 입력된 작업 결과를 아래 고정 형식으로 재구성하세요.
 규칙: 이모지 사용 금지. 원문에 있는 사실만 사용(지어내지 않음). 없는 항목은 '없음' 표기. 마크다운 표는 유지하고 정돈. 섹션은 반드시 모두 출력.
+정확성: '실행된 도구'가 비어 있거나(도구 호출 없음) 결과의 주장이 실제 확인 없이 쓰인 것처럼 보이면, 그 항목은 '## 결과'가 아니라 '## 미확인'에 넣고 '(미검증)' 표기를 붙이세요. 도구로 실제 확인한 데이터만 결과에 남깁니다.
 
 형식:
 ## 요약
@@ -64,7 +65,7 @@ export async function normalizeReport(agentName: string, task: string, result: s
 ## 다음 단계
 (이어서 할 일 또는 권고. 없으면 '없음')`,
       },
-      { role: "user", content: `봇: ${agentName}\n지시: ${task.slice(0, 400)}\n\n원본 결과:\n${cleaned.slice(0, 6000)}` },
+      { role: "user", content: `봇: ${agentName}\n지시: ${task.slice(0, 400)}\n실행된 도구: ${tools?.length ? tools.join(", ") : "(없음 — 도구 미사용)"}\n\n원본 결과:\n${cleaned.slice(0, 6000)}` },
     ], { signal: AbortSignal.timeout(45_000) });
     const out = (res.content ?? "").trim();
     if (out.length > 30) return cleanOutput(out);

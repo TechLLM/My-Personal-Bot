@@ -210,6 +210,11 @@ export const chatRoute = new Hono()
     const t = now();
     q.convInsert.run(id, "새 대화", body.model ?? null, body.mode ?? "auto", body.agentId ?? ensureBossAgent().id, t, t);
     if (body.persona_id) db.prepare("UPDATE conversations SET persona_id = ? WHERE id = ?").run(body.persona_id, id);
+    // /new — 이전 세션은 삭제하지 않고, 요약만 새 세션으로 이어받아 맥락을 유지 (계정·키값 등은 봇 장기기억이 유지)
+    if (body.from_conv) {
+      const prev = db.prepare("SELECT summary FROM conversation_summaries WHERE conversation_id = ?").get(String(body.from_conv)) as { summary: string } | undefined;
+      if (prev?.summary) db.prepare("INSERT INTO conversation_summaries (conversation_id, summary, covers_at, updated_at) VALUES (?, ?, 0, ?)").run(id, `[이전 세션 요약에서 이어짐]\n${prev.summary}`, t);
+    }
     return c.json({ conversation: q.convGet.get(id) });
   })
   .get("/conversations/:id", (c) => {

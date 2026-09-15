@@ -36,7 +36,7 @@ export default function App() {
   const [defaultModel, setDefaultModel] = useState(""); // 설정의 기본 AI 모델 — 새 봇의 기본값
   const [createSignal, setCreateSignal] = useState(0); // 로비의 생성 마법사를 여는 신호 ("+ 새 봇")
   const [credRequests, setCredRequests] = useState<SiteRequest[]>([]); // 봇이 요청한 계정 입력 대기열
-  const [runningIds, setRunningIds] = useState<Set<string>>(new Set()); // 서버에서 실행 중인 봇 — 사이드바 작업 애니메이션용
+  const [runningInfo, setRunningInfo] = useState<Record<string, string | null>>({}); // 서버에서 실행 중인 봇: id → 현재 도구 — 사이드바 실시간 작업 표시용
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -83,7 +83,7 @@ export default function App() {
 
   // 실행 중인 봇 폴링 — 위임·루틴 등 백그라운드 작업도 사이드바에 표시
   useEffect(() => {
-    const poll = () => api.agentsRunning().then((d) => setRunningIds(new Set(d.running))).catch(() => {});
+    const poll = () => api.agentsRunning().then((d) => setRunningInfo(Object.fromEntries(d.running.map((r) => [r.id, r.tool])))).catch(() => {});
     poll();
     const t = setInterval(poll, 4000);
     return () => clearInterval(t);
@@ -134,6 +134,19 @@ export default function App() {
 
   const send = useCallback(async (text: string, mode: Mode, attachments: { url: string; name: string; mime: string }[]) => {
     if (streaming) return;
+    // "/new" — 현재 봇의 새 세션 시작. 이전 세션은 삭제되지 않고 요약만 이어받아 맥락 유지 (계정·키값은 봇 장기기억이 보존)
+    const newMatch = text.trim().match(/^\/new(?:\s+([\s\S]*))?$/);
+    if (newMatch) {
+      const agent = pendingAgent ?? agents.find((a) => a.id === currentConv?.agent_id) ?? agents.find((a) => a.is_boss) ?? null;
+      const d = await api.createConversation({ agentId: agent?.id, from_conv: convId ?? undefined }).catch(() => null);
+      if (!d) return;
+      setConvId(d.conversation.id); setPendingAgent(null);
+      setMessages([]); setSearchEvents([]); setTeamEvents([]);
+      refreshConversations();
+      const rest = (newMatch[1] ?? "").trim();
+      if (rest) send(rest, mode, attachments);
+      return;
+    }
     // 봇 미선택 상태에서 전송 → CEO(관리자) 봇, 없으면 첫 봇의 세션으로 라우팅. 봇이 아예 없으면 전송 불가
     let sendConvId = convId;
     let sendAgent = pendingAgent;
@@ -202,7 +215,7 @@ export default function App() {
       }
       setStreaming(false);
     });
-  }, [convId, effectiveModel, streaming, patchMessage, refreshConversations, refreshAgents, pendingAgent, agents, conversations, personaId, workspaceId]);
+  }, [convId, currentConv, effectiveModel, streaming, patchMessage, refreshConversations, refreshAgents, pendingAgent, agents, conversations, personaId, workspaceId]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -324,7 +337,7 @@ export default function App() {
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
         workingId={streaming ? activeAgent?.id ?? null : null}
-        workingIds={runningIds}
+        working={runningInfo}
       />
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center gap-2 border-b border-zinc-800/60 px-3 py-2 sm:px-4 sm:py-2.5">

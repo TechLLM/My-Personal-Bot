@@ -79,12 +79,14 @@ export const api = {
   renameConversation: (id: string, patch: { title?: string; model?: string }) =>
     mybotFetch(`/api/chat/conversations/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(j),
   deleteConversation: (id: string) => mybotFetch(`/api/chat/conversations/${id}`, { method: "DELETE" }).then(j),
+  createConversation: (body: { agentId?: string; model?: string; from_conv?: string }) =>
+    mybotFetch("/api/chat/conversations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(j) as Promise<{ conversation: Conversation }>,
   selectMessage: (id: string) => mybotFetch(`/api/chat/messages/${id}/select`, { method: "POST" }).then(j) as Promise<{ messages: Message[] }>,
   addEndpoint: (ep: { id: string; name?: string; baseUrl: string; apiKey?: string }) =>
     mybotFetch("/api/models/endpoints", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(ep) }).then(j),
   deleteEndpoint: (id: string) => mybotFetch(`/api/models/endpoints/${id}`, { method: "DELETE" }).then(j),
   agents: () => mybotFetch("/api/agents").then(j) as Promise<{ agents: Agent[] }>,
-  agentsRunning: () => mybotFetch("/api/agents/running").then(j) as Promise<{ running: string[] }>,
+  agentsRunning: () => mybotFetch("/api/agents/running").then(j) as Promise<{ running: { id: string; tool: string | null }[] }>,
   addAgent: (a: { name: string; role_prompt: string; model?: string; avatar?: string }) =>
     mybotFetch("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(a) }).then(j),
   updateAgent: (id: string, patch: Partial<Agent>) =>

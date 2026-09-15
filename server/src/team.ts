@@ -205,7 +205,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
       const { normalizeReport } = await import("./report");
       const runMeta = JSON.stringify({ type: "tools", events: state.toolLog.map((l) => ({ type: "read", title: l.tool, url: "" })) });
       const task = `[${caller?.name ?? "사용자"} 지시] ${String(args.instruction ?? "")}`;
-      const report = await normalizeReport(target.name, String(args.instruction ?? ""), state.result ?? "(결과 없음)");
+      const report = await normalizeReport(target.name, String(args.instruction ?? ""), state.result ?? "(결과 없음)", state.toolLog.map((l) => l.tool));
       appendToAgentSession(agentSessionConvId(target.id), task, report, target.model, runMeta);
     }
     return `[${target.name} 실행 결과 — ${state.status === "done" ? "완료" : "실패"}]\n${state.result ?? "(결과 없음)"}`;
@@ -316,9 +316,17 @@ function createAgent(t: { name?: string; role?: string; model?: string; avatar?:
 
 // 현재 실행 중인 봇 — 사이드바가 폴링해서 작업 애니메이션을 표시
 export const runningAgents = new Set<string>();
+// 봇 id → 마지막으로 사용한 도구 — 사이드바에 "검색 중/웹 탐색 중" 등 실시간 표시용
+export const agentActivity = new Map<string, string>();
 
 export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, signal?: AbortSignal): Promise<void> {
   runningAgents.add(state.id);
+  agentActivity.set(state.id, "");
+  // agent_step 이벤트를 봇별 활동으로 기록 — 중첩 위임된 봇의 스텝도 각자 id로 추적됨
+  const trackEmit: Emit = (ev: any) => {
+    if (ev?.type === "agent_step" && ev.agentId) agentActivity.set(ev.agentId, String(ev.tool ?? ""));
+    emit(ev);
+  };
   const { endpoint, model } = resolveModel(agent.model ?? defaultModel());
   state.model = model;
   const isBoss = !!agent.is_boss;
@@ -341,7 +349,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
           ? "당신은 팀장입니다 — 자기 하위 봇에 대한 관리 권한을 가집니다: agent_create(하위 봇 생성 — 생성된 봇은 당신의 팀 소속), agent_update·agent_delete(하위 봇만), agent_direct(하위 봇에게 지시하고 결과를 취합해 지시한 쪽에 보고)."
           : "다른 봇과 협업할 수 있습니다: agent_list로 봇 목록 확인, agent_direct로 봇에게 위임하고 결과를 받으세요. 새 봇 생성이 필요하면 관리자(CEO)나 팀장에게 요청하세요 — 봇 생성 권한은 관리자·팀장에게만 있습니다."}\n파일은 공유 작업 디렉터리로 주고받습니다.\n최종 답변은 지시한 쪽에 보고하는 결과 보고서로 작성하세요 — 핵심 결과와 근거를 간결하게.\n결과를 CEO(관리자)에게 전달·보고하려면 agent_list에서 [CEO] 봇 이름을 확인해 agent_direct로 지시하세요 — 대장 세션에 기록돼 사용자에게 보입니다.\n\n[중요] 실제 작업(봇 생성·지시·검색·파일)은 반드시 도구를 호출해 수행하고 결과를 확인한 뒤 완료를 보고하세요. 도구 호출 없이 '했다'고 주장하지 마세요. 계정·비밀번호가 필요하면 request_credentials 도구로 사용자 입력 팝업을 띄우세요 — 채팅으로 비밀번호를 받지 마세요. 중요한 업무 노트·결정·진행 상태는 memory_save로 장기기억에 남기거나 agents/${agent.name}/MEMORY.md 파일에 직접 기록하세요 — 작업 시작 시 먼저 읽어 맥락을 잇는 것을 권장합니다.
 
-[보고서 형식 — 반드시 준수] 최종 보고서는 이모지 없이 아래 섹션으로 작성하세요: ## 요약 (1~2문장) / ## 결과 (실제 수집 데이터 — 마크다운 표·목록·링크) / ## 미확인 (확인 못한 항목, 없으면 '없음') / ## 다음 단계 (이어갈 작업, 없으면 '없음').`,
+[보고서 형식 — 반드시 준수] 최종 보고서는 이모지 없이 아래 섹션으로 작성하세요: ## 요약 (1~2문장) / ## 결과 (실제 수집 데이터 — 마크다운 표·목록·링크) / ## 미확인 (확인 못한 항목, 없으면 '없음') / ## 다음 단계 (이어갈 작업, 없으면 '없음'). 도구로 실제 확인한 데이터만 ## 결과에 쓰세요 — 추측이나 기억에 의존한 내용을 사실처럼 쓰지 말고, 확인하지 못한 항목은 반드시 ## 미확인에 명시하세요.`,
     },
     { role: "user", content: state.task },
   ];
@@ -350,7 +358,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
   try {
     for (let round = 0; round < 12; round++) {
       if (Date.now() > deadline) {
-        emit({ type: "agent_step", agentId: state.id, tool: "시간 제한 — 결과 정리" });
+        trackEmit({ type: "agent_step", agentId: state.id, tool: "시간 제한 — 결과 정리" });
         messages.push({ role: "user", content: "작업 시간 제한에 도달했습니다. 도구를 더 사용하지 말고, 지금까지 얻은 결과로 최종 보고서를 즉시 작성하세요. 완료하지 못한 작업이 있으면 보고서 끝에 '## 남은 작업' 항목으로 구체적으로 적으세요 — 다음 지시에서 이어서 진행하는 데 사용됩니다." });
         const res = await chatOnce(endpoint, model, messages, { signal });
         state.status = "done";
@@ -371,7 +379,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
       }
       messages.push({ role: "assistant", content: res.content || "", tool_calls: res.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })) });
       for (const tc of res.toolCalls) {
-        emit({ type: "agent_step", agentId: state.id, tool: tc.name });
+        trackEmit({ type: "agent_step", agentId: state.id, tool: tc.name });
         const t0 = Date.now();
         let out: string;
         let ok = true;
@@ -390,10 +398,10 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
             continue;
           }
           out = tc.name === "agent_direct"
-            ? await callBuiltin(tc.name, args, agent.id, signal, state.depth, emit) // 위임은 자체 시간 상한으로 관리
+            ? await callBuiltin(tc.name, args, agent.id, signal, state.depth, trackEmit) // 위임은 자체 시간 상한으로 관리
             : await withToolTimeout(
                 builtinNames.has(tc.name)
-                  ? callBuiltin(tc.name, args, agent.id, signal, state.depth, emit)
+                  ? callBuiltin(tc.name, args, agent.id, signal, state.depth, trackEmit)
                   : tc.name.startsWith("browser_") || tc.name === "ego_run"
                     ? browserTool(state.runId, tc.name, args)
                     : mcpCall(tc.name, args),
@@ -410,7 +418,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
       }
     }
     // 단계 상한 도달 — 수집한 내용을 버리지 않고 도구 없이 최종 보고서 생성
-    emit({ type: "agent_step", agentId: state.id, tool: "단계 상한 — 결과 정리" });
+    trackEmit({ type: "agent_step", agentId: state.id, tool: "단계 상한 — 결과 정리" });
     messages.push({ role: "user", content: "도구 사용 단계 상한에 도달했습니다. 도구를 더 쓰지 말고, 지금까지 얻은 결과로 최종 보고서를 즉시 작성하세요." });
     try {
       const res = await chatOnce(endpoint, model, messages, { signal });
@@ -425,6 +433,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
     state.result = `에이전트 오류: ${(e as Error).message}`;
   } finally {
     runningAgents.delete(state.id);
+    agentActivity.delete(state.id);
     closeAgentPage(state.runId).catch(() => {});
   }
 }
@@ -646,7 +655,7 @@ const withAgentMeta = (a: any) => ({ ...a, model_label: modelLabel(a.model ?? de
 
 export const agentsRoute = new Hono()
   .get("/", (c) => c.json({ agents: (db.prepare("SELECT * FROM agents ORDER BY is_boss DESC, created_at").all() as any[]).map(withAgentMeta) }))
-  .get("/running", (c) => c.json({ running: [...runningAgents] }))
+  .get("/running", (c) => c.json({ running: [...runningAgents].map((id) => ({ id, tool: agentActivity.get(id) || null })) }))
   .post("/", async (c) => {
     const b = await c.req.json();
     if (!b.name) return c.json({ error: "name 필요" }, 400);
