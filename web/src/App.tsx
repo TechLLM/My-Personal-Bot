@@ -10,6 +10,7 @@ import { CredentialModal } from "./components/CredentialModal";
 import { BotLobby } from "./components/BotLobby";
 import { Menu, Crown } from "lucide-react";
 import { AgentIcon } from "./components/icons";
+import { WorkingStatus } from "./components/WorkingStatus";
 
 export default function App() {
   const [models, setModels] = useState<Model[]>([]);
@@ -313,6 +314,7 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        workingId={streaming ? activeAgent?.id ?? null : null}
       />
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center gap-2 border-b border-zinc-800/60 px-3 py-2 sm:px-4 sm:py-2.5">
@@ -362,6 +364,11 @@ export default function App() {
                   onTeamCancel={teamCancel}
                 />
               ))}
+              {streaming && (
+                <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 px-4 py-2.5">
+                  <WorkingStatus events={searchEvents} agent={activeAgent} />
+                </div>
+              )}
               {searchEvents.length > 0 && (
                 <SearchTrace events={searchEvents} done={!streaming} />
               )}

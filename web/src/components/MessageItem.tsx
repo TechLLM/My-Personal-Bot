@@ -5,6 +5,7 @@ import rehypeHighlight from "rehype-highlight";
 import type { Message } from "../api";
 import { Brain, Bot, FileText, Volume2 } from "lucide-react";
 import { AgentIcon } from "./icons";
+import { WorkingStatus } from "./WorkingStatus";
 
 interface TeamPlanAgent {
   name: string; avatar: string; role: string; task: string; model: string; model_label?: string;
@@ -118,11 +119,7 @@ export function MessageItem({
           )}
         </div>
       )}
-      {streaming && !m.reasoning && !m.content && (
-        <div className="flex items-center gap-2 text-sm text-zinc-500">
-          <span className="thinking-dot inline-block h-2 w-2 rounded-full bg-zinc-400" /> 생각 중…
-        </div>
-      )}
+      {streaming && !m.reasoning && !m.content && <WorkingStatus compact />}
       {m.content && (
         <div className="markdown text-[15px] leading-relaxed">
           <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{m.content}</ReactMarkdown>

@@ -11,6 +11,7 @@ export function Sidebar({
   onOpenSettings,
   open,
   onClose,
+  workingId,
 }: {
   agents: Agent[];
   activeAgentId: string | null;
@@ -19,6 +20,7 @@ export function Sidebar({
   onOpenSettings: () => void;
   open: boolean;
   onClose: () => void;
+  workingId?: string | null;
 }) {
   if (!open) return null;
   return (
@@ -45,7 +47,7 @@ export function Sidebar({
             onClick={() => onSelectBot(a)}
             title={`${a.role_prompt || "범용 봇"} — 클릭하면 이 봇의 세션으로 이동`}
           >
-            <AgentIcon name={a.name} seed={a.avatar} size={17} className="shrink-0" />
+            <AgentIcon name={a.name} seed={a.avatar} size={17} className="shrink-0" working={a.id === workingId} />
             <span className="min-w-0 flex-1">
               <span className="flex items-center gap-1">
                 <span className="truncate">{a.name}</span>

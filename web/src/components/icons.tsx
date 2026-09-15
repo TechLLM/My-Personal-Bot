@@ -38,7 +38,7 @@ function BorderShape({ kind }: { kind: number }) {
 }
 
 // seed가 "face:" 접두면 그것을, 아니면 name 해시 사용 — 같은 봇은 항상 같은 얼굴
-export function AgentIcon({ name, seed, size = 14, className = "" }: { name?: string | null; seed?: string | null; size?: number; className?: string }) {
+export function AgentIcon({ name, seed, size = 14, className = "", working = false }: { name?: string | null; seed?: string | null; size?: number; className?: string; working?: boolean }) {
   const raw = seed?.startsWith("face:") ? seed.slice(5) : (name ?? seed ?? "?");
   const h = hash(raw);
   const shape = h % 4;
@@ -48,7 +48,7 @@ export function AgentIcon({ name, seed, size = 14, className = "" }: { name?: st
   return (
     <svg
       width={size} height={size} viewBox="0 0 24 24"
-      className={className}
+      className={`${className}${working ? " mb-working" : ""}`}
       style={{ color: `hsl(${hue} 45% 68%)` }}
       aria-hidden
     >
