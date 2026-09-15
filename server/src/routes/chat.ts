@@ -414,7 +414,7 @@ export const chatRoute = new Hono()
             const builtinNames = new Set([...BUILTIN_TOOLS, ...MANAGE_TOOLS].map((t) => t.function.name));
             const { chatOnce } = await import("../providers/openaiCompat");
             const browserKey = `${convId}:${asstMsg.id}`;
-            const deadline = Date.now() + 3 * 60_000; // 일반 대화 도구 루프 최대 3분
+            const deadline = Date.now() + 8 * 60_000; // 대화 도구 루프 최대 8분 — 브라우저 열람 같은 실제 업무가 3분을 넘김
             let browserUsed = false;
             const toolEvents: any[] = []; // search_meta에 누적 — 새로고침 후에도 도구 사용 내역 표시
             const emitTool = (title: string) => {
@@ -424,6 +424,19 @@ export const chatRoute = new Hono()
             };
             const calledTools = new Set<string>();
             let popupShown = false; // request_credentials가 실제로 팝업을 생성했는지 (저장 계정 재사용 시 false)
+            // 모델이 도구 호출을 텍스트 형식(]<]minimax[><invoke name=…>)으로 새어내면 파싱해 실제 호출로 전환
+            const parseLeaked = (text: string): { id: string; name: string; arguments: string }[] => {
+              const calls: { id: string; name: string; arguments: string }[] = [];
+              const invRe = /<invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/invoke>/g;
+              let inv; let i = 0;
+              while ((inv = invRe.exec(text ?? ""))) {
+                const args: Record<string, string> = {};
+                const pRe = /<(\w+)>([\s\S]*?)<\/\1>/g;
+                let pm; while ((pm = pRe.exec(inv[2]))) args[pm[1]] = pm[2];
+                calls.push({ id: `leaked-${i++}`, name: inv[1], arguments: JSON.stringify(args) });
+              }
+              return calls;
+            };
             // 위임된 하위 봇들을 누적해 team_plan으로 보냄 — 화면에 봇 카드·작업 애니메이션이 실시간으로 표시됨
             const delegated = new Map<string, any>();
             const teamEmit = (ev: any) => {
@@ -470,8 +483,12 @@ export const chatRoute = new Hono()
               emitTool(`봇 작업 중… (라운드 ${round + 1})`);
               const res = await chatOnce(endpoint, realModel, history, { signal, tools: openaiTools });
               if (!res.toolCalls?.length) {
-                if (res.content) history.push({ role: "assistant", content: res.content });
-                break;
+                const leaked = parseLeaked(res.content ?? "");
+                if (leaked.length) res.toolCalls = leaked;
+                else {
+                  if (res.content) history.push({ role: "assistant", content: res.content });
+                  break;
+                }
               }
               history.push({ role: "assistant", content: res.content || "", tool_calls: res.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })) } as any);
               for (const tc of res.toolCalls) {
@@ -501,18 +518,34 @@ export const chatRoute = new Hono()
 
           // 자가교정 — 도구 호출 없이 작업 완료·팝업 표시를 주장한 환각 응답을 실제 도구 호출로 보정
           // + 빈/손상된 최종 응답(모델이 깨진 문자열만 출력)도 재시도
-          const meaningfulLen = (content.match(/[가-힣A-Za-z0-9]/g) ?? []).length;
+          // URL·링크 문법을 제거하고 의미 문자를 셈 — '](http://…)' 같은 링크 조각 응답도 손상으로 잡음
+          const stripped = content.replace(/\]\([^)]*\)/g, "]").replace(/https?:\/\/\S+/g, "");
+          const meaningfulLen = (stripped.match(/[가-힣A-Za-z0-9]/g) ?? []).length;
+          // 스트리밍된 최종 응답에 텍스트 형식으로 새어나온 도구 호출이 있으면 서버가 대신 실행
+          const leakedCalls = parseLeaked(content);
           const degenerate = meaningfulLen < 8;
-          const claimsPopup = !degenerate && /팝업|보안.{0,6}입력|입력.{0,4}(창|띄)/.test(content) && /계정|비밀번호|로그인|아이디/.test(content);
-          const claimsAction = !degenerate && calledTools.size === 0 && /(삭제|생성|지시|등록|전송|예약|전달|수정|처리|만들|보내)[가-힣]{0,3}\s*(했|함|됐|됨|할게|하겠|진행|완료|대상)/.test(content);
-          const needsFix = (claimsPopup && !calledTools.has("request_credentials")) || claimsAction || degenerate;
+          const claimsPopup = !degenerate && !leakedCalls.length && /팝업|보안.{0,6}입력|입력.{0,4}(창|띄)/.test(content) && /계정|비밀번호|로그인|아이디/.test(content);
+          const claimsAction = !degenerate && !leakedCalls.length && calledTools.size === 0 && /(삭제|생성|지시|등록|전송|예약|전달|수정|처리|만들|보내)[가-힣]{0,3}\s*(했|함|됐|됨|할게|하겠|진행|완료|대상)/.test(content);
+          // 명시적 작업 지시를 받고도 도구 없이 되묻거나 보류·제안만 한 회피 응답 감지
+          const lastUser = [...history].reverse().find((m) => m.role === "user" && typeof m.content === "string" && !m.content.startsWith("[시스템]"));
+          const imperatives = lastUser ? /(알려|확인|처리|조회|정리|보내|만들|검색|읽어|살펴|보고|답변|해라|해줘|시켜)/.test(lastUser.content as string) : false;
+          const dodges = !degenerate && !leakedCalls.length && calledTools.size === 0 && imperatives && /(있나요|할까|드릴까|보낼까|처리할까|진행할까|마무리할게|종료할까|어떻게 할까|주시면|해 주시면)/.test(content);
+          const needsFix = (claimsPopup && !calledTools.has("request_credentials")) || claimsAction || degenerate || leakedCalls.length > 0 || dodges;
           if (needsFix && Date.now() < deadline) {
             history.push({ role: "assistant", content });
-            history.push({ role: "user", content: claimsPopup
-              ? "[시스템] 방금 응답에서 계정 입력 팝업을 띄우겠다고 했지만 request_credentials 도구가 실제로 호출되지 않았습니다. 지금 즉시 request_credentials를 호출해 팝업을 실제로 띄우세요. site에는 언급된 서비스 이름을 넣으세요."
-              : degenerate
-                ? "[시스템] 방금 응답이 비어 있거나 손상된 문자열이었습니다. 사용자의 요청을 다시 처리하세요 — 작업이 필요하면 도구를 실제로 호출해 수행하고 결과를 확인한 뒤, 정상적인 문장으로 답변하세요."
-                : "[시스템] 방금 응답에서 작업을 수행했다고 주장했지만 도구 호출이 전혀 없었습니다. 주장한 작업을 지금 실제 도구로 수행하고, 수행할 수 없는 부분은 없다고 정직하게 정정하세요." });
+            for (const tc of leakedCalls) {
+              const out = await execTool(tc);
+              history.push({ role: "tool", tool_call_id: tc.id, content: String(out).slice(0, 8000) } as any);
+            }
+            history.push({ role: "user", content: leakedCalls.length
+              ? "[시스템] 방금 도구 호출이 텍스트 형식으로 출력되어 서버가 대신 실행했습니다. 위 도구 결과를 확인하고 작업을 계속하세요 — 추가 도구는 반드시 정식 도구 호출(function call)로 사용하고, 완료되면 정상 문장으로 답변하세요."
+              : claimsPopup
+                ? "[시스템] 방금 응답에서 계정 입력 팝업을 띄우겠다고 했지만 request_credentials 도구가 실제로 호출되지 않았습니다. 지금 즉시 request_credentials를 호출해 팝업을 실제로 띄우세요. site에는 언급된 서비스 이름을 넣으세요."
+                : degenerate
+                  ? "[시스템] 방금 응답이 비어 있거나 손상된 문자열이었습니다. 사용자의 요청을 다시 처리하세요 — 작업이 필요하면 도구를 실제로 호출해 수행하고 결과를 확인한 뒤, 정상적인 문장으로 답변하세요."
+                  : dodges
+                    ? "[시스템] 사용자가 명시적으로 작업을 지시했는데 되묻거나 보류만 했습니다. 되묻지 말고 지금 도구를 호출해 지시된 작업을 실제로 수행하고 결과를 보고하세요."
+                    : "[시스템] 방금 응답에서 작업을 수행했다고 주장했지만 도구 호출이 전혀 없었습니다. 주장한 작업을 지금 실제 도구로 수행하고, 수행할 수 없는 부분은 없다고 정직하게 정정하세요." });
             let fixText = "";
             for (let fixRound = 0; fixRound < 2 && Date.now() < deadline; fixRound++) {
               const fix = await chatOnce(endpoint, realModel, history, {
@@ -539,9 +572,10 @@ export const chatRoute = new Hono()
               emitTool("request_credentials");
             }
             // 보정 라운드가 만든 정상 답변이 있으면 손상·허위 응답을 교체
-            const fixOk = (fixText.match(/[가-힣A-Za-z0-9]/g) ?? []).length >= 8;
-            if (degenerate) content = fixOk ? fixText : "⚠️ 응답 생성에 실패했습니다 — 같은 지시를 다시 보내주세요.";
-            else if (fixOk && claimsAction) content = fixText;
+            const fixStripped = fixText.replace(/\]\([^)]*\)/g, "]").replace(/https?:\/\/\S+/g, "");
+            const fixOk = (fixStripped.match(/[가-힣A-Za-z0-9]/g) ?? []).length >= 8;
+            if (degenerate || leakedCalls.length) content = fixOk ? fixText : "⚠️ 응답 생성에 실패했습니다 — 같은 지시를 다시 보내주세요.";
+            else if (fixOk && (claimsAction || dodges)) content = fixText;
             else if (popupShown && claimsPopup) content += "\n\n> ✅ 보안 입력 팝업을 지금 띄웠습니다 — 팝업에 계정을 입력해 주세요.";
             else if (calledTools.size) content += "\n\n> ⤵ 위에 보고한 작업을 실제 도구로 수행했습니다 — 세부 결과는 실제 실행 결과와 다를 수 있습니다.";
             if (toolEvents.length) searchMeta = { ...(searchMeta ?? {}), type: searchMeta?.type ?? "tools", events: toolEvents };

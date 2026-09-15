@@ -99,6 +99,20 @@ export interface TeamAgentState {
 
 type Emit = (ev: object) => void;
 
+// 모델이 도구 호출을 텍스트 형식(<invoke name=…>)으로 새어내면 파싱해 실제 호출로 전환
+function parseLeaked(text: string): { id: string; name: string; arguments: string }[] {
+  const calls: { id: string; name: string; arguments: string }[] = [];
+  const invRe = /<invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/invoke>/g;
+  let inv; let i = 0;
+  while ((inv = invRe.exec(text ?? ""))) {
+    const args: Record<string, string> = {};
+    const pRe = /<(\w+)>([\s\S]*?)<\/\1>/g;
+    let pm; while ((pm = pRe.exec(inv[2]))) args[pm[1]] = pm[2];
+    calls.push({ id: `leaked-${i++}`, name: inv[1], arguments: JSON.stringify(args) });
+  }
+  return calls;
+}
+
 // 상한에 잘려 끝난 작업을 봇의 MEMORY.md 맨 앞에 체크포인트로 남김 — 다음 지시 시 봇이 읽고 이어서 진행
 function checkpointMemory(agent: Agent, task: string, result: string) {
   try {
@@ -336,9 +350,13 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
       const res = await chatOnce(endpoint, model, messages, { signal, tools });
       state.steps = round + 1;
       if (!res.toolCalls?.length) {
-        state.status = "done";
-        state.result = res.content;
-        return;
+        const leaked = parseLeaked(res.content ?? "");
+        if (leaked.length) res.toolCalls = leaked;
+        else {
+          state.status = "done";
+          state.result = res.content;
+          return;
+        }
       }
       messages.push({ role: "assistant", content: res.content || "", tool_calls: res.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })) });
       for (const tc of res.toolCalls) {
