@@ -102,6 +102,17 @@ export async function listRemoteModels(endpoint: Endpoint): Promise<{ id: string
   }
 }
 
+// 인증된 엔드포인트가 실제로 보고하는 모델 id 전체 — 사용자가 고를 수 있는 유효 범위
+export async function listAllModelIds(): Promise<Set<string>> {
+  const ids = new Set<string>();
+  await Promise.all(
+    getEndpoints().map(async (ep) => {
+      for (const m of await listRemoteModels(ep)) ids.add(ep.id === "airoute" ? m.id : `ep_${ep.id}/${m.id}`);
+    }),
+  );
+  return ids;
+}
+
 // 모델 이름 패턴으로 capability 추정 (airoute 카탈로그 메타 없을 때 폴백)
 export function guessCapabilities(id: string): { vision: boolean; reasoning: boolean; image: boolean } {
   const s = id.toLowerCase();

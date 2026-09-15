@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { api, type Endpoint, type Agent, type SiteLogin, mybotFetch } from "../api";
+import { api, type Endpoint, type Agent, type Model, type SiteLogin, mybotFetch } from "../api";
 import { X, Crown, AlarmClock, Trash2, Folder } from "lucide-react";
 import { AgentIcon } from "./icons";
 
-export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; onClose: () => void }) {
+export function SettingsModal({ endpoints, models, onClose }: { endpoints: Endpoint[]; models: Model[]; onClose: () => void }) {
   const [s, setS] = useState<Record<string, string>>({});
   const [memories, setMemories] = useState<any[]>([]);
   const [personas, setPersonas] = useState<any[]>([]);
@@ -110,6 +110,18 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
             >추가</button>
           </div>
           <p className="mt-1 text-[10px] text-zinc-600">Ollama: http://127.0.0.1:11434/v1 · LM Studio: http://127.0.0.1:1234/v1</p>
+          <label className="mt-3 block">
+            <span className="text-xs text-zinc-400">기본 AI 모델 — 새 봇에 자동 적용</span>
+            <select
+              className="mt-1 w-full rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs outline-none"
+              value={s.default_model ?? ""}
+              onChange={(e) => update({ default_model: e.target.value })}
+            >
+              <option value="">서버 기본 (subagent)</option>
+              {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+            </select>
+            <span className="mt-0.5 block text-[10px] text-zinc-600">인증된 엔드포인트의 모델만 선택할 수 있습니다 — 목록에 없으면 엔드포인트를 먼저 추가하세요</span>
+          </label>
         </section>
 
         <section className="mb-5 space-y-2.5">
@@ -268,7 +280,15 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
                 ) : (
                   <button className="rounded bg-zinc-800 px-1 text-[9px] text-zinc-500 hover:text-amber-300" title="이 봇을 CEO로 지정" onClick={() => api.setAgentBoss(a.id).then(load)}>CEO 지정</button>
                 )}
-                <span className="text-zinc-600 font-mono text-[10px]">{a.model_label ?? a.model ?? "subagent"}</span>
+                <select
+                  className="max-w-[140px] truncate rounded bg-zinc-800 px-1 py-0.5 text-[10px] text-zinc-400 outline-none"
+                  value={a.model ?? ""}
+                  title={a.model_label ?? a.model ?? ""}
+                  onChange={(e) => api.updateAgent(a.id, { model: e.target.value }).then(load)}
+                >
+                  {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                  {a.model && !models.find((m) => m.id === a.model) && <option value={a.model}>{a.model}</option>}
+                </select>
                 {routines.some((r) => r.agent_id === a.id && r.enabled) && (
                   <span className="flex items-center gap-0.5 rounded bg-amber-900/50 px-1 text-[9px] text-amber-300" title="예약 루틴 담당 — 팀 모드에서 재사용 안 함"><AlarmClock size={9} /> 루틴</span>
                 )}
@@ -283,7 +303,10 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
           <div className="mt-2 space-y-1.5">
             <div className="flex gap-1.5">
               <input className="flex-1 rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none" placeholder="봇 이름 (예: 리서치봇)" value={aName} onChange={(e) => setAName(e.target.value)} />
-              <input className="w-28 rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none" placeholder="모델(기본 subagent)" value={aModel} onChange={(e) => setAModel(e.target.value)} />
+              <select className="w-32 rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none" value={aModel} onChange={(e) => setAModel(e.target.value)} title="비우면 기본 AI 모델 적용">
+                <option value="">기본 모델</option>
+                {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+              </select>
             </div>
             <textarea className="w-full rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none" rows={2} placeholder="역할 지침 (예: 웹 검색으로 자료를 수집하고 출처를 정리한다)" value={aRole} onChange={(e) => setARole(e.target.value)} />
             <button className="rounded-lg bg-zinc-100 px-2.5 py-1 text-xs font-medium text-zinc-900" onClick={() => {

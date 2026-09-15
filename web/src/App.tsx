@@ -29,7 +29,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [routineAgentIds, setRoutineAgentIds] = useState<Set<string>>(new Set());
-  const [pendingAgent, setPendingAgent] = useState<Agent | null>(null); // 새 대화를 담당할 봇 (첫 전송 시 귀속)
+  const [pendingAgent, setPendingAgent] = useState<Agent | null>(null); // 새 세션을 담당할 봇 (첫 전송 시 귀속)
+  const [defaultModel, setDefaultModel] = useState(""); // 설정의 기본 AI 모델 — 새 봇의 기본값
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -57,6 +58,7 @@ export default function App() {
     }).catch(() => {});
     mybotFetch("/api/workspaces").then((r) => r.json()).then((d) => setWorkspaces(d.workspaces)).catch(() => {});
     mybotFetch("/api/skills").then((r) => r.json()).then((d) => setSkills(d.skills)).catch(() => {});
+    mybotFetch("/api/settings").then((r) => r.json()).then((d) => setDefaultModel(d.settings?.default_model ?? "")).catch(() => {});
     refreshConversations();
     refreshAgents();
   }, [refreshConversations, refreshAgents]);
@@ -90,6 +92,20 @@ export default function App() {
     if (window.innerWidth < 768) setSidebarOpen(false);
   }, [conversations, loadConversation, newConversation]);
 
+  // 현재 세션의 담당 봇 — 있으면 모델 피커는 봇의 모델을 보여주고 변경 시 봇에 저장됨
+  const currentConv = conversations.find((c) => c.id === convId) ?? null;
+  const activeAgent = pendingAgent ?? agents.find((a) => a.id === currentConv?.agent_id) ?? null;
+  const effectiveModel = activeAgent?.model ?? model;
+
+  const changeModel = useCallback((id: string) => {
+    if (activeAgent) {
+      // 봇의 모델 변경 = 봇 설정에 영구 반영
+      setAgents((prev) => prev.map((a) => (a.id === activeAgent.id ? { ...a, model: id } : a)));
+      if (pendingAgent?.id === activeAgent.id) setPendingAgent((p) => (p ? { ...p, model: id } : p));
+      api.updateAgent(activeAgent.id, { model: id }).then(refreshAgents).catch(() => {});
+    } else setModel(id);
+  }, [activeAgent, pendingAgent, refreshAgents]);
+
   const patchMessage = useCallback((id: string, patch: Partial<Message>) => {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
   }, []);
@@ -103,7 +119,7 @@ export default function App() {
     abortRef.current = abort;
 
     streamChat(
-      { conversationId: convId ?? undefined, content: text, model, mode, attachments, personaId, workspaceId: workspaceId || undefined, agentId: convId ? undefined : pendingAgent?.id },
+      { conversationId: convId ?? undefined, content: text, model: effectiveModel, mode, attachments, personaId, workspaceId: workspaceId || undefined, agentId: convId ? undefined : pendingAgent?.id },
       {
         onConversation: (id) => {
           if (!convId) { setConvId(id); setPendingAgent(null); }
@@ -151,7 +167,7 @@ export default function App() {
       }
       setStreaming(false);
     });
-  }, [convId, model, streaming, patchMessage, refreshConversations, refreshAgents, pendingAgent]);
+  }, [convId, effectiveModel, streaming, patchMessage, refreshConversations, refreshAgents, pendingAgent]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -164,7 +180,7 @@ export default function App() {
     const abort = new AbortController();
     abortRef.current = abort;
     streamChat(
-      { conversationId: m.conversation_id, model, mode: "auto", regenerateMessageId: m.id },
+      { conversationId: m.conversation_id, model: effectiveModel, mode: "auto", regenerateMessageId: m.id },
       {
         onAssistantMessage: (nm) => setMessages((prev) => [...prev.filter((x) => x.id !== m.id), nm]),
         onDelta: (id, t) => setMessages((prev) => prev.map((x) => (x.id === id ? { ...x, content: x.content + t } : x))),
@@ -183,7 +199,7 @@ export default function App() {
       },
       abort.signal,
     ).catch(() => setStreaming(false));
-  }, [model, streaming]);
+  }, [effectiveModel, streaming]);
 
   const editMessage = useCallback((m: Message, content: string) => {
     // 편집 = 새 형제 메시지로 전송
@@ -196,7 +212,7 @@ export default function App() {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content }),
     }).then(() => {
       streamChat(
-        { conversationId: m.conversation_id, content, model, mode: "auto", parentMessageId: m.parent_id ?? undefined },
+        { conversationId: m.conversation_id, content, model: effectiveModel, mode: "auto", parentMessageId: m.parent_id ?? undefined },
         {
           onUserMessage: () => {},
           onAssistantMessage: (nm) => setMessages((prev) => [...prev, nm]),
@@ -211,7 +227,7 @@ export default function App() {
         abort.signal,
       );
     });
-  }, [model, streaming]);
+  }, [effectiveModel, streaming]);
 
   // 팀 계획 승인 → 선택된 봇들로 실행 (같은 assistant 메시지에 결과 스트리밍)
   const teamConfirm = useCallback((m: Message, tasks: TeamPlanTask[]) => {
@@ -222,7 +238,7 @@ export default function App() {
     // 첫 델타에서 안내 문구를 답변으로 교체
     let started = false;
     runTeam(
-      { conversationId: m.conversation_id, messageId: m.id, tasks, model },
+      { conversationId: m.conversation_id, messageId: m.id, tasks, model: effectiveModel },
       {
         onTeam: (ev) => setTeamEvents((prev) => [...prev, ev]),
         onDelta: (id, t) => {
@@ -242,7 +258,7 @@ export default function App() {
       },
       abort.signal,
     ).catch(() => setStreaming(false));
-  }, [model, streaming, patchMessage]);
+  }, [effectiveModel, streaming, patchMessage]);
 
   // 팀 계획 취소 → 메타만 cancelled로
   const teamCancel = useCallback((m: Message) => {
@@ -265,30 +281,19 @@ export default function App() {
   return (
     <div className="flex h-full">
       <Sidebar
-        conversations={workspaceId ? conversations.filter((c) => (c as any).workspace_id === workspaceId) : conversations}
         agents={agents}
-        currentId={convId}
-        onSelect={(id) => { loadConversation(id); if (window.innerWidth < 768) setSidebarOpen(false); }}
+        activeAgentId={activeAgent?.id ?? null}
         onSelectBot={selectBot}
         onNew={() => { newConversation(); if (window.innerWidth < 768) setSidebarOpen(false); }}
-        onDelete={(id) => {
-          api.deleteConversation(id).then(() => {
-            refreshConversations();
-            if (convId === id) newConversation();
-          });
-        }}
         onOpenSettings={() => setSettingsOpen(true)}
         open={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
-        workspaces={workspaces}
-        workspaceId={workspaceId}
-        onWorkspaceChange={setWorkspaceId}
       />
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center gap-2 border-b border-zinc-800/60 px-3 py-2 sm:px-4 sm:py-2.5">
           <button className="-ml-1 p-1.5 text-zinc-500 hover:text-zinc-200" onClick={() => setSidebarOpen(!sidebarOpen)}><Menu size={16} strokeWidth={1.8} /></button>
           <span className="text-sm text-zinc-400 truncate">
-            {convId ? conversations.find((c) => c.id === convId)?.title ?? "대화" : pendingAgent ? `${pendingAgent.name}와의 새 대화` : "봇 선택"}
+            {convId ? currentConv?.agent_name ?? currentConv?.title ?? "세션" : pendingAgent ? `${pendingAgent.name}와의 새 세션` : "봇 선택"}
           </span>
           {!convId && pendingAgent && (
             <span className="flex shrink-0 items-center gap-1 rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-400">
@@ -297,9 +302,9 @@ export default function App() {
               <button className="ml-0.5 text-zinc-600 hover:text-zinc-300" onClick={() => setPendingAgent(null)}>×</button>
             </span>
           )}
-          {convId && conversations.find((c) => c.id === convId)?.agent_name && (
-            <span className="flex shrink-0 items-center gap-1 rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-400" title="이 대화를 담당하는 봇 — 모델을 바꿔도 봇의 기억·맥락은 유지됩니다">
-              <AgentIcon name={conversations.find((c) => c.id === convId)?.agent_name} seed={conversations.find((c) => c.id === convId)?.agent_avatar} size={11} /> {conversations.find((c) => c.id === convId)?.agent_name}
+          {convId && currentConv?.agent_name && (
+            <span className="flex shrink-0 items-center gap-1 rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-400" title="이 세션을 담당하는 봇 — 모델을 바꿔도 봇의 기억·맥락은 유지됩니다">
+              <AgentIcon name={currentConv.agent_name} seed={currentConv.agent_avatar} size={11} /> {currentConv.agent_name}
             </span>
           )}
         </header>
@@ -307,7 +312,7 @@ export default function App() {
         <div ref={scrollRef} className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-3xl px-4 py-6">
             {empty && !pendingAgent && (
-              <BotLobby agents={agents} models={models} routineAgentIds={routineAgentIds} onSelect={selectBot} onRefresh={refreshAgents} />
+              <BotLobby agents={agents} models={models} defaultModel={defaultModel} routineAgentIds={routineAgentIds} onSelect={selectBot} onRefresh={refreshAgents} />
             )}
             {empty && pendingAgent && (
               <div className="mt-[25vh] text-center">
@@ -344,11 +349,11 @@ export default function App() {
 
         <div className="px-3 pt-1 sm:px-4 pb-[calc(3.5rem+env(safe-area-inset-bottom))]">
           <div className="mx-auto max-w-3xl">
-            <Composer models={models} model={model} onModelChange={setModel} onSend={send} onStop={stop} streaming={streaming} personas={personas} personaId={personaId} onPersonaChange={setPersonaId} skills={skills} />
+            <Composer models={models} model={effectiveModel} onModelChange={changeModel} onSend={send} onStop={stop} streaming={streaming} personas={personas} personaId={personaId} onPersonaChange={setPersonaId} skills={skills} />
           </div>
         </div>
       </main>
-      {settingsOpen && <SettingsModal endpoints={endpoints} onClose={() => { setSettingsOpen(false); api.models().then((d) => { setModels(d.models); setEndpoints(d.endpoints); }); }} />}
+      {settingsOpen && <SettingsModal endpoints={endpoints} models={models} onClose={() => { setSettingsOpen(false); api.models().then((d) => { setModels(d.models); setEndpoints(d.endpoints); }); mybotFetch("/api/settings").then((r) => r.json()).then((d) => setDefaultModel(d.settings?.default_model ?? "")).catch(() => {}); }} />}
     </div>
   );
 }

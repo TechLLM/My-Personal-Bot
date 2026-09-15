@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, type Agent, type Model } from "../api";
 import { Crown, AlarmClock, Plus, MessageSquare, ChevronDown, ChevronUp } from "lucide-react";
 import { AgentIcon } from "./icons";
@@ -7,12 +7,14 @@ import { AgentIcon } from "./icons";
 export function BotLobby({
   agents,
   models,
+  defaultModel,
   routineAgentIds,
   onSelect,
   onRefresh,
 }: {
   agents: Agent[];
   models: Model[];
+  defaultModel: string; // 설정의 기본 AI 모델 — 새 봇의 기본값
   routineAgentIds: Set<string>;
   onSelect: (a: Agent) => void;
   onRefresh: () => void;
@@ -21,11 +23,17 @@ export function BotLobby({
   const [step, setStep] = useState<1 | 2>(1); // 1: 이름·얼굴 → 2: 페르소나·역할
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
-  const [model, setModel] = useState("subagent");
+  const [model, setModel] = useState(defaultModel || "subagent");
+  const [modelTouched, setModelTouched] = useState(false); // 사용자가 직접 고르기 전까진 기본값 추적
   const [asBoss, setAsBoss] = useState(false);
   const [showAll, setShowAll] = useState(false);
   // 얼굴 시드 — 생성 시 서버에 avatar로 저장돼 영구 얼굴이 됨
   const [faceSeed, setFaceSeed] = useState(() => Math.random().toString(36).slice(2, 10));
+
+  // 기본 모델 설정이 늦게 로드돼도 사용자가 직접 고르기 전이면 따라감
+  useEffect(() => {
+    if (defaultModel && !modelTouched) setModel(defaultModel);
+  }, [defaultModel, modelTouched]);
 
   const NAME_A = ["민첩한", "꼼꼼한", "든든한", "영리한", "성실한", "차분한", "날카로운", "따뜻한"];
   const NAME_B = ["비서", "탐정", "사서", "분석가", "파수꾼", "도우미", "기록관", "전령"];
@@ -148,9 +156,9 @@ export function BotLobby({
                   placeholder="페르소나·역할 지침 (예: 회의록을 요약하고 액션 아이템을 뽑는 비서)"
                   value={role} onChange={(e) => setRole(e.target.value)} autoFocus
                 />
-                <select className="w-40 self-start rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none" value={model} onChange={(e) => setModel(e.target.value)}>
-                  {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-                  {!models.find((m) => m.id === "subagent") && <option value="subagent">subagent</option>}
+                <select className="w-40 self-start rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none" value={model} onChange={(e) => { setModel(e.target.value); setModelTouched(true); }} title={models.find((m) => m.id === model)?.id ?? model}>
+                  {models.map((m) => <option key={m.id} value={m.id}>{m.label}{m.id === defaultModel ? " (기본)" : ""}</option>)}
+                  {!models.find((m) => m.id === model) && <option value={model}>{model}</option>}
                 </select>
               </div>
               <div className="flex items-center gap-3">

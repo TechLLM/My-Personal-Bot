@@ -173,7 +173,7 @@ export const chatRoute = new Hono()
   .post("/stream", async (c) => {
     const body = await c.req.json();
     const signal = c.req.raw.signal;
-    const model = body.model ?? "main";
+    const reqModel = body.model ?? "main";
     const mode = body.mode ?? "auto";
 
     let convId = body.conversationId as string | undefined;
@@ -181,11 +181,17 @@ export const chatRoute = new Hono()
       const { ensureBossAgent } = await import("../team");
       convId = uid();
       // 모든 대화는 봇에게 귀속 — 기본은 대장 봇
-      q.convInsert.run(convId, "새 대화", model, mode, body.agentId ?? ensureBossAgent().id, now(), now());
+      q.convInsert.run(convId, "새 대화", reqModel, mode, body.agentId ?? ensureBossAgent().id, now(), now());
       if (body.personaId) db.prepare("UPDATE conversations SET persona_id = ? WHERE id = ?").run(body.personaId, convId);
       if (body.workspaceId) db.prepare("UPDATE conversations SET workspace_id = ? WHERE id = ?").run(body.workspaceId, convId);
     }
     const conv = q.convGet.get(convId) as any;
+    // 봇 세션은 담당 봇의 모델로 응답 — 클라이언트가 보낸 model보다 봇의 모델이 우선
+    let model = reqModel;
+    if (conv?.agent_id) {
+      const { getAgent } = await import("../team");
+      model = getAgent(conv.agent_id)?.model ?? reqModel;
+    }
     if (conv) {
       q.convTouch.run(now(), convId);
       if (body.personaId !== undefined) db.prepare("UPDATE conversations SET persona_id = ? WHERE id = ?").run(body.personaId || null, convId);

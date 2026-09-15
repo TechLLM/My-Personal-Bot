@@ -1,7 +1,7 @@
 import { Hono } from "hono";
-import { db, uid, now } from "./db";
+import { db, uid, now, getSetting } from "./db";
 import type { Endpoint } from "./providers";
-import { resolveModel, modelLabel } from "./providers";
+import { resolveModel, modelLabel, listAllModelIds } from "./providers";
 import { chatOnce, streamChat, type ChatMessage } from "./providers/openaiCompat";
 import { systemPrompt } from "./routes/chat";
 import { notifyResult } from "./notify";
@@ -31,6 +31,9 @@ export interface Agent {
 // 대장 봇 — 모든 사용자 대화의 기본 접점. 없으면 시드
 export const BOSS_NAME = "대장";
 
+// 새 봇의 기본 모델 — 설정의 default_model 우선, 없으면 subagent 별칭
+export const defaultModel = () => getSetting("default_model") || "subagent";
+
 const BOSS_ROLE = "당신은 MyBot의 CEO(총괄 관리자) 봇입니다. 사용자의 모든 업무 지시를 받는 총괄 책임자이며, 새로 생성되는 모든 봇의 관리자입니다. 스스로 도구(웹검색·파일·브라우저·MCP)를 사용해 직접 수행하거나, 필요하면 전문 역할 봇들에게 분배하고 결과를 종합해 보고합니다. 봇 관리: agent_list로 전체 봇 현황 확인, agent_direct로 임의 봇에게 즉시 업무 지시(결과를 받아 종합), agent_update로 봇의 역할·모델 수정, agent_delete로 불필요한 봇 정리. 사용자가 반복적·정기적 작업을 요청하면 routine_add 도구로 예약 작업으로 등록하세요 — 일회성 실행으로 처리하지 마세요. 이전 대화와 기억한 맥락을 바탕으로 업무의 연속성을 유지하세요.";
 
 // 사용자가 지정한 CEO 봇 반환 — 없으면 대장 시드
@@ -39,7 +42,7 @@ export function ensureBossAgent(): Agent {
   if (!a) {
     const id = uid();
     db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, is_boss, created_at) VALUES (?, ?, ?, ?, ?, NULL, 1, 1, ?)")
-      .run(id, BOSS_NAME, BOSS_ROLE, "main", `face:${id}`, now());
+      .run(id, BOSS_NAME, BOSS_ROLE, getSetting("default_model") || "main", `face:${id}`, now());
     a = db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent;
   } else if (!a.role_prompt.includes("agent_direct")) {
     // CEO 관리 지침이 없으면 기본 역할문에 추가 (사용자가 직접 쓴 역할문이면 뒤에 덧붙임)
@@ -93,7 +96,7 @@ export const BUILTIN_TOOLS = [
   { type: "function", function: { name: "routine_list", description: "등록된 예약 작업 목록", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "routine_delete", description: "예약 작업 삭제 (id는 routine_list로 확인)", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } },
   // 봇 간 협업 — 모든 봇이 사용 가능 (생성한 봇의 관리자가 됨)
-  { type: "function", function: { name: "agent_create", description: "새 전문 봇을 만듭니다. 작업이 커지거나 내 역할 범위를 벗어나면 전문 봇을 만들어 위임하세요. 생성한 봇은 당신의 하위 봇이 됩니다", parameters: { type: "object", properties: { name: { type: "string", description: "봇 이름" }, role: { type: "string", description: "페르소나·역할 지침" }, model: { type: "string", description: "subagent|fast|code|main (기본 subagent)" } }, required: ["name", "role"] } } },
+  { type: "function", function: { name: "agent_create", description: "새 전문 봇을 만듭니다. 작업이 커지거나 내 역할 범위를 벗어나면 전문 봇을 만들어 위임하세요. 생성한 봇은 당신의 하위 봇이 됩니다", parameters: { type: "object", properties: { name: { type: "string", description: "봇 이름" }, role: { type: "string", description: "페르소나·역할 지침" }, model: { type: "string", description: "subagent|fast|code|main (비우면 설정의 기본 모델)" } }, required: ["name", "role"] } } },
   { type: "function", function: { name: "agent_list", description: "전체 봇 목록과 각 봇의 역할·모델·상태를 확인합니다", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "agent_direct", description: "다른 봇에게 즉시 업무를 지시하고 결과를 받습니다. 위임·협업·CEO에게 상향 보고에 사용", parameters: { type: "object", properties: { name: { type: "string", description: "지시할 봇 이름" }, instruction: { type: "string", description: "구체적 업무 지시" } }, required: ["name", "instruction"] } } },
 ];
@@ -110,7 +113,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     const rows = db.prepare("SELECT a.*, (SELECT COUNT(*) FROM agent_runs r WHERE r.agent_id = a.id) run_count, p.name parent_name FROM agents a LEFT JOIN agents p ON p.id = a.parent_id ORDER BY a.is_boss DESC, a.created_at").all() as any[];
     const busyIds = new Set((db.prepare("SELECT DISTINCT agent_id FROM routines WHERE enabled = 1 AND agent_id IS NOT NULL").all() as any[]).map((r) => r.agent_id));
     return rows.length
-      ? rows.map((a) => `- ${a.name}${a.is_boss ? " [CEO]" : ""} | 역할: ${(a.role_prompt || "").slice(0, 80)} | 모델: ${modelLabel(a.model ?? "subagent")} | 실행 ${a.run_count}회${a.parent_name ? ` | 상위: ${a.parent_name}` : ""}${busyIds.has(a.id) ? " | 예약 루틴 담당 중" : ""}`).join("\n")
+      ? rows.map((a) => `- ${a.name}${a.is_boss ? " [CEO]" : ""} | 역할: ${(a.role_prompt || "").slice(0, 80)} | 모델: ${modelLabel(a.model ?? defaultModel())} | 실행 ${a.run_count}회${a.parent_name ? ` | 상위: ${a.parent_name}` : ""}${busyIds.has(a.id) ? " | 예약 루틴 담당 중" : ""}`).join("\n")
       : "등록된 봇 없음";
   }
   if (name === "agent_create") {
@@ -118,9 +121,9 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     if (!nm) return "오류: name 필요";
     const id = uid();
     db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, is_boss, parent_id, created_at) VALUES (?, ?, ?, ?, ?, NULL, 1, 0, ?, ?)")
-      .run(id, uniqueName(nm.slice(0, 30)), String(args.role ?? ""), String(args.model ?? "subagent"), `face:${id}`, agentId ?? null, now());
+      .run(id, uniqueName(nm.slice(0, 30)), String(args.role ?? ""), String(args.model ?? defaultModel()), `face:${id}`, agentId ?? null, now());
     const created = getAgent(id)!;
-    return `봇 생성됨: ${created.name} (모델: ${modelLabel(created.model ?? "subagent")}, 상위: 당신) — agent_direct로 즉시 업무를 지시하세요.`;
+    return `봇 생성됨: ${created.name} (모델: ${modelLabel(created.model ?? defaultModel())}, 상위: 당신) — agent_direct로 즉시 업무를 지시하세요.`;
   }
   if (name === "agent_direct") {
     const target = db.prepare("SELECT * FROM agents WHERE name = ?").get(String(args.name ?? "")) as Agent | null;
@@ -133,7 +136,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     const state: TeamAgentState = {
       id: target.id, runId, name: target.name, avatar: target.avatar ?? "🤖",
       role: target.role_prompt, task: `${caller?.name ?? "사용자"} 봇이 지시한 업무입니다. 수행하고 결과를 보고하세요.\n\n${args.instruction}`,
-      model: target.model ?? "subagent", status: "running", steps: 0, toolLog: [], depth: depth + 1,
+      model: target.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: depth + 1,
     };
     // 외부 신호를 전파해 중첩 실행이 바깥 데드라인을 넘지 않게 함 (내부 4분 상한은 runAgent 자체에도 있음)
     await runAgent(state, target, () => {}, signal ?? AbortSignal.timeout(240_000));
@@ -211,12 +214,12 @@ function uniqueName(base: string): string {
 function createAgent(t: { name?: string; role?: string; model?: string; avatar?: string }, parentId?: string | null): Agent {
   const id = uid();
   db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, parent_id, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)")
-    .run(id, uniqueName(String(t.name ?? "작업봇")), String(t.role ?? ""), t.model ?? "subagent", `face:${id}`, null, parentId ?? null, now());
+    .run(id, uniqueName(String(t.name ?? "작업봇")), String(t.role ?? ""), t.model ?? defaultModel(), `face:${id}`, null, parentId ?? null, now());
   return db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent;
 }
 
 export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, signal?: AbortSignal): Promise<void> {
-  const { endpoint, model } = resolveModel(agent.model ?? "subagent");
+  const { endpoint, model } = resolveModel(agent.model ?? defaultModel());
   state.model = model;
   const isBoss = !!agent.is_boss;
   const tools: any[] = [...BUILTIN_TOOLS, ...(isBoss ? BOSS_TOOLS : []), ...BROWSER_TOOLS];
@@ -342,7 +345,7 @@ export async function planTeam(
   const boss = ensureBossAgent();
   const roster = existing.length
     ? "\n\n현재 상주 에이전트 목록 (CEO 본인은 재사용 대상 아님):\n" + existing.map((a) =>
-        `- ${a.name}${a.is_boss ? " [CEO]" : ""} | 역할: ${a.role_prompt || "없음"} | 모델: ${modelLabel(a.model ?? "subagent")}${busyIds.has(a.id) ? " | [바쁨: 예약 루틴 담당 중]" : ""}`,
+        `- ${a.name}${a.is_boss ? " [CEO]" : ""} | 역할: ${a.role_prompt || "없음"} | 모델: ${modelLabel(a.model ?? defaultModel())}${busyIds.has(a.id) ? " | [바쁨: 예약 루틴 담당 중]" : ""}`,
       ).join("\n")
     : "";
 
@@ -395,7 +398,7 @@ JSON 배열만 출력하세요. 각 항목은 둘 중 하나:
         t.name = found.name;
         t.avatar = found.avatar ?? "🤖";
         t.role = found.role_prompt;
-        t.model = found.model ?? "subagent";
+        t.model = found.model ?? defaultModel();
       } else {
         // 지정한 봇이 없거나 바쁨/CEO → 새 봇으로 전환
         t.existing = false;
@@ -406,9 +409,9 @@ JSON 배열만 출력하세요. 각 항목은 둘 중 하나:
       t.existing = false;
       t.name = t.name ?? "작업봇";
       t.avatar = t.avatar ?? "🤖";
-      t.model = t.model ?? "subagent";
+      t.model = t.model ?? defaultModel();
     }
-    t.model_label = modelLabel(t.model ?? "subagent");
+    t.model_label = modelLabel(t.model ?? defaultModel());
   }
   return tasks;
 }
@@ -432,7 +435,7 @@ export async function runTeamTasks(
       id: agent.id, runId,
       name: agent.name, avatar: agent.avatar ?? "🤖",
       role: agent.role_prompt, task: t.task,
-      model: agent.model ?? "subagent", status: "running", steps: 0, toolLog: [], depth: 0,
+      model: agent.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: 0,
     };
   });
   emit({ type: "team_plan", agents: states.map((s) => ({ id: s.id, name: s.name, avatar: s.avatar, role: s.role, task: s.task, model: s.model, model_label: modelLabel(s.model) })) });
@@ -521,23 +524,25 @@ export const teamRoute = new Hono()
     });
   });
 
-const withAgentMeta = (a: any) => ({ ...a, model_label: modelLabel(a.model ?? "subagent") });
+const withAgentMeta = (a: any) => ({ ...a, model_label: modelLabel(a.model ?? defaultModel()) });
 
 export const agentsRoute = new Hono()
   .get("/", (c) => c.json({ agents: (db.prepare("SELECT * FROM agents ORDER BY is_boss DESC, created_at").all() as any[]).map(withAgentMeta) }))
   .post("/", async (c) => {
     const b = await c.req.json();
     if (!b.name) return c.json({ error: "name 필요" }, 400);
+    if (b.model && !(await listAllModelIds()).has(b.model)) return c.json({ error: `인증된 모델이 아닙니다: ${b.model}` }, 400);
     const id = uid();
     const avatar = typeof b.avatar === "string" && b.avatar.startsWith("face:") ? b.avatar : `face:${id}`;
     db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(id, String(b.name).slice(0, 30), b.role_prompt ?? "", b.model ?? "subagent", avatar, b.tools ? JSON.stringify(b.tools) : null, b.persistent === false ? 0 : 1, now());
+      .run(id, String(b.name).slice(0, 30), b.role_prompt ?? "", b.model ?? defaultModel(), avatar, b.tools ? JSON.stringify(b.tools) : null, b.persistent === false ? 0 : 1, now());
     return c.json({ agent: withAgentMeta(db.prepare("SELECT * FROM agents WHERE id = ?").get(id)) });
   })
   .patch("/:id", async (c) => {
     const b = await c.req.json();
     const a = db.prepare("SELECT * FROM agents WHERE id = ?").get(c.req.param("id")) as Agent | null;
     if (!a) return c.json({ error: "not found" }, 404);
+    if (b.model && !(await listAllModelIds()).has(b.model)) return c.json({ error: `인증된 모델이 아닙니다: ${b.model}` }, 400);
     db.prepare("UPDATE agents SET name = ?, role_prompt = ?, model = ?, avatar = ? WHERE id = ?")
       .run(b.name ?? a.name, b.role_prompt ?? a.role_prompt, b.model ?? a.model, b.avatar ?? a.avatar, a.id);
     return c.json({ agent: withAgentMeta(db.prepare("SELECT * FROM agents WHERE id = ?").get(a.id)) });

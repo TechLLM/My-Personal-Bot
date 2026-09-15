@@ -86,6 +86,8 @@ export const api = {
   agents: () => mybotFetch("/api/agents").then(j) as Promise<{ agents: Agent[] }>,
   addAgent: (a: { name: string; role_prompt: string; model?: string; avatar?: string }) =>
     mybotFetch("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(a) }).then(j),
+  updateAgent: (id: string, patch: Partial<Agent>) =>
+    mybotFetch(`/api/agents/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(j),
   deleteAgent: (id: string) => mybotFetch(`/api/agents/${id}`, { method: "DELETE" }).then(j),
   setAgentBoss: (id: string) => mybotFetch(`/api/agents/${id}/boss`, { method: "POST" }).then(j),
   sites: () => mybotFetch("/api/sites").then(j) as Promise<{ sites: SiteLogin[] }>,
