@@ -65,7 +65,7 @@ export function TeamTrace({ events, done }: { events: TeamEvent[]; done: boolean
         {list.map((a) => (
           <div key={a.id} className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
             <div className="flex items-center gap-2 text-xs">
-              <AgentIcon name={a.name} size={13} className="shrink-0 text-zinc-500" />
+              <AgentIcon name={a.name} seed={a.avatar} size={14} className="shrink-0" />
               <span className="font-medium text-zinc-200">{a.name}</span>
               <span className="text-zinc-500 truncate">{a.role}</span>
               <span className="ml-auto shrink-0 font-mono text-[10px] text-zinc-600">{a.model_label ?? a.model}</span>

@@ -266,8 +266,10 @@ export default function App() {
     <div className="flex h-full">
       <Sidebar
         conversations={workspaceId ? conversations.filter((c) => (c as any).workspace_id === workspaceId) : conversations}
+        agents={agents}
         currentId={convId}
         onSelect={(id) => { loadConversation(id); if (window.innerWidth < 768) setSidebarOpen(false); }}
+        onSelectBot={selectBot}
         onNew={() => { newConversation(); if (window.innerWidth < 768) setSidebarOpen(false); }}
         onDelete={(id) => {
           api.deleteConversation(id).then(() => {
@@ -291,13 +293,13 @@ export default function App() {
           {!convId && pendingAgent && (
             <span className="flex shrink-0 items-center gap-1 rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-400">
               {!!pendingAgent.is_boss && <Crown size={10} className="text-amber-400" />}
-              <AgentIcon name={pendingAgent.name} size={11} /> {pendingAgent.name}
+              <AgentIcon name={pendingAgent.name} seed={pendingAgent.avatar} size={11} /> {pendingAgent.name}
               <button className="ml-0.5 text-zinc-600 hover:text-zinc-300" onClick={() => setPendingAgent(null)}>×</button>
             </span>
           )}
           {convId && conversations.find((c) => c.id === convId)?.agent_name && (
             <span className="flex shrink-0 items-center gap-1 rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-400" title="이 대화를 담당하는 봇 — 모델을 바꿔도 봇의 기억·맥락은 유지됩니다">
-              <AgentIcon name={conversations.find((c) => c.id === convId)?.agent_name} size={11} /> {conversations.find((c) => c.id === convId)?.agent_name}
+              <AgentIcon name={conversations.find((c) => c.id === convId)?.agent_name} seed={conversations.find((c) => c.id === convId)?.agent_avatar} size={11} /> {conversations.find((c) => c.id === convId)?.agent_name}
             </span>
           )}
         </header>
@@ -310,7 +312,7 @@ export default function App() {
             {empty && pendingAgent && (
               <div className="mt-[25vh] text-center">
                 <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-zinc-800 text-zinc-300">
-                  <AgentIcon name={pendingAgent.name} size={22} />
+                  <AgentIcon name={pendingAgent.name} seed={pendingAgent.avatar} size={22} />
                 </div>
                 <h1 className="text-lg font-semibold text-zinc-200">{pendingAgent.name}</h1>
                 <p className="mt-1 text-xs text-zinc-500 max-w-md mx-auto">{pendingAgent.role_prompt || "이 봇에게 업무를 지시하세요"}</p>

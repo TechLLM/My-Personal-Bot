@@ -18,18 +18,27 @@ export function BotLobby({
   onRefresh: () => void;
 }) {
   const [creating, setCreating] = useState(false);
+  const [step, setStep] = useState<1 | 2>(1); // 1: 이름·얼굴 → 2: 페르소나·역할
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
   const [model, setModel] = useState("subagent");
   const [asBoss, setAsBoss] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  // 얼굴 시드 — 생성 시 서버에 avatar로 저장돼 영구 얼굴이 됨
+  const [faceSeed, setFaceSeed] = useState(() => Math.random().toString(36).slice(2, 10));
+
+  const NAME_A = ["민첩한", "꼼꼼한", "든든한", "영리한", "성실한", "차분한", "날카로운", "따뜻한"];
+  const NAME_B = ["비서", "탐정", "사서", "분석가", "파수꾼", "도우미", "기록관", "전령"];
+  const suggestName = () =>
+    setName(`${NAME_A[Math.floor(Math.random() * NAME_A.length)]} ${NAME_B[Math.floor(Math.random() * NAME_B.length)]}`);
 
   const create = () => {
     if (!name.trim()) return;
-    api.addAgent({ name: name.trim(), role_prompt: role, model, avatar: "" }).then(async (d: any) => {
+    api.addAgent({ name: name.trim(), role_prompt: role, model, avatar: `face:${faceSeed}` }).then(async (d: any) => {
       const agent = d.agent as Agent;
       if (asBoss) await api.setAgentBoss(agent.id).catch(() => {});
-      setName(""); setRole(""); setAsBoss(false); setCreating(false);
+      setName(""); setRole(""); setAsBoss(false); setCreating(false); setStep(1);
+      setFaceSeed(Math.random().toString(36).slice(2, 10));
       onRefresh();
       onSelect(agent); // 만든 봇과 바로 대화 시작
     });
@@ -49,7 +58,7 @@ export function BotLobby({
         {list.map((a) => (
           <div key={a.id} className="group rounded-xl border border-zinc-800 px-3.5 py-3 hover:bg-zinc-900 hover:border-zinc-700 transition-colors">
             <div className="flex items-center gap-2">
-              <AgentIcon name={a.name} size={16} className="shrink-0 text-zinc-400" />
+              <AgentIcon name={a.name} seed={a.avatar} size={18} className="shrink-0" />
               <span className="font-medium text-sm text-zinc-200 truncate">{a.name}</span>
               {!!a.is_boss && (
                 <span className="flex items-center gap-0.5 rounded bg-amber-900/50 px-1 py-px text-[9px] text-amber-300"><Crown size={9} /> CEO</span>
@@ -85,30 +94,77 @@ export function BotLobby({
       </div>
 
       {creating && (
-        <div className="mx-auto mt-3 max-w-2xl rounded-xl border border-zinc-700 bg-zinc-900 p-4 space-y-2.5">
-          <div className="flex gap-2">
-            <input className="flex-1 rounded-lg bg-zinc-800 px-2.5 py-1.5 text-sm outline-none" placeholder="봇 이름 (예: 회의록 정리봇)" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
-            <select className="w-44 rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none" value={model} onChange={(e) => setModel(e.target.value)}>
-              {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
-              {!models.find((m) => m.id === "subagent") && <option value="subagent">subagent</option>}
-            </select>
+        <div className="mx-auto mt-3 max-w-2xl rounded-xl border border-zinc-700 bg-zinc-900 p-4">
+          <div className="mb-3 flex items-center gap-1.5 text-[10px] font-medium text-zinc-500">
+            <span className={step === 1 ? "text-zinc-200" : ""}>1. 이름·얼굴</span>
+            <span>→</span>
+            <span className={step === 2 ? "text-zinc-200" : ""}>2. 페르소나·역할</span>
           </div>
-          <textarea
-            className="w-full rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs outline-none" rows={2}
-            placeholder="페르소나·역할 지침 (예: 회의록을 요약하고 액션 아이템을 뽑는 비서)"
-            value={role} onChange={(e) => setRole(e.target.value)}
-          />
-          <div className="flex items-center gap-3">
-            <label className="flex items-center gap-1.5 text-xs text-zinc-400">
-              <input type="checkbox" checked={asBoss} onChange={(e) => setAsBoss(e.target.checked)} />
-              <Crown size={12} className="text-amber-400" /> CEO로 지정 — 모든 봇의 관리자가 됩니다
-            </label>
-            <button
-              className="ml-auto rounded-lg bg-zinc-100 px-3.5 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-white disabled:opacity-40"
-              disabled={!name.trim()}
-              onClick={create}
-            >만들고 대화 시작</button>
-          </div>
+
+          {step === 1 && (
+            <div className="space-y-2.5">
+              <div className="flex items-center gap-3">
+                <button
+                  className="shrink-0 rounded-xl bg-zinc-800 p-2 hover:bg-zinc-700 transition-colors"
+                  onClick={() => setFaceSeed(Math.random().toString(36).slice(2, 10))}
+                  title="다른 얼굴"
+                >
+                  <AgentIcon seed={`face:${faceSeed}`} size={38} />
+                </button>
+                <div className="flex-1">
+                  <div className="flex gap-2">
+                    <input
+                      className="flex-1 rounded-lg bg-zinc-800 px-2.5 py-1.5 text-sm outline-none"
+                      placeholder="봇 이름 (예: 회의록 정리봇)"
+                      value={name} onChange={(e) => setName(e.target.value)}
+                      autoFocus
+                      onKeyDown={(e) => { if (e.key === "Enter" && name.trim()) setStep(2); }}
+                    />
+                    <button className="shrink-0 rounded-lg bg-zinc-800 px-2.5 text-xs text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200" onClick={suggestName}>자동 이름</button>
+                  </div>
+                  <p className="mt-1.5 text-[10px] text-zinc-600">얼굴은 자동으로 만들어집니다 — 아이콘을 눌러 다른 얼굴로 바꿀 수 있어요</p>
+                </div>
+              </div>
+              <div className="flex justify-end">
+                <button
+                  className="rounded-lg bg-zinc-100 px-3.5 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-white disabled:opacity-40"
+                  disabled={!name.trim()}
+                  onClick={() => setStep(2)}
+                >다음 →</button>
+              </div>
+            </div>
+          )}
+
+          {step === 2 && (
+            <div className="space-y-2.5">
+              <div className="flex items-center gap-2 text-sm text-zinc-300">
+                <AgentIcon seed={`face:${faceSeed}`} size={20} />
+                <span className="font-medium">{name}</span>
+                <button className="text-[10px] text-zinc-600 hover:text-zinc-400" onClick={() => setStep(1)}>이름 변경</button>
+              </div>
+              <div className="flex gap-2">
+                <textarea
+                  className="flex-1 rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs outline-none" rows={2}
+                  placeholder="페르소나·역할 지침 (예: 회의록을 요약하고 액션 아이템을 뽑는 비서)"
+                  value={role} onChange={(e) => setRole(e.target.value)} autoFocus
+                />
+                <select className="w-40 self-start rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none" value={model} onChange={(e) => setModel(e.target.value)}>
+                  {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                  {!models.find((m) => m.id === "subagent") && <option value="subagent">subagent</option>}
+                </select>
+              </div>
+              <div className="flex items-center gap-3">
+                <label className="flex items-center gap-1.5 text-xs text-zinc-400">
+                  <input type="checkbox" checked={asBoss} onChange={(e) => setAsBoss(e.target.checked)} />
+                  <Crown size={12} className="text-amber-400" /> CEO로 지정 — 모든 봇의 관리자가 됩니다
+                </label>
+                <button
+                  className="ml-auto rounded-lg bg-zinc-100 px-3.5 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-white"
+                  onClick={create}
+                >만들고 대화 시작</button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>

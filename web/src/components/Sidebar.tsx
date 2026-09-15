@@ -1,23 +1,28 @@
-import type { Conversation } from "../api";
-import { X, Settings } from "lucide-react";
+import type { Agent, Conversation } from "../api";
+import { X, Settings, Crown, Plus } from "lucide-react";
 import { AgentIcon } from "./icons";
 
 export function Sidebar({
   conversations,
+  agents,
   currentId,
   onSelect,
   onNew,
+  onSelectBot,
   onDelete,
   onOpenSettings,
   open,
+  onClose,
   workspaces,
   workspaceId,
   onWorkspaceChange,
 }: {
   conversations: Conversation[];
+  agents: Agent[];
   currentId: string | null;
   onSelect: (id: string) => void;
   onNew: () => void;
+  onSelectBot: (a: Agent) => void;
   onDelete: (id: string) => void;
   onOpenSettings: () => void;
   open: boolean;
@@ -38,7 +43,7 @@ export function Sidebar({
         <button
           onClick={onNew}
           className="ml-auto rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300 hover:bg-zinc-700"
-        >+ 새 대화</button>
+        >+ 새 봇</button>
       </div>
       {workspaces.length > 0 && (
         <div className="px-3 pb-2">
@@ -52,7 +57,30 @@ export function Sidebar({
           </select>
         </div>
       )}
-      <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
+      {/* 봇 목록 — 각 봇이 하나의 세션. 클릭하면 그 봇의 최근 대화로 진입 */}
+      <div className="border-b border-zinc-800/60">
+        <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">봇</div>
+        <div className="max-h-44 overflow-y-auto px-2 pb-2 space-y-0.5">
+          {agents.map((a) => (
+            <div
+              key={a.id}
+              className="flex cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-sm text-zinc-300 hover:bg-zinc-900"
+              onClick={() => onSelectBot(a)}
+              title={`${a.role_prompt || "범용 봇"} — 클릭하면 이 봇의 세션으로 이동`}
+            >
+              <AgentIcon name={a.name} seed={a.avatar} size={17} className="shrink-0" />
+              <span className="truncate flex-1">{a.name}</span>
+              {!!a.is_boss && <Crown size={11} className="shrink-0 text-amber-400" />}
+            </div>
+          ))}
+          <button
+            onClick={onNew}
+            className="flex w-full items-center gap-2 rounded-lg border border-dashed border-zinc-800 px-2.5 py-1.5 text-xs text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"
+          ><Plus size={12} /> 새 봇 만들기</button>
+        </div>
+      </div>
+      <div className="px-3 pt-2 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">대화</div>
+      <div className="flex-1 overflow-y-auto p-2 pt-1 space-y-0.5">
         {conversations.map((c) => (
           <div
             key={c.id}
@@ -61,7 +89,7 @@ export function Sidebar({
             }`}
             onClick={() => onSelect(c.id)}
           >
-            {c.agent_name && <AgentIcon name={c.agent_name} size={13} className="shrink-0 text-zinc-500" />}
+            {c.agent_name && <AgentIcon name={c.agent_name} seed={c.agent_avatar} size={15} className="shrink-0" />}
             <span className="truncate flex-1">{c.title}</span>
             <button
               className="hidden shrink-0 text-zinc-600 hover:text-red-400 group-hover:block"

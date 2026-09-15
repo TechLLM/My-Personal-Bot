@@ -221,7 +221,7 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
                 <span className="text-zinc-500">{r.schedule}</span>
                 {r.agent_id && (
                   <span className="flex items-center gap-1 text-zinc-600">
-                    <AgentIcon name={agents.find((a) => a.id === r.agent_id)?.name} size={11} />
+                    <AgentIcon name={agents.find((a) => a.id === r.agent_id)?.name} seed={agents.find((a) => a.id === r.agent_id)?.avatar} size={12} />
                     {agents.find((a) => a.id === r.agent_id)?.name ?? "봇"}
                   </span>
                 )}
@@ -261,7 +261,7 @@ export function SettingsModal({ endpoints, onClose }: { endpoints: Endpoint[]; o
           {agents.map((a) => (
             <div key={a.id} className="mb-1 rounded-lg bg-zinc-900 px-2.5 py-1.5 text-xs">
               <div className="flex items-center gap-2">
-                <AgentIcon name={a.name} size={13} className="shrink-0 text-zinc-500" />
+                <AgentIcon name={a.name} seed={a.avatar} size={14} className="shrink-0" />
                 <span className="font-medium">{a.name}</span>
                 {a.is_boss ? (
                   <span className="flex items-center gap-0.5 rounded bg-amber-900/50 px-1 text-[9px] text-amber-300" title="모든 봇의 관리자"><Crown size={9} /> CEO</span>

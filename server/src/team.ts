@@ -39,7 +39,7 @@ export function ensureBossAgent(): Agent {
   if (!a) {
     const id = uid();
     db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, is_boss, created_at) VALUES (?, ?, ?, ?, ?, NULL, 1, 1, ?)")
-      .run(id, BOSS_NAME, BOSS_ROLE, "main", "🧭", now());
+      .run(id, BOSS_NAME, BOSS_ROLE, "main", `face:${id}`, now());
     a = db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent;
   } else if (!a.role_prompt.includes("agent_direct")) {
     // CEO 관리 지침이 없으면 기본 역할문에 추가 (사용자가 직접 쓴 역할문이면 뒤에 덧붙임)
@@ -118,7 +118,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     if (!nm) return "오류: name 필요";
     const id = uid();
     db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, is_boss, parent_id, created_at) VALUES (?, ?, ?, ?, ?, NULL, 1, 0, ?, ?)")
-      .run(id, uniqueName(nm.slice(0, 30)), String(args.role ?? ""), String(args.model ?? "subagent"), "🤖", agentId ?? null, now());
+      .run(id, uniqueName(nm.slice(0, 30)), String(args.role ?? ""), String(args.model ?? "subagent"), `face:${id}`, agentId ?? null, now());
     const created = getAgent(id)!;
     return `봇 생성됨: ${created.name} (모델: ${modelLabel(created.model ?? "subagent")}, 상위: 당신) — agent_direct로 즉시 업무를 지시하세요.`;
   }
@@ -211,7 +211,7 @@ function uniqueName(base: string): string {
 function createAgent(t: { name?: string; role?: string; model?: string; avatar?: string }, parentId?: string | null): Agent {
   const id = uid();
   db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, parent_id, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)")
-    .run(id, uniqueName(String(t.name ?? "작업봇")), String(t.role ?? ""), t.model ?? "subagent", t.avatar ?? "🤖", null, parentId ?? null, now());
+    .run(id, uniqueName(String(t.name ?? "작업봇")), String(t.role ?? ""), t.model ?? "subagent", `face:${id}`, null, parentId ?? null, now());
   return db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent;
 }
 
@@ -529,8 +529,9 @@ export const agentsRoute = new Hono()
     const b = await c.req.json();
     if (!b.name) return c.json({ error: "name 필요" }, 400);
     const id = uid();
+    const avatar = typeof b.avatar === "string" && b.avatar.startsWith("face:") ? b.avatar : `face:${id}`;
     db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(id, String(b.name).slice(0, 30), b.role_prompt ?? "", b.model ?? "subagent", b.avatar ?? "🤖", b.tools ? JSON.stringify(b.tools) : null, b.persistent === false ? 0 : 1, now());
+      .run(id, String(b.name).slice(0, 30), b.role_prompt ?? "", b.model ?? "subagent", avatar, b.tools ? JSON.stringify(b.tools) : null, b.persistent === false ? 0 : 1, now());
     return c.json({ agent: withAgentMeta(db.prepare("SELECT * FROM agents WHERE id = ?").get(id)) });
   })
   .patch("/:id", async (c) => {

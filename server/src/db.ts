@@ -129,6 +129,8 @@ try { db.exec("ALTER TABLE memories ADD COLUMN agent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN is_boss INTEGER NOT NULL DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE agent_runs ADD COLUMN tool_log TEXT"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN parent_id TEXT"); } catch {}
+// 봇 아바타를 선형 얼굴 시드로 통일 — 기존 이모지 아바타도 전환
+db.exec("UPDATE agents SET avatar = 'face:' || id WHERE avatar IS NULL OR avatar NOT LIKE 'face:%'");
 // CEO 봇이 하나도 없으면 기존 대장을 CEO로 승격
 db.exec("UPDATE agents SET is_boss = 1 WHERE name = '대장' AND NOT EXISTS (SELECT 1 FROM agents WHERE is_boss = 1)");
 
