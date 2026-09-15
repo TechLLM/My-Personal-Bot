@@ -130,6 +130,14 @@ CREATE TABLE IF NOT EXISTS credential_requests (
   status TEXT NOT NULL DEFAULT 'pending',
   created_at INTEGER NOT NULL
 );
+
+-- 대화 롤링 요약 — 오래된 메시지는 요약으로 압축해 프롬프트 크기를 일정하게 유지
+CREATE TABLE IF NOT EXISTS conversation_summaries (
+  conversation_id TEXT PRIMARY KEY,
+  summary TEXT NOT NULL,
+  covers_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `);
 
 try { db.exec("ALTER TABLE messages ADD COLUMN attachments TEXT"); } catch {}

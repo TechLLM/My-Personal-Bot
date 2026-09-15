@@ -3,6 +3,7 @@ import { db, uid, now, getSetting } from "../db";
 import { resolveModel } from "../providers";
 import { streamChat, type ChatMessage } from "../providers/openaiCompat";
 import { runDeepSearch } from "../deepsearch";
+import { WORK_DIR } from "../team";
 import { join } from "node:path";
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 
@@ -71,7 +72,24 @@ function withSiblings(m: Msg) {
   return { ...m, sibling_count: sibs.length, sibling_index: idx };
 }
 
-export function systemPrompt(mode: string, personaId?: string | null, workspaceId?: string | null, agentId?: string | null): string {
+// 관련성 기반 장기기억 회상 — 쿼리 키워드와 매칭되는 기억 top-K + 최근 기억을 합쳐 반환.
+// (기억 수백 건 규모에선 LIKE 스캔이 FTS보다 단순하고 2글자 한국어 키워드도 잡음)
+function recallMemories(agentId: string | null, queryText: string): string[] {
+  const rows = db.prepare("SELECT content, created_at FROM memories WHERE agent_id IS ? ORDER BY created_at DESC LIMIT 300").all(agentId) as { content: string; created_at: number }[];
+  if (!rows.length) return [];
+  const recent = rows.slice(0, 10).map((r) => r.content);
+  const keywords = [...new Set(queryText.replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter((w) => w.length >= 2))].slice(0, 12);
+  if (!keywords.length) return recent;
+  const relevant = rows
+    .map((r) => ({ c: r.content, n: keywords.filter((k) => r.content.includes(k)).length }))
+    .filter((x) => x.n > 0)
+    .sort((a, b) => b.n - a.n)
+    .slice(0, 5)
+    .map((x) => x.c);
+  return [...new Set([...relevant, ...recent])];
+}
+
+export function systemPrompt(mode: string, personaId?: string | null, workspaceId?: string | null, agentId?: string | null, queryText = ""): string {
   const base = getSetting("system_prompt") ?? "당신은 MyBot입니다. 정확하고 유용하게 답변하세요. 마크다운을 적절히 사용하세요.";
   let p = base;
   // 이 대화를 담당하는 봇 — 페르소나와 장기 기억이 봇에 귀속됨
@@ -79,9 +97,15 @@ export function systemPrompt(mode: string, personaId?: string | null, workspaceI
     const agent = db.prepare("SELECT * FROM agents WHERE id = ?").get(agentId) as any;
     if (agent) {
       p += `\n\n[당신은 봇 "${agent.name}"입니다 — 역할]\n${agent.role_prompt || "사용자의 업무를 수행하는 봇"}`;
-      const amems = db.prepare("SELECT content FROM memories WHERE agent_id = ? ORDER BY created_at DESC LIMIT 20").all(agentId) as { content: string }[];
-      if (amems.length) p += "\n\n[이 봇이 기억하는 업무 맥락]\n" + amems.map((m) => `- ${m.content}`).join("\n");
-      p += "\n\n[도구 사용 규칙 — 반드시 준수] 봇 생성(agent_create)·업무 지시(agent_direct)·검색·파일·브라우저 같은 실제 작업은 반드시 도구를 호출해 수행하고, 도구 결과를 확인한 뒤에만 완료를 보고하세요. 도구 호출 없이 '생성했다/지시했다/완료했다'고 주장하면 안 됩니다 — 도구 호출 없이는 아무 일도 일어나지 않습니다. 도구가 실패하거나 필요한 도구가 없으면 할 수 없다고 솔직히 답하세요. 계정·비밀번호 같은 개인정보가 필요하면 request_credentials 도구로 보안 입력 팝업을 띄우세요 — 채팅으로 비밀번호를 직접 요청하거나 받지 마세요.";
+      // 봇의 자기관리 업무 노트 (SSD의 MEMORY.md — 세션과 무관하게 영속)
+      const memPath = join(WORK_DIR, "agents", agent.name, "MEMORY.md");
+      if (existsSync(memPath)) {
+        const note = readFileSync(memPath, "utf8").trim();
+        if (note) p += `\n\n[이 봇의 장기 업무 노트 — agents/${agent.name}/MEMORY.md, 필요하면 read_file/write_file로 직접 갱신]\n${note.slice(0, 1500)}`;
+      }
+      const amems = recallMemories(agentId, queryText);
+      if (amems.length) p += "\n\n[이 봇이 기억하는 업무 맥락]\n" + amems.map((m) => `- ${m}`).join("\n");
+      p += "\n\n[도구 사용 규칙 — 반드시 준수] 봇 생성(agent_create)·업무 지시(agent_direct)·검색·파일·브라우저 같은 실제 작업은 반드시 도구를 호출해 수행하고, 도구 결과를 확인한 뒤에만 완료를 보고하세요. 도구 호출 없이 '생성했다/지시했다/완료했다'고 주장하면 안 됩니다 — 도구 호출 없이는 아무 일도 일어나지 않습니다. 도구가 실패하거나 필요한 도구가 없으면 할 수 없다고 솔직히 답하세요. 계정·비밀번호 같은 개인정보가 필요하면 request_credentials 도구로 보안 입력 팝업을 띄우세요 — 채팅으로 비밀번호를 직접 요청하거나 받지 마세요. 중요한 사실·결정·진행 상태는 memory_save 도구로 장기기억에 남기거나 MEMORY.md 업무 노트에 직접 기록하세요.";
     }
   }
   if (workspaceId) {
@@ -92,10 +116,44 @@ export function systemPrompt(mode: string, personaId?: string | null, workspaceI
     const persona = db.prepare("SELECT * FROM personas WHERE id = ?").get(personaId) as any;
     if (persona?.prompt) p += `\n\n[페르소나: ${persona.name}]\n${persona.prompt}`;
   }
-  const memories = db.prepare("SELECT content FROM memories WHERE agent_id IS NULL ORDER BY created_at DESC LIMIT 20").all() as { content: string }[];
-  if (memories.length) p += "\n\n[사용자에 대해 기억하는 정보]\n" + memories.map((m) => `- ${m.content}`).join("\n");
+  const memories = recallMemories(null, queryText);
+  if (memories.length) p += "\n\n[사용자에 대해 기억하는 정보]\n" + memories.map((m) => `- ${m}`).join("\n");
   if (mode === "think") p += "\n\n중요하거나 복잡한 질문에는 단계별로 깊이 생각한 뒤 답하세요.";
   return p;
+}
+
+// 롤링 압축 — 활성 메시지가 COMPACT_AT을 넘으면 가장 오래된 청크를 fast 모델로 요약해
+// SSD(conversation_summaries)에 누적하고, 프롬프트엔 최근 CONTEXT_RECENT개 원문만 남김.
+// 원문은 DB에서 삭제하지 않으므로 UI에는 전체 대화가 그대로 보인다.
+const CONTEXT_RECENT = 14;
+const COMPACT_AT = 30;
+
+async function compactHistory(convId: string, path: Msg[]): Promise<{ summary: string | null; recent: Msg[] }> {
+  const row = db.prepare("SELECT summary, covers_at FROM conversation_summaries WHERE conversation_id = ?").get(convId) as { summary: string; covers_at: number } | null;
+  let summary: string | null = row?.summary ?? null;
+  const coversAt = row?.covers_at ?? 0;
+  const unsummarized = path.filter((m) => m.created_at > coversAt);
+  const overflow = unsummarized.length - CONTEXT_RECENT;
+  if (unsummarized.length < COMPACT_AT || overflow <= 0) return { summary, recent: unsummarized };
+
+  const chunk = unsummarized.slice(0, overflow);
+  const lastCovered = chunk[chunk.length - 1].created_at;
+  const transcript = chunk.map((m) => `${m.role === "user" ? "사용자" : "봇"}: ${m.content.slice(0, 1500)}`).join("\n");
+  try {
+    const { endpoint, model } = resolveModel("fast");
+    let out = "";
+    for await (const ev of streamChat(endpoint, model, [
+      { role: "user", content: `이전 대화 요약과 새 대화를 하나로 합쳐, 대화를 이어가는 데 필요한 사실·결정·진행 상태·미완료 요청만 남긴 요약을 작성하세요 (12줄 이내, 불필요한 수사 제외).\n\n[이전 요약]\n${summary ?? "(없음)"}\n\n[추가 대화]\n${transcript.slice(0, 20000)}` },
+    ], { signal: AbortSignal.timeout(30000) })) {
+      if (ev.type === "content") out += ev.text ?? "";
+    }
+    if (out.trim()) summary = out.trim();
+  } catch {}
+  if (summary) {
+    db.prepare("INSERT INTO conversation_summaries (conversation_id, summary, covers_at, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(conversation_id) DO UPDATE SET summary = excluded.summary, covers_at = excluded.covers_at, updated_at = excluded.updated_at")
+      .run(convId, summary, lastCovered, now());
+  }
+  return { summary, recent: unsummarized.slice(-CONTEXT_RECENT) };
 }
 
 // 대화에서 지속 저장할 가치가 있는 사실 추출 (fast 모델, 백그라운드)
@@ -251,9 +309,14 @@ export const chatRoute = new Hono()
             const pi = path.findIndex((m) => m.id === parentId);
             if (pi >= 0) path = path.slice(0, pi + 1);
           }
+          // 장기기억 회상용 쿼리 — 방금 보낸 사용자 메시지(재생성이면 경로의 마지막 사용자 메시지)
+          const recallQuery = userMsg?.content ?? [...path].reverse().find((m) => m.role === "user")?.content ?? "";
+          // 오래된 대화는 롤링 요약으로 압축 — 프롬프트는 [시스템 + 요약 + 최근 N개]로 일정하게 유지
+          const { summary: convSummary, recent } = await compactHistory(convId!, path);
           const history: ChatMessage[] = [
-            { role: "system", content: systemPrompt(mode, conv?.persona_id ?? body.personaId, conv?.workspace_id, conv?.agent_id) },
-            ...path
+            { role: "system", content: systemPrompt(mode, conv?.persona_id ?? body.personaId, conv?.workspace_id, conv?.agent_id, recallQuery) },
+            ...(convSummary ? [{ role: "system" as const, content: `[이전 대화 요약 — 원문은 압축됨]\n${convSummary}` }] : []),
+            ...recent
               .filter((m) => m.role === "user" || m.role === "assistant")
               .map((m) => {
                 // 이미지 첨부 → 비전 포맷 (data URL — 원격 프로바이더가 로컬 URL 못 읽음)
