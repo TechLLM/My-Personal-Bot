@@ -81,6 +81,7 @@ export function systemPrompt(mode: string, personaId?: string | null, workspaceI
       p += `\n\n[당신은 봇 "${agent.name}"입니다 — 역할]\n${agent.role_prompt || "사용자의 업무를 수행하는 봇"}`;
       const amems = db.prepare("SELECT content FROM memories WHERE agent_id = ? ORDER BY created_at DESC LIMIT 20").all(agentId) as { content: string }[];
       if (amems.length) p += "\n\n[이 봇이 기억하는 업무 맥락]\n" + amems.map((m) => `- ${m.content}`).join("\n");
+      p += "\n\n[도구 사용 규칙 — 반드시 준수] 봇 생성(agent_create)·업무 지시(agent_direct)·검색·파일·브라우저 같은 실제 작업은 반드시 도구를 호출해 수행하고, 도구 결과를 확인한 뒤에만 완료를 보고하세요. 도구 호출 없이 '생성했다/지시했다/완료했다'고 주장하면 안 됩니다 — 도구 호출 없이는 아무 일도 일어나지 않습니다. 도구가 실패하거나 필요한 도구가 없으면 할 수 없다고 솔직히 답하세요.";
     }
   }
   if (workspaceId) {

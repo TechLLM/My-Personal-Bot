@@ -34,7 +34,7 @@ export const BOSS_NAME = "대장";
 // 새 봇의 기본 모델 — 설정의 default_model 우선, 없으면 subagent 별칭
 export const defaultModel = () => getSetting("default_model") || "subagent";
 
-const BOSS_ROLE = "당신은 MyBot의 CEO(총괄 관리자) 봇입니다. 사용자의 모든 업무 지시를 받는 총괄 책임자이며, 새로 생성되는 모든 봇의 관리자입니다. 스스로 도구(웹검색·파일·브라우저·MCP)를 사용해 직접 수행하거나, 필요하면 전문 역할 봇들에게 분배하고 결과를 종합해 보고합니다. 봇 관리: agent_list로 전체 봇 현황 확인, agent_direct로 임의 봇에게 즉시 업무 지시(결과를 받아 종합), agent_update로 봇의 역할·모델 수정, agent_delete로 불필요한 봇 정리. 사용자가 반복적·정기적 작업을 요청하면 routine_add 도구로 예약 작업으로 등록하세요 — 일회성 실행으로 처리하지 마세요. 이전 대화와 기억한 맥락을 바탕으로 업무의 연속성을 유지하세요.";
+const BOSS_ROLE = "당신은 MyBot의 CEO(총괄 관리자) 봇입니다. 사용자의 모든 업무 지시를 받는 총괄 책임자이며, 새로 생성되는 모든 봇의 관리자입니다. 스스로 도구(웹검색·파일·브라우저·MCP)를 사용해 직접 수행하거나, 필요하면 전문 역할 봇들에게 분배하고 결과를 종합해 보고합니다. 봇 관리: agent_create로 새 전문 봇 생성, agent_list로 전체 봇 현황 확인, agent_direct로 임의 봇에게 즉시 업무 지시(결과를 받아 종합), agent_update로 봇의 역할·모델 수정, agent_delete로 불필요한 봇 정리. 사용자가 반복적·정기적 작업을 요청하면 routine_add 도구로 예약 작업으로 등록하세요 — 일회성 실행으로 처리하지 마세요. 이전 대화와 기억한 맥락을 바탕으로 업무의 연속성을 유지하세요.";
 
 // 사용자가 지정한 CEO 봇 반환 — 없으면 대장 시드
 export function ensureBossAgent(): Agent {
@@ -44,9 +44,11 @@ export function ensureBossAgent(): Agent {
     db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, is_boss, created_at) VALUES (?, ?, ?, ?, ?, NULL, 1, 1, ?)")
       .run(id, BOSS_NAME, BOSS_ROLE, getSetting("default_model") || "main", `face:${id}`, now());
     a = db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent;
-  } else if (!a.role_prompt.includes("agent_direct")) {
-    // CEO 관리 지침이 없으면 기본 역할문에 추가 (사용자가 직접 쓴 역할문이면 뒤에 덧붙임)
-    const role = a.role_prompt.includes("MyBot의 CEO") ? BOSS_ROLE : `${a.role_prompt}\n\n[CEO 권한] 당신은 모든 봇의 관리자입니다. agent_list(봇 현황), agent_direct(봇에게 즉시 지시), agent_update(역할·모델 수정), agent_delete(봇 정리), routine_add(예약 등록) 도구를 사용할 수 있습니다.`;
+  } else if (!a.role_prompt.includes("agent_create")) {
+    // CEO 관리·생성 지침이 없으면 갱신 (사용자가 직접 쓴 역할문이면 뒤에 덧붙임)
+    const role = a.role_prompt.includes("MyBot의 CEO")
+      ? BOSS_ROLE
+      : `${a.role_prompt}\n\n[CEO 권한] 당신은 모든 봇의 관리자입니다. agent_create(새 전문 봇 생성 — 생성한 봇의 관리자가 됨), agent_list(봇 현황), agent_direct(봇에게 즉시 지시), agent_update(역할·모델 수정), agent_delete(봇 정리), routine_add(예약 등록) 도구를 사용할 수 있습니다.`;
     db.prepare("UPDATE agents SET role_prompt = ? WHERE id = ?").run(role, a.id);
     a.role_prompt = role;
   }
@@ -249,7 +251,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
   const messages: any[] = [
     {
       role: "system",
-      content: `당신은 전문 에이전트 "${agent.name}"입니다.\n역할: ${agent.role_prompt}\n\n지시받은 작업을 수행하세요. 필요하면 도구(web_search, 브라우저, 파일, MCP)를 사용하세요. 브라우저 도구는 사용자의 로그인 세션을 공유하므로 로그인이 필요한 사이트도 열 수 있습니다.\n\n다른 봇과 유기적으로 협업할 수 있습니다: agent_list로 봇 목록 확인, agent_create로 전문 봇 생성(당신이 관리자가 됨), agent_direct로 봇에게 즉시 위임하고 결과를 받으세요. 작업이 크면 쪼개서 위임하세요. 파일은 공유 작업 디렉터리로 주고받습니다.\n최종 답변은 지시한 쪽에 보고하는 결과 보고서로 작성하세요 — 핵심 결과와 근거를 간결하게.\n결과를 CEO(관리자)에게 전달·보고하려면 agent_list에서 [CEO] 봇 이름을 확인해 agent_direct로 지시하세요 — 대장 세션에 기록돼 사용자에게 보입니다.`,
+      content: `당신은 전문 에이전트 "${agent.name}"입니다.\n역할: ${agent.role_prompt}\n\n지시받은 작업을 수행하세요. 필요하면 도구(web_search, 브라우저, 파일, MCP)를 사용하세요. 브라우저 도구는 사용자의 로그인 세션을 공유하므로 로그인이 필요한 사이트도 열 수 있습니다.\n\n다른 봇과 유기적으로 협업할 수 있습니다: agent_list로 봇 목록 확인, agent_create로 전문 봇 생성(당신이 관리자가 됨), agent_direct로 봇에게 즉시 위임하고 결과를 받으세요. 작업이 크면 쪼개서 위임하세요. 파일은 공유 작업 디렉터리로 주고받습니다.\n최종 답변은 지시한 쪽에 보고하는 결과 보고서로 작성하세요 — 핵심 결과와 근거를 간결하게.\n결과를 CEO(관리자)에게 전달·보고하려면 agent_list에서 [CEO] 봇 이름을 확인해 agent_direct로 지시하세요 — 대장 세션에 기록돼 사용자에게 보입니다.\n\n[중요] 실제 작업(봇 생성·지시·검색·파일)은 반드시 도구를 호출해 수행하고 결과를 확인한 뒤 완료를 보고하세요. 도구 호출 없이 '했다'고 주장하지 마세요.`,
     },
     { role: "user", content: state.task },
   ];
