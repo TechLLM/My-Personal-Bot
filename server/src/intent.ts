@@ -58,7 +58,7 @@ export function snapshot(object: IntentObject): { text: string; count: number; r
     };
   }
   if (object === "agents") {
-    const rows = db.prepare("SELECT id, name, is_boss, is_lead, model FROM agents ORDER BY is_boss DESC, created_at").all() as any[];
+    const rows = db.prepare("SELECT a.id, a.name, a.is_boss, a.is_lead, a.model FROM agents a LEFT JOIN agents p ON a.parent_id = p.id ORDER BY a.is_boss DESC, a.pinned DESC, COALESCE(CASE WHEN p.id IS NOT NULL AND p.is_boss = 0 THEN p.sort_order END, a.sort_order, a.created_at), CASE WHEN p.id IS NOT NULL AND p.is_boss = 0 THEN 1 ELSE 0 END, COALESCE(a.sort_order, a.created_at)").all() as any[];
     return {
       text: rows.map((a) => `- ${a.name}${a.is_boss ? " [CEO]" : a.is_lead ? " [팀장]" : ""} · 모델: ${a.model}`).join("\n"),
       count: rows.length,

@@ -196,6 +196,12 @@ try { db.exec("ALTER TABLE agent_runs ADD COLUMN tool_log TEXT"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN parent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN is_lead INTEGER NOT NULL DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN max_children INTEGER"); } catch {}
+try { db.exec("ALTER TABLE agents ADD COLUMN sort_order REAL"); } catch {}
+{ // 정렬값 백필 — 기존 표시 순서(CEO→핀→생성순)를 유지한 채 순번 부여
+  let i = (db.prepare("SELECT COALESCE(MAX(sort_order), 0) m FROM agents").get() as any).m;
+  for (const r of db.prepare("SELECT id FROM agents WHERE sort_order IS NULL ORDER BY is_boss DESC, pinned DESC, created_at").all() as any[])
+    db.prepare("UPDATE agents SET sort_order = ? WHERE id = ?").run(++i, r.id);
+}
 try { db.exec("ALTER TABLE credential_requests ADD COLUMN agent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE credential_requests ADD COLUMN resume TEXT"); } catch {}
 // 봇 아바타를 선형 얼굴 시드로 통일 — 기존 이모지 아바타도 전환
