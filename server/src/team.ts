@@ -279,7 +279,11 @@ function createAgent(t: { name?: string; role?: string; model?: string; avatar?:
   return db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent;
 }
 
+// 현재 실행 중인 봇 — 사이드바가 폴링해서 작업 애니메이션을 표시
+export const runningAgents = new Set<string>();
+
 export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, signal?: AbortSignal): Promise<void> {
+  runningAgents.add(state.id);
   const { endpoint, model } = resolveModel(agent.model ?? defaultModel());
   state.model = model;
   const isBoss = !!agent.is_boss;
@@ -373,6 +377,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
     state.status = "error";
     state.result = `에이전트 오류: ${(e as Error).message}`;
   } finally {
+    runningAgents.delete(state.id);
     closeAgentPage(state.runId).catch(() => {});
   }
 }
@@ -594,6 +599,7 @@ const withAgentMeta = (a: any) => ({ ...a, model_label: modelLabel(a.model ?? de
 
 export const agentsRoute = new Hono()
   .get("/", (c) => c.json({ agents: (db.prepare("SELECT * FROM agents ORDER BY is_boss DESC, created_at").all() as any[]).map(withAgentMeta) }))
+  .get("/running", (c) => c.json({ running: [...runningAgents] }))
   .post("/", async (c) => {
     const b = await c.req.json();
     if (!b.name) return c.json({ error: "name 필요" }, 400);

@@ -30,6 +30,30 @@ let ctx: BrowserContext | null = null;
 let ctxHeadless = true;
 let launching: Promise<BrowserContext> | null = null;
 
+// 이전 서버 프로세스가 죽으며 남긴 Chromium이 프로필을 잡고 있으면 ProcessSingleton 오류 발생 —
+// 해당 프로필을 쓰는 좀비 프로세스를 정리하고 Singleton 잠금 파일을 지운 뒤 재시도
+async function cleanupProfileLock() {
+  try { (await import("node:child_process")).execSync(`pkill -f "${PROFILE_DIR}" 2>/dev/null || true`); } catch {}
+  const { unlinkSync } = await import("node:fs");
+  for (const f of ["SingletonLock", "SingletonSocket", "SingletonCookie"])
+    try { unlinkSync(join(PROFILE_DIR, f)); } catch {}
+  await new Promise((r) => setTimeout(r, 800));
+}
+
+function launchContext(headless: boolean): Promise<BrowserContext> {
+  return chromium
+    .launchPersistentContext(PROFILE_DIR, {
+      headless,
+      channel: "chromium",
+      args: ["--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check"],
+      ignoreDefaultArgs: ["--enable-automation"],
+      viewport: { width: 1440, height: 900 },
+      locale: "ko-KR",
+      timezoneId: "Asia/Seoul",
+      acceptDownloads: true,
+    });
+}
+
 // 봇 작업은 headless(창 없음, Chrome for Testing의 new headless = 실제 Chrome 지문에 근접),
 // 수동 로그인만 headed로 잠시 전환. 프로필 잠금 때문에 동시 실행은 불가 — 모드 전환 시 재기동.
 export async function getBrowser(headless = true): Promise<BrowserContext> {
@@ -40,16 +64,12 @@ export async function getBrowser(headless = true): Promise<BrowserContext> {
     pages.clear();
   }
   if (launching) return launching;
-  launching = chromium
-    .launchPersistentContext(PROFILE_DIR, {
-      headless,
-      channel: "chromium",
-      args: ["--disable-blink-features=AutomationControlled", "--no-first-run", "--no-default-browser-check"],
-      ignoreDefaultArgs: ["--enable-automation"],
-      viewport: { width: 1440, height: 900 },
-      locale: "ko-KR",
-      timezoneId: "Asia/Seoul",
-      acceptDownloads: true,
+  launching = launchContext(headless)
+    .catch(async (e) => {
+      if (!/ProcessSingleton|profile directory|SingletonLock/i.test((e as Error).message)) throw e;
+      console.warn("[mybot] 브라우저 프로필 잠금 감지 — 좀비 프로세스 정리 후 재시도");
+      await cleanupProfileLock();
+      return launchContext(headless);
     })
     .then(async (c) => {
       await c.addInitScript(STEALTH_INIT);
