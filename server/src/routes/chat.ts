@@ -525,10 +525,14 @@ export const chatRoute = new Hono()
             }
           }
 
+          // MiniMax-M3처럼 추론을 content에 섞는 모델 — think 블록을 reasoning으로 이동 (본문은 cleanOutput이 제거)
+          const thinkParts = [...content.matchAll(/<think>([\s\S]*?)(?:<\/think>|$)/g)].map((m) => m[1].trim()).filter(Boolean);
+          if (thinkParts.length) reasoning = [reasoning, ...thinkParts].filter(Boolean).join("\n\n").trim();
+
           // 자가교정 — 도구 호출 없이 작업 완료·팝업 표시를 주장한 환각 응답을 실제 도구 호출로 보정
           // + 빈/손상된 최종 응답(모델이 깨진 문자열만 출력)도 재시도
           // URL·링크 문법을 제거하고 의미 문자를 셈 — '](http://…)' 같은 링크 조각 응답도 손상으로 잡음
-          const stripped = content.replace(/\]\([^)]*\)/g, "]").replace(/https?:\/\/\S+/g, "");
+          const stripped = content.replace(/<think>[\s\S]*?(<\/think>|$)/g, "").replace(/\]\([^)]*\)/g, "]").replace(/https?:\/\/\S+/g, "");
           const meaningfulLen = (stripped.match(/[가-힣A-Za-z0-9]/g) ?? []).length;
           // 스트리밍된 최종 응답에 텍스트 형식으로 새어나온 도구 호출이 있으면 서버가 대신 실행
           const leakedCalls = parseLeaked(content);
@@ -560,13 +564,22 @@ export const chatRoute = new Hono()
               const fix = await chatOnce(endpoint, realModel, history, {
                 signal, tools: openaiTools,
                 ...(claimsPopup && fixRound === 0 ? { toolChoice: { type: "function", function: { name: "request_credentials" } } } : {}), // 팝업 주장은 강제 호출
-              }).catch(() => null);
-              if (!fix?.toolCalls?.length) { if (fix?.content) fixText = fix.content; break; }
+              }).catch((e) => { console.error(`[mybot] 보정 라운드 ${fixRound} 실패:`, (e as Error).message); return null; });
+              if (!fix?.toolCalls?.length) {
+                if (fix?.content) { fixText = fix.content; break; }
+                continue; // 응답이 비었거나 호출 자체가 실패 — 다음 보정 라운드로 재시도
+              }
               history.push({ role: "assistant", content: fix.content || "", tool_calls: fix.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })) } as any);
               for (const tc of fix.toolCalls) {
                 const out = await execTool(tc);
                 history.push({ role: "tool", tool_call_id: tc.id, content: String(out).slice(0, 8000) } as any);
               }
+            }
+            // 보정 라운드가 도구만 호출하고 텍스트를 못 만든 경우 — 도구 없이 최종 답변을 한 번 더 요청
+            if (!fixText && Date.now() < deadline) {
+              history.push({ role: "user", content: "[시스템] 도구는 충분히 사용됐습니다. 지금까지의 도구 결과를 바탕으로 사용자에게 최종 답변을 문장으로 작성하세요." });
+              const fin = await chatOnce(endpoint, realModel, history, { signal }).catch((e) => { console.error("[mybot] 보정 최종 답변 실패:", (e as Error).message); return null; });
+              if (fin?.content) fixText = fin.content;
             }
             // 최후 수단 — 모델이 강제 호출마저 무시하면 서버가 직접 팝업 요청 생성 (사이트명은 대화에서 추출)
             if (claimsPopup && !calledTools.has("request_credentials")) {
@@ -581,7 +594,7 @@ export const chatRoute = new Hono()
               emitTool("request_credentials");
             }
             // 보정 라운드가 만든 정상 답변이 있으면 손상·허위 응답을 교체
-            const fixStripped = fixText.replace(/\]\([^)]*\)/g, "]").replace(/https?:\/\/\S+/g, "");
+            const fixStripped = fixText.replace(/<think>[\s\S]*?(<\/think>|$)/g, "").replace(/\]\([^)]*\)/g, "]").replace(/https?:\/\/\S+/g, "");
             const fixOk = (fixStripped.match(/[가-힣A-Za-z0-9]/g) ?? []).length >= 8;
             if (degenerate || leakedCalls.length) content = fixOk ? fixText : "⚠️ 응답 생성에 실패했습니다 — 같은 지시를 다시 보내주세요.";
             else if (fixOk && (claimsAction || dodges)) content = fixText;

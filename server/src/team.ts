@@ -158,6 +158,17 @@ export const MANAGE_TOOLS = [
   { type: "function", function: { name: "agent_delete", description: "봇을 삭제합니다. 관리자는 모든 봇, 팀장은 자기 하위 봇만 삭제 가능 (관리자 봇은 삭제 불가)", parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } } },
 ];
 
+// 봇 이름 해석 — 정확히 일치 → 공백 무시 → 포함 검색 순. 사용자가 "메일봇"이라 써도 "메일 브리핑봇"을 찾음
+function findAgentByName(raw: string): Agent | null {
+  const nm = String(raw ?? "").trim();
+  if (!nm) return null;
+  const exact = db.prepare("SELECT * FROM agents WHERE name = ?").get(nm) as Agent | undefined;
+  if (exact) return exact;
+  const nospace = db.prepare("SELECT * FROM agents WHERE REPLACE(name, ' ', '') = ?").get(nm.replace(/\s+/g, "")) as Agent | undefined;
+  if (nospace) return nospace;
+  return (db.prepare("SELECT * FROM agents WHERE name LIKE ? OR REPLACE(name,' ','') LIKE ? ORDER BY LENGTH(name) LIMIT 1").get(`%${nm}%`, `%${nm.replace(/\s+/g, "")}%`) as Agent | undefined) ?? null;
+}
+
 export async function callBuiltin(name: string, args: Record<string, unknown>, agentId?: string | null, signal?: AbortSignal, depth = 0, emit?: (ev: any) => void): Promise<string> {
   // --- 봇 협업·관리 도구 ---
   if (name === "agent_list") {
@@ -179,7 +190,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     return `봇 생성됨: ${created.name} (모델: ${modelLabel(created.model ?? defaultModel())}, 상위: 당신) — agent_direct로 즉시 업무를 지시하세요.`;
   }
   if (name === "agent_direct") {
-    const target = db.prepare("SELECT * FROM agents WHERE name = ?").get(String(args.name ?? "")) as Agent | null;
+    const target = findAgentByName(String(args.name ?? ""));
     if (!target) return `봇 없음: ${args.name} — agent_list로 이름을 확인하세요`;
     if (target.id === agentId) return "자기 자신에게는 지시할 수 없습니다";
     if (depth >= 2) return "위임 깊이 제한(2단계) — 이 봇에게 직접 수행하라고 지시하세요";
@@ -232,7 +243,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     return `사용자 화면에 "${nm}" 계정 입력 팝업을 띄웠습니다. 입력된 계정은 암호화되어 저장되고, 사용자가 입력을 완료하면 작업이 자동으로 재개됩니다. 이번 응답은 "화면의 팝업에 계정을 입력해 달라"고만 안내하고 마치세요 — 절대 채팅으로 비밀번호를 직접 받지 마세요.`;
   }
   if (name === "agent_update") {
-    const target = db.prepare("SELECT * FROM agents WHERE name = ?").get(String(args.name ?? "")) as Agent | null;
+    const target = findAgentByName(String(args.name ?? ""));
     if (!target) return `봇 없음: ${args.name}`;
     const caller = agentId ? getAgent(agentId) : null;
     if (caller && !caller.is_boss && !(caller.is_lead && target.parent_id === caller.id))
@@ -245,7 +256,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     return `봇 수정됨: ${target.name}${args.lead !== undefined && (!caller || caller.is_boss) ? (args.lead ? " — 팀장 지정" : " — 팀장 해제") : ""}`;
   }
   if (name === "agent_delete") {
-    const target = db.prepare("SELECT * FROM agents WHERE name = ?").get(String(args.name ?? "")) as Agent | null;
+    const target = findAgentByName(String(args.name ?? ""));
     if (!target) return `봇 없음: ${args.name}`;
     if (target.is_boss) return "관리자(CEO) 봇은 삭제할 수 없습니다";
     const caller = agentId ? getAgent(agentId) : null;

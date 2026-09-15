@@ -31,6 +31,9 @@ const MARKER_MAP: [RegExp, string][] = [
 
 export function cleanOutput(text: string): string {
   let out = text;
+  // MiniMax-M3 등 추론 모델이 content에 새는 think 블록 제거 — 닫는 태그가 없으면 끝까지 제거
+  out = out.replace(/<think>[\s\S]*?(<\/think>|$)/g, "");
+  out = out.replace(/<\/?tool_call>|<\/?invoke[^>]*>|<\/?parameter[^>]*>/g, ""); // 텍스트로 샌 도구 호출 마크업 제거
   for (const [re, rep] of MARKER_MAP) out = out.replace(re, rep);
   out = out.replace(/\p{Extended_Pictographic}\uFE0F?/gu, "");
   out = out.replace(/\u200D/g, "");
