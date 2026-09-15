@@ -66,8 +66,8 @@ export function TeamTrace({ events, done }: { events: TeamEvent[]; done: boolean
           <div key={a.id} className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
             <div className="flex items-center gap-2 text-xs">
               <AgentIcon name={a.name} seed={a.avatar} size={14} className="shrink-0" working={a.status === "running"} />
-              <span className="font-medium text-zinc-200">{a.name}</span>
-              <span className="text-zinc-500 truncate">{a.role}</span>
+              <span className="shrink-0 font-medium text-zinc-200 whitespace-nowrap">{a.name}</span>
+              <span className="min-w-0 flex-1 truncate text-zinc-500">{a.role}</span>
               <span className="ml-auto shrink-0 font-mono text-[10px] text-zinc-600">{a.model_label ?? a.model}</span>
               <span className={`shrink-0 ${a.status === "done" ? "text-emerald-400" : a.status === "error" ? "text-red-400" : "text-amber-400"}`}>
                 {a.status === "done" ? "● 완료" : a.status === "error" ? "● 오류" : a.status === "running" ? "◐ 실행 중" : "○ 대기"}
