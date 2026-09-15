@@ -22,9 +22,9 @@ export async function chatOnce(
   endpoint: Endpoint,
   model: string,
   messages: any[],
-  opts: { signal?: AbortSignal; tools?: { type: string; function: { name: string; description?: string; parameters?: object } }[] } = {},
+  opts: { signal?: AbortSignal; tools?: { type: string; function: { name: string; description?: string; parameters?: object } }[]; toolChoice?: string | object } = {},
 ): Promise<ChatResult> {
-  const body = JSON.stringify({ model, messages, stream: false, ...(opts.tools?.length ? { tools: opts.tools, tool_choice: "auto" } : {}) });
+  const body = JSON.stringify({ model, messages, stream: false, ...(opts.tools?.length ? { tools: opts.tools, tool_choice: opts.toolChoice ?? "auto" } : {}) });
   let lastErr: Error | null = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     if (opts.signal?.aborted) break;

@@ -316,7 +316,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
           }
           out = builtinNames.has(tc.name)
             ? await callBuiltin(tc.name, args, agent.id, signal, state.depth)
-            : tc.name.startsWith("browser_")
+            : tc.name.startsWith("browser_") || tc.name === "ego_run"
               ? await browserTool(state.runId, tc.name, args)
               : await mcpCall(tc.name, args);
           if (/^(도구 오류|알 수 없는 도구|브라우저 오류):/.test(out)) { ok = false; errMsg = out.slice(0, 120); }

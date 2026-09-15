@@ -397,8 +397,7 @@ export const chatRoute = new Hono()
           }
 
           // 도구 루프: 봇이 모든 메시지를 처리 — 내장 도구(검색·파일) + 브라우저 + MCP 도구(설정 시)
-          {
-            const { mcpConfigured, mcpTools, mcpCall } = await import("../mcp");
+          const { mcpConfigured, mcpTools, mcpCall } = await import("../mcp");
             const { BROWSER_TOOLS, browserTool, closeAgentPage } = await import("../browser");
             const { BUILTIN_TOOLS, BOSS_TOOLS, callBuiltin, getAgent } = await import("../team");
             const convAgent = getAgent(conv?.agent_id);
@@ -418,6 +417,37 @@ export const chatRoute = new Hono()
               toolEvents.push(ev);
               send("search", ev);
             };
+            const calledTools = new Set<string>();
+            const execTool = async (tc: { id: string; name: string; arguments: string }): Promise<string> => {
+              let out = "";
+              let args: Record<string, unknown>;
+              try {
+                args = JSON.parse(tc.arguments || "{}");
+              } catch {
+                return `도구 오류: ${tc.name}의 인자 JSON이 깨져 있습니다(길이 ${tc.arguments.length}자). content가 크면 짧게 나눠 쓰고, 따옴표·줄바꿈을 올바르게 이스케이프한 유효한 JSON으로 다시 호출하세요.`;
+              }
+              calledTools.add(tc.name);
+              emitTool(tc.name);
+              try {
+                if (builtinNames.has(tc.name)) {
+                  out = await callBuiltin(tc.name, args, conv?.agent_id, signal);
+                } else if (tc.name.startsWith("browser_") || tc.name === "ego_run") {
+                  browserUsed = true;
+                  out = await browserTool(browserKey, tc.name, args);
+                } else {
+                  out = await mcpCall(tc.name, args);
+                }
+                if (/^(도구 오류|알 수 없는 도구|브라우저 오류):/.test(out)) {
+                  console.error(`[mybot] 도구 실패 — 도구:${tc.name} ${out.slice(0, 120)}`);
+                  emitTool(`⚠ ${tc.name} 실패`);
+                }
+              } catch (e) {
+                out = `도구 오류: ${(e as Error).message}`;
+                console.error(`[mybot] 도구 예외 — 도구:${tc.name} ${(e as Error).message}`);
+                emitTool(`⚠ ${tc.name} 오류`);
+              }
+              return out;
+            };
             for (let round = 0; round < 4; round++) {
               if (Date.now() > deadline) break;
               emitTool(`봇 작업 중… (라운드 ${round + 1})`);
@@ -428,40 +458,12 @@ export const chatRoute = new Hono()
               }
               history.push({ role: "assistant", content: res.content || "", tool_calls: res.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })) } as any);
               for (const tc of res.toolCalls) {
-                let out = "";
-                let args: Record<string, unknown> | null = null;
-                try {
-                  args = JSON.parse(tc.arguments || "{}");
-                } catch {
-                  out = `도구 오류: ${tc.name}의 인자 JSON이 깨져 있습니다(길이 ${tc.arguments.length}자). content가 크면 짧게 나눠 쓰고, 따옴표·줄바꿈을 올바르게 이스케이프한 유효한 JSON으로 다시 호출하세요.`;
-                }
-                if (args) {
-                  emitTool(tc.name);
-                  try {
-                    if (builtinNames.has(tc.name)) {
-                      out = await callBuiltin(tc.name, args, conv?.agent_id, signal);
-                    } else if (tc.name.startsWith("browser_")) {
-                      browserUsed = true;
-                      out = await browserTool(browserKey, tc.name, args);
-                    } else {
-                      out = await mcpCall(tc.name, args);
-                    }
-                    if (/^(도구 오류|알 수 없는 도구|브라우저 오류):/.test(out)) {
-                      console.error(`[mybot] 도구 실패 — 도구:${tc.name} ${out.slice(0, 120)}`);
-                      emitTool(`⚠ ${tc.name} 실패`);
-                    }
-                  } catch (e) {
-                    out = `도구 오류: ${(e as Error).message}`;
-                    console.error(`[mybot] 도구 예외 — 도구:${tc.name} ${(e as Error).message}`);
-                    emitTool(`⚠ ${tc.name} 오류`);
-                  }
-                }
+                const out = await execTool(tc);
                 history.push({ role: "tool", tool_call_id: tc.id, content: String(out).slice(0, 8000) } as any);
               }
             }
             if (toolEvents.length) searchMeta = { ...(searchMeta ?? {}), type: searchMeta?.type ?? "tools", events: toolEvents };
             if (browserUsed) closeAgentPage(browserKey).catch(() => {});
-          }
 
           for await (const ev of streamChat(endpoint, realModel, history, { signal })) {
             if (ev.type === "content" && ev.text) {
@@ -478,6 +480,43 @@ export const chatRoute = new Hono()
             } else if (ev.type === "done" && ev.model) {
               usedModel = ev.model;
             }
+          }
+
+          // 자가교정 — 도구 호출 없이 작업 완료·팝업 표시를 주장한 환각 응답을 실제 도구 호출로 보정
+          const claimsPopup = /팝업|보안.{0,6}입력|입력.{0,4}(창|띄)/.test(content) && /계정|비밀번호|로그인|아이디/.test(content);
+          const claimsAction = calledTools.size === 0 && /(삭제했|생성했|지시했|등록했|전송했|만들었|처리했|삭제됨|생성됨|등록됨|전달했|보냈)/.test(content);
+          const needsFix = (claimsPopup && !calledTools.has("request_credentials")) || claimsAction;
+          if (needsFix && Date.now() < deadline) {
+            history.push({ role: "assistant", content });
+            history.push({ role: "user", content: claimsPopup
+              ? "[시스템] 방금 응답에서 계정 입력 팝업을 띄우겠다고 했지만 request_credentials 도구가 실제로 호출되지 않았습니다. 지금 즉시 request_credentials를 호출해 팝업을 실제로 띄우세요. site에는 언급된 서비스 이름을 넣으세요."
+              : "[시스템] 방금 응답에서 작업을 수행했다고 주장했지만 도구 호출이 전혀 없었습니다. 주장한 작업을 지금 실제 도구로 수행하고, 수행할 수 없는 부분은 없다고 정직하게 정정하세요." });
+            for (let fixRound = 0; fixRound < 2 && Date.now() < deadline; fixRound++) {
+              const fix = await chatOnce(endpoint, realModel, history, {
+                signal, tools: openaiTools,
+                ...(claimsPopup && fixRound === 0 ? { toolChoice: { type: "function", function: { name: "request_credentials" } } } : {}), // 팝업 주장은 강제 호출
+              }).catch(() => null);
+              if (!fix?.toolCalls?.length) break;
+              history.push({ role: "assistant", content: fix.content || "", tool_calls: fix.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })) } as any);
+              for (const tc of fix.toolCalls) {
+                const out = await execTool(tc);
+                history.push({ role: "tool", tool_call_id: tc.id, content: String(out).slice(0, 8000) } as any);
+              }
+            }
+            // 최후 수단 — 모델이 강제 호출마저 무시하면 서버가 직접 팝업 요청 생성 (사이트명은 대화에서 추출)
+            if (claimsPopup && !calledTools.has("request_credentials")) {
+              const src = content + "\n" + history.filter((m) => m.role === "user" && typeof m.content === "string" && !m.content.startsWith("[시스템]")).slice(-3).map((m) => m.content).join("\n");
+              const site = src.match(/사이트명[은이]?\s*[:：]?\s*([가-힣A-Za-z0-9_.]{2,20})/)?.[1]
+                ?? src.match(/([가-힣A-Za-z0-9_.]{2,20})\s*(?:계정|로그인)/)?.[1]
+                ?? "웹사이트";
+              const url = src.match(/https?:\/\/[^\s)"'<>]+/)?.[0];
+              await callBuiltin("request_credentials", { site, url, reason: "봇이 요청한 계정 입력" }, conv?.agent_id, signal).catch(() => "");
+              calledTools.add("request_credentials");
+              emitTool("request_credentials");
+            }
+            if (calledTools.has("request_credentials") && claimsPopup) content += "\n\n> ✅ 보안 입력 팝업을 지금 띄웠습니다 — 팝업에 계정을 입력해 주세요.";
+            else if (calledTools.size) content += "\n\n> ⤵ 위에 보고한 작업을 실제 도구로 수행했습니다 — 세부 결과는 실제 실행 결과와 다를 수 있습니다.";
+            if (toolEvents.length) searchMeta = { ...(searchMeta ?? {}), type: searchMeta?.type ?? "tools", events: toolEvents };
           }
 
           q.msgUpdate.run(content, reasoning || null, usedModel, searchMeta ? JSON.stringify(searchMeta) : null, usage?.prompt_tokens ?? null, usage?.completion_tokens ?? null, asstMsg.id);
