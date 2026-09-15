@@ -99,6 +99,12 @@ export interface TeamAgentState {
 
 type Emit = (ev: object) => void;
 
+// 도구 호출별 타임아웃 — 브라우저·MCP 호출이 행 걸려도 run이 영원히 멈추지 않게
+// (라운드 시작점에서만 데드라인을 확인하므로 개별 호출에 별도 상한이 필요)
+export function withToolTimeout<T>(p: Promise<T>, ms = 120_000): Promise<T> {
+  return Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error(`도구 실행 시간 초과(${Math.round(ms / 1000)}초)`)), ms))]);
+}
+
 // 모델이 도구 호출을 텍스트 형식(<invoke name=…>)으로 새어내면 파싱해 실제 호출로 전환
 function parseLeaked(text: string): { id: string; name: string; arguments: string }[] {
   const calls: { id: string; name: string; arguments: string }[] = [];
@@ -383,11 +389,15 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
             messages.push({ role: "tool", tool_call_id: tc.id, content: out });
             continue;
           }
-          out = builtinNames.has(tc.name)
-            ? await callBuiltin(tc.name, args, agent.id, signal, state.depth, emit)
-            : tc.name.startsWith("browser_") || tc.name === "ego_run"
-              ? await browserTool(state.runId, tc.name, args)
-              : await mcpCall(tc.name, args);
+          out = tc.name === "agent_direct"
+            ? await callBuiltin(tc.name, args, agent.id, signal, state.depth, emit) // 위임은 자체 시간 상한으로 관리
+            : await withToolTimeout(
+                builtinNames.has(tc.name)
+                  ? callBuiltin(tc.name, args, agent.id, signal, state.depth, emit)
+                  : tc.name.startsWith("browser_") || tc.name === "ego_run"
+                    ? browserTool(state.runId, tc.name, args)
+                    : mcpCall(tc.name, args),
+              );
           if (/^(도구 오류|알 수 없는 도구|브라우저 오류):/.test(out)) { ok = false; errMsg = out.slice(0, 120); }
         } catch (e) {
           ok = false;

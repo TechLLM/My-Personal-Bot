@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { serveStatic } from "hono/bun";
 import { join } from "node:path";
-import { db, getSetting } from "./db";
+import { db, getSetting, now } from "./db";
 import { modelsRoute } from "./routes/models";
 import { chatRoute } from "./routes/chat";
 import { settingsRoute } from "./routes/settings";
@@ -55,6 +55,8 @@ seedPersonas();
 // 대장 봇 시드 + 기존 대화를 대장에게 귀속 (봇 중심 모델)
 const boss = ensureBossAgent();
 db.prepare("UPDATE conversations SET agent_id = ? WHERE agent_id IS NULL").run(boss.id);
+// 서버 재시작으로 끊긴 실행을 'running'에서 중단 처리 — 고아 레코드가 영원히 실행 중으로 남지 않게
+db.prepare("UPDATE agent_runs SET status = 'error', result = COALESCE(result, '서버 재시작으로 작업이 중단됨'), finished_at = ? WHERE status = 'running'").run(now());
 startScheduler();
 startTelegramBot();
 

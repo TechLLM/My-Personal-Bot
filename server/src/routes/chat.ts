@@ -405,7 +405,7 @@ export const chatRoute = new Hono()
           // 도구 루프: 봇이 모든 메시지를 처리 — 내장 도구(검색·파일) + 브라우저 + MCP 도구(설정 시)
           const { mcpConfigured, mcpTools, mcpCall } = await import("../mcp");
             const { BROWSER_TOOLS, browserTool, closeAgentPage } = await import("../browser");
-            const { BUILTIN_TOOLS, MANAGE_TOOLS, callBuiltin, getAgent } = await import("../team");
+            const { BUILTIN_TOOLS, MANAGE_TOOLS, callBuiltin, getAgent, withToolTimeout } = await import("../team");
             const convAgent = getAgent(conv?.agent_id);
             const openaiTools: any[] = [...BUILTIN_TOOLS, ...(convAgent?.is_boss || convAgent?.is_lead ? MANAGE_TOOLS : []), ...BROWSER_TOOLS];
             if (mcpConfigured()) {
@@ -460,13 +460,16 @@ export const chatRoute = new Hono()
               emitTool(tc.name);
               try {
                 if (builtinNames.has(tc.name)) {
-                  out = await callBuiltin(tc.name, args, conv?.agent_id, signal, 0, teamEmit);
+                  // agent_direct는 중첩 실행이라 자체 상한으로 관리 — 나머지는 120초 호출 타임아웃
+                  out = tc.name === "agent_direct"
+                    ? await callBuiltin(tc.name, args, conv?.agent_id, signal, 0, teamEmit)
+                    : await withToolTimeout(callBuiltin(tc.name, args, conv?.agent_id, signal, 0, teamEmit));
                   if (tc.name === "request_credentials" && !out.includes("이미 저장")) popupShown = true;
                 } else if (tc.name.startsWith("browser_") || tc.name === "ego_run") {
                   browserUsed = true;
-                  out = await browserTool(browserKey, tc.name, args);
+                  out = await withToolTimeout(browserTool(browserKey, tc.name, args));
                 } else {
-                  out = await mcpCall(tc.name, args);
+                  out = await withToolTimeout(mcpCall(tc.name, args));
                 }
                 if (/^(도구 오류|알 수 없는 도구|브라우저 오류):/.test(out)) {
                   console.error(`[mybot] 도구 실패 — 도구:${tc.name} ${out.slice(0, 120)}`);
