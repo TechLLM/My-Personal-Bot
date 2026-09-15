@@ -61,6 +61,8 @@ const boss = ensureBossAgent();
 db.prepare("UPDATE conversations SET agent_id = ? WHERE agent_id IS NULL").run(boss.id);
 // 서버 재시작으로 끊긴 실행을 'running'에서 중단 처리 — 고아 레코드가 영원히 실행 중으로 남지 않게
 db.prepare("UPDATE agent_runs SET status = 'error', result = COALESCE(result, '서버 재시작으로 작업이 중단됨'), finished_at = ? WHERE status = 'running'").run(now());
+// 같은 이유로 처리 중이던 봇 간 메시지도 정리 — 'processing' 상태로 영원히 멈추지 않게
+db.prepare("UPDATE agent_messages SET status = 'failed', reply = '서버 재시작으로 처리 중단', done_at = ? WHERE status = 'processing'").run(now());
 startScheduler();
 startTelegramBot();
 

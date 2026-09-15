@@ -38,15 +38,22 @@ export async function sendTelegramReport(title: string, mdReport: string): Promi
       buf += (buf ? "\n" : "") + line;
     }
     if (buf) chunks.push(buf);
-    for (const text of chunks) {
+    for (let ci = 0; ci < chunks.length; ci++) {
       const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true }),
+        body: JSON.stringify({ chat_id: chatId, text: chunks[ci], parse_mode: "HTML", disable_web_page_preview: true }),
       });
       if (!res.ok) {
-        // HTML 파싱 실패 시 평문으로 폴백
-        return sendTelegram(`[MyBot] ${title}\n\n${clean}`);
+        // HTML 파싱 실패 시 실패한 청크부터 평문으로 폴백 — 보고서 후반부가 유실되지 않게 청크 단위로 전송
+        const plain = clean.split("\n");
+        let buf2 = ci === 0 ? `[MyBot] ${title}\n\n` : "";
+        for (const line of plain) {
+          if (buf2.length + line.length + 1 > 3900) { await sendTelegram(buf2); buf2 = ""; }
+          buf2 += (buf2 ? "\n" : "") + line;
+        }
+        if (buf2) await sendTelegram(buf2);
+        return null;
       }
     }
     return null;

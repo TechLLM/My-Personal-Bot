@@ -44,7 +44,7 @@ export function parseIntent(text: string): Intent {
 // 의도별 도구 계약 — 이 지시가 이행됐다고 말하려면 해당 계열 도구 호출이 필요
 export const TOOL_CONTRACT: Record<string, Partial<Record<NonNullable<IntentVerb>, RegExp>>> = {
   routines: { read: /^routine_list$/, delete: /^routine_delete$/, create: /^routine_add$/ },
-  agents: { read: /^agent_list$/, delete: /^agent_delete$/, create: /^agent_create$/, update: /^agent_update$/ },
+  agents: { read: /^agent_list$/, delete: /^agent_delete$/, create: /^agent_create$/, update: /^agent_(update|reorder)$/ },
 };
 
 // 현재 상태 실측 — 모델에게 주입해 "이 데이터만이 사실"임을 고정
@@ -144,7 +144,8 @@ export function verifyMutation(
   if (gated) return { ok: true, pendingApproval: true };
 
   if (intent.verb === "delete") {
-    const gone = intent.all ? after === 0 : after < beforeCount;
+    // "모두 삭제"라도 삭제 불가 대상(CEO 등)이 남을 수 있어 0을 요구하면 안 됨 — 감소 여부로 판정
+    const gone = after < beforeCount;
     if (gone) return { ok: true };
     if (after > beforeCount)
       return { ok: false, detail: `삭제 지시였는데 오히려 ${intent.object}가 ${beforeCount}건 → ${after}건으로 늘었습니다 — 반대 동작(등록)이 수행됐습니다. 이전 동작은 롤백할 수 없으니 사실대로 보고하고, 지금 routine_list로 ID를 확인해 *_delete로 실제 삭제하세요.` };

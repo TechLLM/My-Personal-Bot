@@ -12,7 +12,7 @@ const FILES_DIR = join(import.meta.dir, "..", "..", "data", "files");
 mkdirSync(FILES_DIR, { recursive: true });
 
 const q = {
-  convList: db.prepare("SELECT c.*, a.name AS agent_name, a.avatar AS agent_avatar FROM conversations c LEFT JOIN agents a ON a.id = c.agent_id ORDER BY c.updated_at DESC"),
+  convList: db.prepare("SELECT c.*, a.name AS agent_name, a.avatar AS agent_avatar FROM conversations c LEFT JOIN agents a ON a.id = c.agent_id WHERE c.agent_id IS NULL OR a.id IS NOT NULL ORDER BY c.updated_at DESC"),
   convGet: db.prepare("SELECT c.*, a.name AS agent_name, a.avatar AS agent_avatar FROM conversations c LEFT JOIN agents a ON a.id = c.agent_id WHERE c.id = ?"),
   convInsert: db.prepare("INSERT INTO conversations (id, title, model, mode, agent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"),
   convUpdate: db.prepare("UPDATE conversations SET title = ?, model = ?, updated_at = ? WHERE id = ?"),

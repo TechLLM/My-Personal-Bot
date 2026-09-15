@@ -103,6 +103,19 @@ export interface TeamAgentState {
 
 type Emit = (ev: object) => void;
 
+// 봇 삭제 시 뒤에 남는 고아 참조 정리 — 도구 경로·API 경로 모두 이 함수를 거침
+// (대화·기억·실행 이력은 같은 ID로 복원될 때 다시 연결되도록 보존한다)
+export function deleteAgentRow(id: string) {
+  db.prepare("UPDATE agents SET parent_id = NULL WHERE parent_id = ?").run(id); // 팀원은 최상위로 올림
+  db.prepare("UPDATE agent_messages SET status = 'failed', reply = '봇이 삭제됨', done_at = ? WHERE status IN ('pending', 'processing') AND (from_agent_id = ? OR to_agent_id = ?)").run(now(), id, id);
+  db.prepare("UPDATE approval_requests SET status = 'denied', result = '대상 봇이 삭제됨', resolved_at = ? WHERE status = 'pending' AND agent_id = ?").run(now(), id);
+  for (const g of db.prepare("SELECT id, agent_ids FROM groups").all() as { id: string; agent_ids: string }[]) {
+    const ids = JSON.parse(g.agent_ids) as string[];
+    if (ids.includes(id)) db.prepare("UPDATE groups SET agent_ids = ? WHERE id = ?").run(JSON.stringify(ids.filter((x) => x !== id)), g.id);
+  }
+  db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+}
+
 // 도구 호출별 타임아웃 — 브라우저·MCP 호출이 행 걸려도 run이 영원히 멈추지 않게
 // (라운드 시작점에서만 데드라인을 확인하므로 개별 호출에 별도 상한이 필요)
 export function withToolTimeout<T>(p: Promise<T>, ms = 120_000): Promise<T> {
@@ -222,6 +235,9 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
       const target = findAgentByName(nm);
       if (!target) return `봇 없음: ${nm} — agent_list로 이름을 확인하세요`;
       if (target.id === agentId) return "자기 자신에게는 지시할 수 없습니다";
+      // 봇 간 보고-회신 핑퐁 차단: 대상 봇이 최근 1시간에 이미 많이 실행됐으면 추가 위임 거부
+      const recentRuns = (db.prepare("SELECT COUNT(*) c FROM agent_runs WHERE agent_id = ? AND created_at > datetime('now', '-1 hour')").get(target.id) as any)?.c ?? 0;
+      if (recentRuns >= 15) return `${target.name}: 최근 1시간 동안 ${recentRuns}회 실행됨 — 봇 간 보고 루프 방지를 위해 추가 위임이 차단됐습니다. 지금까지의 결과를 취합해 보고하세요.`;
       const inst = perInstruction(args.instructions, i);
       const runId = uid();
       db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, NULL, ?, 'running', ?)").run(runId, target.id, `[${caller?.name ?? "사용자"} 지시] ${inst.slice(0, 200)}`, now());
@@ -262,6 +278,11 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     const content = String(args.content ?? args.message ?? "").trim();
     if (!content) return "오류: content 필요";
     const caller = agentId ? getAgent(agentId) : null;
+    // 봇 간 메시지 핑퐁 차단: 같은 두 봇 사이의 왕복 메시지가 30분 내 10건을 넘으면 거부
+    if (agentId) {
+      const pairMsgs = (db.prepare(`SELECT COUNT(*) c FROM agent_messages WHERE ((from_agent_id = ? AND to_agent_id = ?) OR (from_agent_id = ? AND to_agent_id = ?)) AND created_at > datetime('now', '-30 minutes')`).get(agentId, target.id, target.id, agentId) as any)?.c ?? 0;
+      if (pairMsgs >= 10) return `${target.name}와(과) 최근 30분간 ${pairMsgs}건의 메시지를 주고받았습니다 — 보고-회신 루프 방지를 위해 차단됐습니다. 지금까지의 내용을 취합해 최종 결과를 보고하세요.`;
+    }
     const msgId = uid();
     db.prepare("INSERT INTO agent_messages (id, from_agent_id, to_agent_id, content, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)")
       .run(msgId, agentId ?? null, target.id, content.slice(0, 2000), now());
@@ -323,7 +344,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     const caller = agentId ? getAgent(agentId) : null;
     if (caller && !caller.is_boss && !(caller.is_lead && target.parent_id === caller.id))
       return `권한 없음: 팀장은 자기 하위 봇만 삭제할 수 있습니다 (${target.name}의 상위 봇이 아님)`;
-    db.prepare("DELETE FROM agents WHERE id = ?").run(target.id);
+    deleteAgentRow(target.id);
     return `봇 삭제됨: ${target.name}`;
   }
   if (name === "agent_reorder") {
@@ -452,7 +473,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
       content: `당신은 전문 에이전트 "${agent.name}"입니다.\n역할: ${agent.role_prompt}\n\n[현재 시각] ${new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul", year: "numeric", month: "long", day: "numeric", weekday: "long", hour: "2-digit", minute: "2-digit" })} (한국 표준시) — "오늘/최근" 표현과 검색 결과의 연도는 반드시 이 시각 기준으로 판별하세요.\n\n지시받은 작업을 수행하세요. 필요하면 도구(web_search, 브라우저, 파일, MCP)를 사용하세요. 브라우저 도구는 사용자의 로그인 세션을 공유하므로 로그인이 필요한 사이트도 열 수 있습니다.\n\n${isBoss
         ? "당신은 관리자(CEO)입니다 — 모든 봇에 대한 전체 권한을 가집니다: agent_create(봇 생성), agent_update(역할·모델 수정·팀장 지정/해제), agent_delete(봇 삭제), agent_direct(임의 봇에게 지시). 조직이 커지면 agent_update의 lead 옵션으로 팀장을 지정하고, 팀장이 하위 봇 생성·지시·취합을 담당하게 하세요."
         : isLead
-          ? "당신은 팀장입니다 — 자기 하위 봇에 대한 관리 권한을 가집니다: agent_create(하위 봇 생성 — 생성된 봇은 당신의 팀 소속, 최대 4개까지. 초과가 필요하면 관리자에게 요청), agent_update(하위 봇의 이름 변경·역할·모델 수정), agent_delete(하위 봇 삭제), agent_direct(하위 봇에게 지시하고 결과를 취합해 지시한 쪽에 보고). 한도에 도달하면 더 만들지 말고 있는 봇들에게 지시하세요."
+          ? `당신은 팀장입니다 — 자기 하위 봇에 대한 관리 권한을 가집니다: agent_create(하위 봇 생성 — 생성된 봇은 당신의 팀 소속, 최대 ${agent.max_children ?? 4}개까지. 초과가 필요하면 관리자에게 요청), agent_update(하위 봇의 이름 변경·역할·모델 수정), agent_delete(하위 봇 삭제), agent_direct(하위 봇에게 지시하고 결과를 취합해 지시한 쪽에 보고). 한도에 도달하면 더 만들지 말고 있는 봇들에게 지시하세요.`
           : "다른 봇과 협업할 수 있습니다: agent_list로 봇 목록 확인, agent_direct로 봇에게 위임하고 결과를 받으세요. 새 봇 생성이 필요하면 관리자(CEO)나 팀장에게 요청하세요 — 봇 생성 권한은 관리자·팀장에게만 있습니다."}\n파일은 공유 작업 디렉터리로 주고받습니다.\n최종 답변은 지시한 쪽에 보고하는 결과 보고서로 작성하세요 — 핵심 결과와 근거를 간결하게.\n결과를 CEO(관리자)에게 전달·보고하려면 agent_list에서 [CEO] 봇 이름을 확인해 agent_direct로 지시하세요 — 대장 세션에 기록돼 사용자에게 보입니다.\n\n[중요] 실제 작업(봇 생성·지시·검색·파일)은 반드시 도구를 호출해 수행하고 결과를 확인한 뒤 완료를 보고하세요. 도구 호출 없이 '했다'고 주장하지 마세요. 지금 작업이 계정 부재로 중단된 경우에만 request_credentials 도구로 사용자 입력 팝업을 띄우세요 — 미리 요청하거나 봇 생성에는 사용하지 마세요. 채팅으로 비밀번호를 받지 마세요. 중요한 업무 노트·결정·진행 상태는 memory_save로 장기기억에 남기거나 agents/${agent.name}/MEMORY.md 파일에 직접 기록하세요 — 작업 시작 시 먼저 읽어 맥락을 잇는 것을 권장합니다.
 
 [보고서 형식 — 반드시 준수] 최종 보고서는 이모지 없이 아래 섹션으로 작성하세요: ## 요약 (1~2문장) / ## 결과 (실제 수집 데이터 — 마크다운 표·목록·링크) / ## 미확인 (확인 못한 항목, 없으면 '없음') / ## 다음 단계 (이어갈 작업, 없으면 '없음'). 도구로 실제 확인한 데이터만 ## 결과에 쓰세요 — 추측이나 기억에 의존한 내용을 사실처럼 쓰지 말고, 확인하지 못한 항목은 반드시 ## 미확인에 명시하세요. 지시받은 범위만 수행·보고하세요 — 이전 작업의 결과를 이번 결과처럼 섞어 쓰지 마세요.`,
@@ -808,6 +829,7 @@ export const agentsRoute = new Hono()
   .post("/", async (c) => {
     const b = await c.req.json();
     if (!b.name) return c.json({ error: "name 필요" }, 400);
+    if (db.prepare("SELECT id FROM agents WHERE name = ?").get(String(b.name).slice(0, 30))) return c.json({ error: "같은 이름의 봇이 이미 있습니다" }, 409);
     if (b.model && !(await listAllModelIds()).has(b.model)) return c.json({ error: `인증된 모델이 아닙니다: ${b.model}` }, 400);
     const id = uid();
     const avatar = typeof b.avatar === "string" && b.avatar.startsWith("face:") ? b.avatar : `face:${id}`;
@@ -821,6 +843,11 @@ export const agentsRoute = new Hono()
     const a = db.prepare("SELECT * FROM agents WHERE id = ?").get(c.req.param("id")) as Agent | null;
     if (!a) return c.json({ error: "not found" }, 404);
     if (b.model && !(await listAllModelIds()).has(b.model)) return c.json({ error: `인증된 모델이 아닙니다: ${b.model}` }, 400);
+    if (b.name && b.name !== a.name) {
+      if (db.prepare("SELECT id FROM agents WHERE name = ? AND id != ?").get(b.name, a.id)) return c.json({ error: "같은 이름의 봇이 이미 있습니다" }, 409);
+      // 장기기억 폴더도 새 이름으로 따라가게 — 안 옮기면 봇이 기억을 잃는다
+      try { renameSync(join(WORK_DIR, "agents", a.name), join(WORK_DIR, "agents", b.name)); } catch {}
+    }
     db.prepare("UPDATE agents SET name = ?, role_prompt = ?, model = ?, avatar = ?, pinned = ?, hidden = ? WHERE id = ?")
       .run(b.name ?? a.name, b.role_prompt ?? a.role_prompt, b.model ?? a.model, b.avatar ?? a.avatar,
         b.pinned === undefined ? a.pinned : (b.pinned ? 1 : 0), b.hidden === undefined ? a.hidden : (b.hidden ? 1 : 0), a.id);
@@ -851,7 +878,7 @@ export const agentsRoute = new Hono()
   .delete("/:id", (c) => {
     const a = db.prepare("SELECT * FROM agents WHERE id = ?").get(c.req.param("id")) as Agent | null;
     if (a?.is_boss) return c.json({ error: "CEO 봇은 삭제할 수 없습니다 — 다른 봇을 먼저 CEO로 지정하세요" }, 400);
-    db.prepare("DELETE FROM agents WHERE id = ?").run(c.req.param("id"));
+    if (a) deleteAgentRow(a.id);
     return c.json({ ok: true });
   })
   .get("/runs", (c) => c.json({ runs: db.prepare("SELECT r.*, a.name as agent_name, a.avatar FROM agent_runs r LEFT JOIN agents a ON a.id = r.agent_id ORDER BY r.created_at DESC LIMIT 50").all() }));

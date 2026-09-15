@@ -34,7 +34,7 @@ export function TeamTrace({ events, done }: { events: TeamEvent[]; done: boolean
   const plan = plans[plans.length - 1];
   const pending = plan?.pending === true;
   const agents = new Map<string, TeamAgentInfo & { toolLog: string[] }>();
-  for (const a of plan?.agents ?? []) agents.set(a.id, { ...a, status: "waiting", toolLog: [] });
+  for (const [i, a] of (plan?.agents ?? []).entries()) agents.set(a.id ?? `plan-${i}`, { ...a, status: "waiting", toolLog: [] });
   for (const e of events) {
     if (e.type === "agent_start" && e.agentId) {
       const a = agents.get(e.agentId);
