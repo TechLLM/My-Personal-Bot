@@ -29,13 +29,49 @@ export function approvalDecision(tool: string): "require" | "allow" {
 // 도구 실행 전 호출 — 승인 필요면 요청을 만들고 안내 문자열 반환, 아니면 null
 export function gateApproval(tool: string, args: Record<string, unknown>, agentId: string | null, resumeTask: string): string | null {
   if (approvalDecision(tool) !== "require") return null;
-  const dup = db.prepare("SELECT id FROM approval_requests WHERE status = 'pending' AND tool = ? AND agent_id IS ?").get(tool, agentId ?? null) as any;
+  const argsJson = canonicalArgs(args);
+  // 최근에 이미 승인·실행된 동일 호출 — 승인 재개 봇의 재시도가 같은 팝업을 반복해 띄우는 것을 차단.
+  // 재실행은 하지 않고 이전 실행 결과를 그대로 돌려준다 (비멱등 도구의 이중 실행 방지).
+  const done = db.prepare("SELECT result FROM approval_requests WHERE status = 'approved' AND tool = ? AND agent_id IS ? AND args = ? AND resolved_at > ? ORDER BY resolved_at DESC LIMIT 1")
+    .get(tool, agentId ?? null, argsJson, now() - 10 * 60_000) as { result: string | null } | undefined;
+  if (done && !(done.result ?? "").startsWith("실행 오류") && !deleteTargetStillExists(tool, args)) {
+    return `이미 승인되어 실행 완료된 동일한 호출입니다 — 이전 실행 결과: ${(done.result ?? "").slice(0, 500)}\n이 호출을 다시 요청하지 말고 작업을 계속하세요.`;
+  }
+  // 최근에 거부된 동일 호출 — 거부를 우회하는 재요청 팝업을 차단
+  const denied = db.prepare("SELECT id FROM approval_requests WHERE status = 'denied' AND tool = ? AND agent_id IS ? AND args = ? AND resolved_at > ? LIMIT 1")
+    .get(tool, agentId ?? null, argsJson, now() - 10 * 60_000);
+  if (denied) {
+    return `사용자가 이 호출(${tool})을 이미 거부했습니다 — 같은 호출을 다시 요청하지 말고, 다른 방법이 있으면 그것으로 진행하고 없으면 거부됐다고 보고하세요.`;
+  }
+  const dup = db.prepare("SELECT id FROM approval_requests WHERE status = 'pending' AND tool = ? AND agent_id IS ? AND args = ?").get(tool, agentId ?? null, argsJson) as any;
   if (!dup) {
     const summary = summarizeArgs(tool, args);
     db.prepare("INSERT INTO approval_requests (id, tool, args, summary, agent_id, resume, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)")
-      .run(uid(), tool, JSON.stringify(args ?? {}), summary, agentId ?? null, resumeTask.slice(0, 500), now());
+      .run(uid(), tool, argsJson, summary, agentId ?? null, resumeTask.slice(0, 500), now());
   }
   return `이 작업(${tool})은 사용자 승인이 필요합니다 — 화면의 승인 팝업에서 승인되면 자동으로 실행되고 작업이 이어집니다. 사용자에게 승인을 기다리고 있다고 알리고, 다른 작업으로 진행하세요. 같은 도구를 다시 호출해 재시도하지 마세요.`;
+}
+
+// 삭제 도구의 재승인 디듀프 예외 — 같은 이름으로 새 대상이 생겼으면 이번 호출은 반복이 아니라 새 삭제다
+function deleteTargetStillExists(tool: string, args: Record<string, unknown>): boolean {
+  if (tool === "routine_delete") {
+    return !!db.prepare("SELECT 1 AS x FROM routines WHERE id = ?").get(String(args.id ?? ""));
+  }
+  if (tool === "agent_delete") {
+    const name = String(args.name ?? "");
+    const norm = name.replace(/\s+/g, "");
+    return (db.prepare("SELECT name FROM agents").all() as { name: string }[])
+      .some((a) => a.name === name || a.name.replace(/\s+/g, "") === norm);
+  }
+  return false;
+}
+
+// 키 순서가 다른 동일 인자를 같은 호출로 인식 — 디듀프·재승인 비교용
+function canonicalArgs(args: Record<string, unknown>): string {
+  const keys = Object.keys(args ?? {}).sort();
+  const out: Record<string, unknown> = {};
+  for (const k of keys) out[k] = (args as any)[k];
+  return JSON.stringify(out);
 }
 
 function summarizeArgs(tool: string, args: Record<string, unknown>): string {

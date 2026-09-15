@@ -316,8 +316,8 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     return rows.length ? rows.map((r) => `- [${r.id}] ${r.name} · ${r.schedule} · ${r.enabled ? "활성" : "비활성"} · 담당: ${r.agent_name ?? "대장"}`).join("\n") : "등록된 루틴 없음";
   }
   if (name === "routine_delete") {
-    db.prepare("DELETE FROM routines WHERE id = ?").run(String(args.id ?? ""));
-    return `루틴 삭제됨: ${args.id}`;
+    const r = db.prepare("DELETE FROM routines WHERE id = ?").run(String(args.id ?? ""));
+    return r.changes ? `루틴 삭제됨: ${args.id}` : `루틴 없음: ${args.id} — 삭제된 것이 아닙니다. routine_list로 실제 ID를 확인한 뒤 다시 호출하세요.`;
   }
   if (name === "web_search") {
     const r = await webSearch(String(args.query ?? ""), 6);
@@ -401,6 +401,19 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
     },
     { role: "user", content: state.task },
   ];
+  // ─── 검증 하네스: 내부 엔티티 지시는 서버가 실측해 주입 → 실행 후 DB 상태로 이행 검증 ───
+  const calledTools = new Set<string>();
+  const gatedTools = new Set<string>();
+  const { parseIntent, snapshot, verifyMutation } = await import("./intent");
+  const intent = parseIntent(state.task);
+  let beforeCount = 0;
+  let beforeIds = new Set<string>();
+  if (intent.object) {
+    const snap = snapshot(intent.object);
+    beforeCount = snap.count;
+    beforeIds = new Set(snap.rows.map((r) => r.id));
+    messages.push({ role: "system", content: `[서버 실측] 현재 ${intent.object} 실제 상태 (방금 DB 조회 — 이 데이터만이 사실):\n${snap.text}` });
+  }
   // 봇당 최대 작업 시간 — 초과 시 수집된 결과로 즉시 보고 마무리
   const deadline = Date.now() + 8 * 60_000;
   try {
@@ -420,6 +433,31 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
         const leaked = parseLeaked(res.content ?? "");
         if (leaked.length) res.toolCalls = leaked;
         else {
+          // 하네스 사후 검증 — 내부 엔티티 변경 지시는 DB 상태 변화로 이행 여부를 확인
+          if (intent.object && intent.verb === "read") {
+            const { undoUnrequestedChanges, mutationExecuted } = await import("./intent");
+            const mutated = mutationExecuted(intent.object, calledTools, gatedTools);
+            const undo = mutated
+              ? await undoUnrequestedChanges(intent.object, beforeIds, (t, a) => callBuiltin(t, a, agent.id, signal, state.depth, trackEmit))
+              : { created: 0, undone: 0, removed: 0 };
+            if (undo.created > 0 || undo.removed > 0) {
+              if (Date.now() < deadline) {
+                trackEmit({ type: "agent_step", agentId: state.id, tool: "실측 검증 — 미요청 변경 정리" });
+                messages.push({ role: "assistant", content: res.content || "" });
+                messages.push({ role: "user", content: `[시스템] 조회 지시였는데 ${intent.object}에 요청받지 않은 변경이 발생했습니다 — 생성 ${undo.created}건 중 ${undo.undone}건을 되돌렸고, 삭제된 ${undo.removed}건은 복구할 수 없습니다. 조회만 수행해 지시에 답하세요.` });
+                continue;
+              }
+            } else if (mutated && res.content) {
+              res.content += `\n\n[서버 검증] 조회 지시였는데 ${intent.object} 변경 계열 도구가 실행됐습니다 — 위 보고에서 상태 변경을 주장하는 부분은 미검증입니다.`;
+            }
+          }
+          const verdict = verifyMutation(intent, beforeCount, calledTools, gatedTools);
+          if (!verdict.ok && Date.now() < deadline) {
+            trackEmit({ type: "agent_step", agentId: state.id, tool: "실측 검증 — 미이행 재지시" });
+            messages.push({ role: "assistant", content: res.content || "" });
+            messages.push({ role: "user", content: `[시스템] DB 실측 검증 결과 지시가 이행되지 않았습니다 — ${verdict.detail}\n현재 실제 상태:\n${snapshot(intent.object).text}` });
+            continue;
+          }
           state.status = "done";
           state.result = res.content;
           return;
@@ -427,6 +465,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
       }
       messages.push({ role: "assistant", content: res.content || "", tool_calls: res.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })) });
       for (const tc of res.toolCalls) {
+        calledTools.add(tc.name);
         trackEmit({ type: "agent_step", agentId: state.id, tool: tc.name });
         const t0 = Date.now();
         let out: string;
@@ -448,6 +487,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
           // 승인 경계 — 위험 액션은 실행하지 않고 사용자 승인 큐에 올림
           const { gateApproval } = await import("./approvals");
           const gate = gateApproval(tc.name, args, agent.id, state.task);
+          if (gate) gatedTools.add(tc.name);
           out = gate ?? (tc.name === "agent_direct" || tc.name === "agent_message"
             ? await callBuiltin(tc.name, args, agent.id, signal, state.depth, trackEmit) // 위임은 자체 시간 상한으로 관리
             : await withToolTimeout(
