@@ -125,6 +125,45 @@ const brave: SearchProvider = {
   },
 };
 
+// Exa — 에이전트용 뉴럴 검색. 의미 기반 랭킹이라 복합·다단계 질의에 강함 (WebWalker 벤치 최상위)
+const exa: SearchProvider = {
+  name: "exa",
+  async search(query, limit) {
+    const key = getSetting("exa_key");
+    if (!key) return [];
+    const res = await fetch("https://api.exa.ai/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": key },
+      body: JSON.stringify({ query, numResults: limit, type: "auto", contents: { text: { maxCharacters: 300 } } }),
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { results?: { title?: string; url: string; text?: string }[] };
+    return (data.results ?? []).filter((r) => r.url?.startsWith("http")).map((r) => ({
+      title: r.title ?? r.url, url: r.url, snippet: (r.text ?? "").slice(0, 300),
+    }));
+  },
+};
+
+// Jina Search (s.jina.ai) — 검색 결과마다 본문까지 읽어서 반환. jina_key 필요.
+// no-content 모드로 제목/URL/스니펫만 받고, 본문은 DeepSearch가 r.jina.ai로 읽는다.
+const jina: SearchProvider = {
+  name: "jina",
+  async search(query, limit) {
+    const key = getSetting("jina_key");
+    if (!key) return [];
+    const res = await fetch(`https://s.jina.ai/${encodeURIComponent(query)}`, {
+      headers: { Authorization: `Bearer ${key}`, "X-Respond-With": "no-content", Accept: "application/json" },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { data?: { title?: string; url?: string; description?: string; content?: string }[] };
+    return (data.data ?? []).filter((r) => r.url?.startsWith("http")).slice(0, limit).map((r) => ({
+      title: r.title ?? r.url ?? "", url: r.url ?? "", snippet: r.description ?? (r.content ?? "").slice(0, 300),
+    }));
+  },
+};
+
 // Headless Chromium 검색 — 실제 브라우저라 봇 차단·JS 의존 검색엔진 우회, 키 불필요
 const headless: SearchProvider = {
   name: "headless",
@@ -180,11 +219,11 @@ cliLog(JSON.stringify(rows));`,
   },
 };
 
-const PROVIDERS: Record<string, SearchProvider> = { bing, ddg, searxng, tavily, brave, headless, ego };
+const PROVIDERS: Record<string, SearchProvider> = { bing, ddg, searxng, tavily, brave, exa, jina, headless, ego };
 
 export async function webSearch(query: string, limit = 6): Promise<{ provider: string; results: SearchResult[] }> {
   const pref = getSetting("search_provider") ?? "auto";
-  const order = pref === "auto" ? ["searxng", "tavily", "brave", "bing", "headless", "ego", "ddg"] : [pref, "bing", "headless", "ego", "ddg"];
+  const order = pref === "auto" ? ["searxng", "tavily", "brave", "exa", "jina", "bing", "headless", "ego", "ddg"] : [pref, "bing", "headless", "ego", "ddg"];
   for (const name of order) {
     const p = PROVIDERS[name];
     try {

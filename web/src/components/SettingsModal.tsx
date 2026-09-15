@@ -135,6 +135,8 @@ export function SettingsModal({ endpoints, models, onClose }: { endpoints: Endpo
             <option value="searxng">SearXNG (셀프호스트)</option>
             <option value="tavily">Tavily API</option>
             <option value="brave">Brave Search API</option>
+            <option value="exa">Exa (뉴럴 검색·에이전트 최적화)</option>
+            <option value="jina">Jina Search (본문 포함)</option>
             <option value="bing">Bing (키 불필요)</option>
             <option value="headless">Headless 브라우저 (키 불필요·차단 우회)</option>
             <option value="ego">ego lite (실제 로그인 브라우저)</option>
@@ -143,6 +145,8 @@ export function SettingsModal({ endpoints, models, onClose }: { endpoints: Endpo
           <Field k="searxng_url" label="SearXNG URL" ph="http://127.0.0.1:8080" />
           <Field k="tavily_key" label="Tavily API 키" />
           <Field k="brave_key" label="Brave API 키" />
+          <Field k="exa_key" label="Exa API 키" ph="exa.ai — 무료 크레딧" />
+          <Field k="jina_key" label="Jina API 키" ph="jina.ai — 무료 10M 토큰" />
         </section>
 
         <section className="mb-5 space-y-2.5">

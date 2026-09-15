@@ -174,6 +174,18 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
         const stillForm = await page.locator('input[type="password"]').count().catch(() => 0);
         return `${stillForm ? "로그인 폼이 아직 남아 있습니다 — 실패했거나 추가 인증이 필요할 수 있습니다." : "로그인 완료."}\n\n${await snapshot(page)}`;
       }
+      case "browser_eval": {
+        // 셀렉터 기반 도구로 안 되는 작업용 — 페이지 컨텍스트에서 임의 JS 실행
+        const script = String(args.script ?? "");
+        if (!script.trim()) return "오류: script 필요";
+        const result = await page.evaluate(async (code) => {
+          try { return { ok: true, value: await new Function(`return (async () => { ${code} })()`)() }; }
+          catch (e) { return { ok: false, error: String(e) }; }
+        }, script);
+        if (!result.ok) return `실행 오류: ${result.error}`;
+        const text = typeof result.value === "string" ? result.value : JSON.stringify(result.value, null, 1);
+        return (text ?? "undefined").slice(0, 6000);
+      }
       case "browser_look": {
         // 텍스트로 안 읽히는 화면(차트·캔버스·이미지 UI) — 스크린샷을 비전 모델이 설명
         const png = await page.screenshot({ type: "png" });
@@ -201,6 +213,7 @@ export const BROWSER_TOOLS = [
   { type: "function", function: { name: "browser_type", description: "입력 필드에 텍스트를 입력합니다", parameters: { type: "object", properties: { selector: { type: "string" }, text: { type: "string" }, enter: { type: "boolean", description: "입력 후 Enter" } }, required: ["selector", "text"] } } },
   { type: "function", function: { name: "browser_scroll", description: "페이지를 스크롤합니다", parameters: { type: "object", properties: { direction: { type: "string", enum: ["down", "up"] } } } } },
   { type: "function", function: { name: "browser_login", description: "설정에 등록된 사이트 계정으로 자동 로그인합니다 (회사 그룹웨어·사내 시스템 등). 로그인 후 browser_read/browser_click으로 정보를 가져오세요.", parameters: { type: "object", properties: { site: { type: "string", description: "설정에 등록한 사이트 이름" } }, required: ["site"] } } },
+  { type: "function", function: { name: "browser_eval", description: "현재 페이지에서 임의 JavaScript를 실행하고 결과를 반환합니다 — 셀렉터 기반 도구로 안 되는 복잡한 조작·데이터 추출에 사용 (예: document.querySelectorAll('a').map(a=>a.href))", parameters: { type: "object", properties: { script: { type: "string", description: "페이지에서 실행할 JS 본문 (반환값이 결과로 옴)" } }, required: ["script"] } } },
   { type: "function", function: { name: "browser_look", description: "현재 페이지를 스크린샷하고 비전 모델이 화면을 설명합니다 — 텍스트로 안 읽히는 차트·캔버스·이미지 기반 UI를 읽을 때 사용", parameters: { type: "object", properties: { question: { type: "string", description: "화면에서 알고 싶은 것 (예: '결재 대기 문서 제목들을 알려줘')" } } } } },
   { type: "function", function: { name: "ego_run", description: "ego lite — 사용자의 실제 로그인된 브라우저에서 JavaScript를 실행합니다 (컴퓨트 유즈). 로그인 필요 사이트·복잡한 상호작용은 이 도구가 가장 강력합니다. script 안에서 쓸 수 있는 헬퍼: openOrReuseTab(url,{wait:true}), snapshotText()(요소를 [ref=N]으로 표시), click('@N' 또는 CSS), typeText(sel,text), fillInput(sel,text), pressKey('Enter'), scrollBy(픽셀), js('JS표현식'), captureScreenshot(), listTabs(), waitForElement(sel). 결과는 반드시 cliLog(...)로 출력하세요. 작업 공간은 자동으로 'mybot-{작업ID}' Space에서 실행됩니다.", parameters: { type: "object", properties: { script: { type: "string", description: "실행할 JS (top-level await 가능). 예: await openOrReuseTab('https://...', {wait:true}); cliLog(await snapshotText());" } }, required: ["script"] } } },
 ];

@@ -1,3 +1,31 @@
+import { getSetting } from "../db";
+
+// Jina Reader (r.jina.ai) — 서버 측 headless Chrome + readability + markdown 정제.
+// 키 없이 20 RPM, 무료 키로 500 RPM. 로컬 fetch보다 품질이 훨씬 좋고 JS 렌더링 페이지도 처리.
+async function readPageJina(url: string, maxChars: number): Promise<{ title: string; text: string } | null> {
+  try {
+    const key = getSetting("jina_key");
+    const res = await fetch(`https://r.jina.ai/${url}`, {
+      headers: {
+        ...(key ? { Authorization: `Bearer ${key}` } : {}),
+        "X-Timeout": "15",
+        Accept: "text/plain",
+      },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) return null;
+    const raw = await res.text();
+    // 기본 출력: "Title: ...\nURL Source: ...\nMarkdown Content:\n..."
+    const title = raw.match(/^Title:\s*(.+)$/m)?.[1]?.trim() ?? "";
+    const bodyStart = raw.indexOf("Markdown Content:");
+    const text = (bodyStart >= 0 ? raw.slice(bodyStart + 17) : raw).trim();
+    if (text.length < 100) return null;
+    return { title, text: text.slice(0, maxChars) };
+  } catch {
+    return null;
+  }
+}
+
 // fetch로 못 읽는 페이지용 — headless Chromium으로 실제 렌더링 후 본문 추출
 async function readPageHeadless(url: string, maxChars: number): Promise<{ title: string; text: string } | null> {
   try {
@@ -21,10 +49,13 @@ async function readPageHeadless(url: string, maxChars: number): Promise<{ title:
   }
 }
 
-// URL → 본문 텍스트 정제. fetch가 실패하거나 내용이 얇으면(JS 렌더링 필요·봇 차단) 실제 브라우저로 재시도 — ego lite 우선, 없으면 내장 headless
+// URL → 본문 텍스트 정제. 로컬 fetch가 실패하거나 내용이 얇으면 품질 순으로 폴백:
+// Jina Reader(서버측 렌더링+정제) → ego lite(실제 로그인 브라우저) → 내장 headless Chromium
 export async function readPage(url: string, maxChars = 6000): Promise<{ title: string; text: string } | null> {
   const viaFetch = await readPageFetch(url, maxChars);
   if (viaFetch) return viaFetch;
+  const viaJina = await readPageJina(url, maxChars);
+  if (viaJina) return viaJina;
   const { egoReadPage } = await import("../ego");
   const viaEgo = await egoReadPage(url, maxChars);
   if (viaEgo) return viaEgo;
