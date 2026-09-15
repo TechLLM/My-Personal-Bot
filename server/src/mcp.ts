@@ -16,6 +16,7 @@ interface Pending {
 
 export class McpClient {
   name: string;
+  confKey: string; // 설정 스냅샷 — 설정이 바뀌면 재연결 판정용
   private proc: Subprocess;
   private nextId = 1;
   private pending = new Map<number, Pending>();
@@ -23,6 +24,7 @@ export class McpClient {
 
   private constructor(conf: McpServerConf) {
     this.name = conf.name;
+    this.confKey = JSON.stringify(conf);
     this.proc = Bun.spawn([conf.command, ...(conf.args ?? [])], {
       stdin: "pipe",
       stdout: "pipe",
@@ -113,17 +115,31 @@ export function getMcpServers(): McpServerConf[] {
 }
 
 export async function mcpTools(): Promise<{ name: string; description?: string; inputSchema?: object }[]> {
+  const confs = getMcpServers();
+  const wanted = new Map(confs.map((c) => [c.name, JSON.stringify(c)]));
+  // 설정에서 제거되거나 내용이 바뀐 서버의 연결을 끊고 도구도 제거 — stale subprocess 방지
+  for (const [name, client] of clients) {
+    if (client.confKey !== wanted.get(name)) {
+      client.close();
+      clients.delete(name);
+      for (const [tn, te] of toolMap) if (te.client === client) toolMap.delete(tn);
+    }
+  }
   const out: { name: string; description?: string; inputSchema?: object }[] = [];
-  for (const conf of getMcpServers()) {
+  for (const conf of confs) {
     try {
       if (!clients.has(conf.name)) clients.set(conf.name, await McpClient.connect(conf));
       const client = clients.get(conf.name)!;
-      for (const t of await client.listTools()) {
+      // 죽은 프로세스면 listTools가 throw → 클라이언트를 버려 다음 호출 때 재연결
+      const tools = await client.listTools();
+      for (const t of tools) {
         toolMap.set(t.name, { client, orig: (t as any)._orig, description: t.description, inputSchema: t.inputSchema });
         out.push(t);
       }
     } catch (e) {
       console.error(`[mcp ${conf.name}] 연결 실패:`, (e as Error).message);
+      const dead = clients.get(conf.name);
+      if (dead) { dead.close(); clients.delete(conf.name); for (const [tn, te] of toolMap) if (te.client === dead) toolMap.delete(tn); }
     }
   }
   return out;

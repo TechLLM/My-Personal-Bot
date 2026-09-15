@@ -15,7 +15,13 @@ export function nextRunAt(schedule: string, from = Date.now()): number | null {
   return null;
 }
 
+const runningRoutines = new Set<string>(); // 같은 루틴의 중복 실행 방지 — 스케줄러와 수동 실행이 겹치지 않게
 export async function runRoutine(r: any): Promise<string> {
+  if (runningRoutines.has(r.id)) return `루틴 "${r.name}"은(는) 이미 실행 중입니다`;
+  runningRoutines.add(r.id);
+  try { return await runRoutineInner(r); } finally { runningRoutines.delete(r.id); }
+}
+async function runRoutineInner(r: any): Promise<string> {
   // 모든 루틴은 봇 세션으로 실행 — 담당 봇, 없으면 대장 봇. 봇의 도구(검색/브라우저/파일/MCP) 사용 가능
   const { ensureBossAgent, getAgent, runAgent } = await import("./team");
   type TeamAgentState = import("./team").TeamAgentState;
@@ -125,6 +131,7 @@ export const routinesRoute = new Hono()
     } else if (!b.schedule || !nextRunAt(b.schedule)) {
       return c.json({ error: "schedule 형식: every:30m, every:2h, daily:08:30" }, 400);
     }
+    if (b.agent_id && !db.prepare("SELECT 1 FROM agents WHERE id = ?").get(String(b.agent_id))) return c.json({ error: "agent_id에 해당하는 봇이 없습니다" }, 400);
     const id = uid();
     db.prepare("INSERT INTO routines (id, name, prompt, schedule, model, agent_id, enabled, trigger_type, email_filter, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)")
       .run(id, b.name, b.prompt, isEmail ? "email" : b.schedule, b.model ?? "main", b.agent_id || null, isEmail ? "email" : "schedule", isEmail ? JSON.stringify(b.email_filter) : null, now());

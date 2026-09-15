@@ -267,9 +267,10 @@ export const sitesRoute = new Hono()
       db.prepare("INSERT INTO site_logins (id, name, url, username, password, created_at) VALUES (?, ?, ?, ?, ?, ?)")
         .run(id, siteName, String(b.url), String(b.username), encryptSecret(String(b.password)), now());
     // 봇 요청으로 온 입력이면 요청을 완료 처리하고 요청한 봇의 작업을 자동 재개
+    // status='pending' 조건으로 원자 전이 — 이미 처리된 요청의 중복 제출이 재개를 다시 발화하지 않게
     if (b.request_id) {
-      db.prepare("UPDATE credential_requests SET status = 'done' WHERE id = ?").run(String(b.request_id));
-      const req = db.prepare("SELECT * FROM credential_requests WHERE id = ?").get(String(b.request_id)) as any;
+      const flipped = db.prepare("UPDATE credential_requests SET status = 'done' WHERE id = ? AND status = 'pending'").run(String(b.request_id));
+      const req = flipped.changes > 0 ? db.prepare("SELECT * FROM credential_requests WHERE id = ?").get(String(b.request_id)) as any : null;
       if (req?.agent_id) {
         const { getAgent, runAgent, agentSessionConvId, defaultModel } = await import("./team");
         const agent = getAgent(req.agent_id);

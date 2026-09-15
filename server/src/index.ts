@@ -63,6 +63,10 @@ db.prepare("UPDATE conversations SET agent_id = ? WHERE agent_id IS NULL").run(b
 db.prepare("UPDATE agent_runs SET status = 'error', result = COALESCE(result, '서버 재시작으로 작업이 중단됨'), finished_at = ? WHERE status = 'running'").run(now());
 // 같은 이유로 처리 중이던 봇 간 메시지도 정리 — 'processing' 상태로 영원히 멈추지 않게
 db.prepare("UPDATE agent_messages SET status = 'failed', reply = '서버 재시작으로 처리 중단', done_at = ? WHERE status = 'processing'").run(now());
+// 재시작 사이에 디스패치가 끊긴 pending 메시지 재배달 — pending은 아직 시작 안 한 큐이므로 전달해야 함
+for (const m of db.prepare("SELECT id FROM agent_messages WHERE status = 'pending'").all() as { id: string }[]) {
+  import("./approvals").then(({ dispatchAgentMessage }) => dispatchAgentMessage(m.id)).catch(() => {});
+}
 startScheduler();
 startTelegramBot();
 

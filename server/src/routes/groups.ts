@@ -39,6 +39,11 @@ export const groupsRoute = new Hono()
     const g = db.prepare("SELECT * FROM groups WHERE id = ?").get(c.req.param("id")) as any;
     if (!g) return c.json({ error: "그룹 없음" }, 404);
     const b = await c.req.json();
+    if (b.agent_ids !== undefined) {
+      // 존재하는 봇만 멤버로 — 삭제된 봇 ID가 멤버로 남지 않게 생성 시와 같은 필터 적용
+      b.agent_ids = (b.agent_ids as string[]).map(String).filter((id: string) => db.prepare("SELECT 1 FROM agents WHERE id = ?").get(id));
+      if (b.agent_ids.length < 1) return c.json({ error: "agent_ids(유효한 봇 1개 이상) 필요" }, 400);
+    }
     db.prepare("UPDATE groups SET name = ?, agent_ids = ? WHERE id = ?").run(
       b.name ? String(b.name).slice(0, 50) : g.name,
       b.agent_ids ? JSON.stringify((b.agent_ids as string[]).slice(0, 6)) : g.agent_ids, g.id);

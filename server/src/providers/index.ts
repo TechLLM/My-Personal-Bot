@@ -54,6 +54,7 @@ export function resolveModel(modelId: string): Resolved {
   const endpoints = getEndpoints();
   if (modelId.startsWith("ep_")) {
     const sep = modelId.indexOf("/");
+    if (sep < 0) throw new Error(`잘못된 모델 ID 형식: ${modelId} — ep_<엔드포인트>/<모델> 형식이어야 합니다`);
     const epId = modelId.slice(3, sep);
     const model = modelId.slice(sep + 1);
     const endpoint = endpoints.find((e) => e.id === epId);
