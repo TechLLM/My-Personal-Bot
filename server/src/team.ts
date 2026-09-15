@@ -137,7 +137,7 @@ function safePath(p: string): string {
 }
 
 export const BUILTIN_TOOLS = [
-  { type: "function", function: { name: "web_search", description: "웹에서 정보를 검색합니다", parameters: { type: "object", properties: { query: { type: "string", description: "검색어" } }, required: ["query"] } } },
+  { type: "function", function: { name: "web_search", description: "웹에서 정보를 검색합니다. '오늘/최근' 정보를 찾을 때는 검색어에 오늘 날짜와 연도를 포함하세요 — 그렇지 않으면 과거 결과가 나올 수 있습니다", parameters: { type: "object", properties: { query: { type: "string", description: "검색어" } }, required: ["query"] } } },
   { type: "function", function: { name: "read_file", description: "팀 작업 디렉터리의 파일을 읽습니다", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } },
   { type: "function", function: { name: "write_file", description: "팀 작업 디렉터리에 파일을 저장합니다", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } } },
   { type: "function", function: { name: "list_files", description: "팀 작업 디렉터리의 파일 목록", parameters: { type: "object", properties: {} } } },
@@ -354,7 +354,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
   const messages: any[] = [
     {
       role: "system",
-      content: `당신은 전문 에이전트 "${agent.name}"입니다.\n역할: ${agent.role_prompt}\n\n지시받은 작업을 수행하세요. 필요하면 도구(web_search, 브라우저, 파일, MCP)를 사용하세요. 브라우저 도구는 사용자의 로그인 세션을 공유하므로 로그인이 필요한 사이트도 열 수 있습니다.\n\n${isBoss
+      content: `당신은 전문 에이전트 "${agent.name}"입니다.\n역할: ${agent.role_prompt}\n\n[현재 시각] ${new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul", year: "numeric", month: "long", day: "numeric", weekday: "long", hour: "2-digit", minute: "2-digit" })} (한국 표준시) — "오늘/최근" 표현과 검색 결과의 연도는 반드시 이 시각 기준으로 판별하세요.\n\n지시받은 작업을 수행하세요. 필요하면 도구(web_search, 브라우저, 파일, MCP)를 사용하세요. 브라우저 도구는 사용자의 로그인 세션을 공유하므로 로그인이 필요한 사이트도 열 수 있습니다.\n\n${isBoss
         ? "당신은 관리자(CEO)입니다 — 모든 봇에 대한 전체 권한을 가집니다: agent_create(봇 생성), agent_update(역할·모델 수정·팀장 지정/해제), agent_delete(봇 삭제), agent_direct(임의 봇에게 지시). 조직이 커지면 agent_update의 lead 옵션으로 팀장을 지정하고, 팀장이 하위 봇 생성·지시·취합을 담당하게 하세요."
         : isLead
           ? "당신은 팀장입니다 — 자기 하위 봇에 대한 관리 권한을 가집니다: agent_create(하위 봇 생성 — 생성된 봇은 당신의 팀 소속), agent_update·agent_delete(하위 봇만), agent_direct(하위 봇에게 지시하고 결과를 취합해 지시한 쪽에 보고)."

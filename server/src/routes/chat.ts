@@ -93,6 +93,9 @@ function recallMemories(agentId: string | null, queryText: string): string[] {
 export function systemPrompt(mode: string, personaId?: string | null, workspaceId?: string | null, agentId?: string | null, queryText = ""): string {
   const base = getSetting("system_prompt") ?? "당신은 MyBot입니다. 정확하고 유용하게 답변하세요. 마크다운을 적절히 사용하세요.";
   let p = base;
+  // 모델의 학습 시점과 실제 날짜가 다를 수 있으므로 현재 시각을 명시 — "오늘/최근" 표현의 기준
+  const todayKst = new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul", year: "numeric", month: "long", day: "numeric", weekday: "long", hour: "2-digit", minute: "2-digit" });
+  p += `\n\n[현재 시각] ${todayKst} (한국 표준시) — "오늘/어제/최근/이번 주" 같은 날짜 표현은 반드시 이 시각을 기준으로 해석하고, 검색·뉴스 결과의 연도도 이 기준으로 판별하세요.`;
   // 이 대화를 담당하는 봇 — 페르소나와 장기 기억이 봇에 귀속됨
   if (agentId) {
     const agent = db.prepare("SELECT * FROM agents WHERE id = ?").get(agentId) as any;
