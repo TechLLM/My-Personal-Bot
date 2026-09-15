@@ -9,7 +9,7 @@ import { webSearch } from "./search";
 import { mcpConfigured, mcpTools, mcpCall } from "./mcp";
 import { BROWSER_TOOLS, browserTool, closeAgentPage } from "./browser";
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 
 // 에이전트 공용 작업 디렉터리 — 파일 도구는 여기로 샌드박스
 export const WORK_DIR = join(import.meta.dir, "..", "data", "workspace");
@@ -187,7 +187,9 @@ function findAgentByName(raw: string): Agent | null {
   if (exact) return exact;
   const nospace = db.prepare("SELECT * FROM agents WHERE REPLACE(name, ' ', '') = ?").get(nm.replace(/\s+/g, "")) as Agent | undefined;
   if (nospace) return nospace;
-  return (db.prepare("SELECT * FROM agents WHERE name LIKE ? OR REPLACE(name,' ','') LIKE ? ORDER BY LENGTH(name) LIMIT 1").get(`%${nm}%`, `%${nm.replace(/\s+/g, "")}%`) as Agent | undefined) ?? null;
+  // 퍼지 폴백 — LIKE 와일드카드(%, _) 이스케이프 필수: "%"만 넘겨도 임의 봇이 매칭됨
+  const esc = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
+  return (db.prepare("SELECT * FROM agents WHERE name LIKE ? ESCAPE '\\' OR REPLACE(name,' ','') LIKE ? ESCAPE '\\' ORDER BY LENGTH(name) LIMIT 1").get(`%${esc(nm)}%`, `%${esc(nm.replace(/\s+/g, ""))}%`) as Agent | undefined) ?? null;
 }
 
 export async function callBuiltin(name: string, args: Record<string, unknown>, agentId?: string | null, signal?: AbortSignal, depth = 0, emit?: (ev: any) => void): Promise<string> {
@@ -304,7 +306,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     const nm = String(args.site ?? "").trim();
     if (!nm) return "오류: site 필요";
     // 이미 저장된 계정이면 팝업 없이 재사용 — 한 번 입력하면 계속 기억됨
-    const saved = db.prepare("SELECT name FROM site_logins WHERE name LIKE ?").get(`%${nm}%`) as any;
+    const saved = db.prepare("SELECT name FROM site_logins WHERE name LIKE ? ESCAPE '\\'").get(`%${nm.replace(/[\\%_]/g, (c) => `\\${c}`)}%`) as any;
     if (saved) return `"${saved.name}" 계정이 이미 저장되어 있습니다 — 팝업 없이 바로 browser_login(site: "${saved.name}")을 호출하세요. 사용자에게 다시 묻지 마세요.`;
     const dup = db.prepare("SELECT id FROM credential_requests WHERE status = 'pending' AND name = ?").get(nm);
     if (!dup) {
@@ -409,12 +411,16 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
   if (name === "read_file") {
     const p = safePath(String(args.path ?? ""));
     if (!existsSync(p)) return `파일 없음: ${args.path} — list_files로 실제 경로를 확인하세요`;
+    // 디렉터리를 넘기면 readFileSync가 EISDIR로 터짐 — 명확한 안내로 대체 (list_files 안내)
+    if (statSync(p).isDirectory()) return `경로가 파일이 아닌 디렉터리입니다: ${args.path} — 하위 항목은 list_files로 확인하세요`;
     const full = readFileSync(p, "utf8");
     const sliced = full.slice(0, 20000);
     return full.length > 20000 ? `${sliced}\n\n…(잘림 — 전체 ${full.length}자 중 20000자. 필요한 부분만 다시 읽거나 요약하세요)` : sliced;
   }
   if (name === "write_file") {
     const p = safePath(String(args.path ?? ""));
+    // 기존 디렉터리에 쓰기를 시도하면 EISDIR — 조기에 명확한 오류 반환
+    if (existsSync(p) && statSync(p).isDirectory()) return `경로가 디렉터리입니다: ${args.path} — 파일명을 지정하세요`;
     mkdirSync(join(p, ".."), { recursive: true }); // 하위 디렉터리 자동 생성 — ENOENT 재시도 방지
     writeFileSync(p, String(args.content ?? ""));
     return `저장됨: ${args.path}`;

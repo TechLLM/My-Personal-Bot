@@ -6,10 +6,17 @@ const KNOWN = ["system_prompt", "search_provider", "searxng_url", "tavily_key", 
   "notify_email", "smtp_host", "smtp_port", "smtp_user", "smtp_pass", "smtp_from", "email_to",
   "imap_host", "imap_port", "imap_user", "imap_pass", "imap_tls"];
 
+// 비밀값 키 — GET에서는 마스킹해 반환 (UI는 "설정됨" 상태만 알면 되고 원문은 볼 필요 없음)
+const SECRET = (k: string) => /(_key|_pass)$/.test(k) || k === "access_code" || k === "telegram_bot_token";
+const mask = (v: string) => (v.length <= 4 ? "••••" : `••••${v.slice(-4)}`);
+
 export const settingsRoute = new Hono()
   .get("/", (c) => {
     const out: Record<string, string> = {};
-    for (const k of KNOWN) out[k] = getSetting(k) ?? "";
+    for (const k of KNOWN) {
+      const v = getSetting(k) ?? "";
+      out[k] = SECRET(k) && v ? mask(v) : v;
+    }
     const memories = db.prepare("SELECT * FROM memories ORDER BY created_at DESC").all();
     const personas = db.prepare("SELECT * FROM personas ORDER BY created_at").all();
     return c.json({ settings: out, memories, personas });
@@ -17,7 +24,10 @@ export const settingsRoute = new Hono()
   .post("/", async (c) => {
     const body = await c.req.json();
     for (const [k, v] of Object.entries(body)) {
-      if (KNOWN.includes(k) && typeof v === "string") setSetting(k, v);
+      if (!KNOWN.includes(k) || typeof v !== "string") continue;
+      // 마스킹된 값이 그대로 돌아오면 "변경 없음" — 덮어쓰지 않음
+      if (SECRET(k)) { const cur = getSetting(k) ?? ""; if (cur && v === mask(cur)) continue; }
+      setSetting(k, v);
     }
     return c.json({ ok: true });
   })

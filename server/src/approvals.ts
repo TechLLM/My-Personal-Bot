@@ -92,6 +92,9 @@ export function dispatchAgentMessage(msgId: string) {
   (async () => {
     const msg = db.prepare("SELECT * FROM agent_messages WHERE id = ?").get(msgId) as any;
     if (!msg || msg.status !== "pending") return;
+    // 원자적 클레임 — pending→processing 전이가 성공한 디스패치만 진행 (동시 디스패치 중복 실행 방지)
+    const claimed = db.prepare("UPDATE agent_messages SET status = 'processing' WHERE id = ? AND status = 'pending'").run(msgId);
+    if (!claimed.changes) return;
     const { getAgent, runAgent, agentSessionConvId, defaultModel } = await import("./team");
     const target = getAgent(msg.to_agent_id);
     if (!target) { db.prepare("UPDATE agent_messages SET status = 'failed', reply = '봇을 찾을 수 없음', done_at = ? WHERE id = ?").run(now(), msgId); return; }
@@ -99,7 +102,6 @@ export function dispatchAgentMessage(msgId: string) {
     const runId = uid();
     db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, NULL, ?, 'running', ?)")
       .run(runId, target.id, `[${sender?.name ?? "사용자"} 메시지] ${msg.content.slice(0, 150)}`, now());
-    db.prepare("UPDATE agent_messages SET status = 'processing' WHERE id = ?").run(msgId);
     const state: any = {
       id: target.id, runId, name: target.name, avatar: target.avatar ?? "🤖", role: target.role_prompt,
       task: `[${sender?.name ?? "사용자"} 봇의 비동기 메시지입니다. 처리하고 회신할 내용을 보고하세요 — 회신은 보낸 봇의 세션에 전달됩니다]\n\n${msg.content}`,

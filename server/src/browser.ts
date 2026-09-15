@@ -166,7 +166,7 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
       case "browser_login": {
         // 설정에 등록된 계정으로 자동 로그인 — 비밀번호는 서버에만 있고 모델 컨텍스트로 안 나감
         const siteName = String(args.site ?? "");
-        const site = db.prepare("SELECT * FROM site_logins WHERE name LIKE ?").get(`%${siteName}%`) as any;
+        const site = db.prepare("SELECT * FROM site_logins WHERE name LIKE ? ESCAPE '\\'").get(`%${siteName.replace(/[\\%_]/g, (c) => `\\${c}`)}%`) as any;
         if (!site) return `등록된 사이트 계정 없음: "${siteName}". request_credentials 도구로 사용자에게 계정 입력을 요청하거나, 설정 → 사이트 계정에서 먼저 등록하세요.`;
         await page.goto(site.url, { waitUntil: "domcontentloaded", timeout: 30000 });
         await page.waitForTimeout(1500);

@@ -146,6 +146,11 @@ export function verifyMutation(
   if (intent.verb === "delete") {
     // "모두 삭제"라도 삭제 불가 대상(CEO 등)이 남을 수 있어 0을 요구하면 안 됨 — 감소 여부로 판정
     const gone = after < beforeCount;
+    if (gone && intent.all && intent.object === "agents") {
+      // 전체 삭제 지시인데 삭제 가능한 대상(비-CEO)이 아직 남아 있으면 부분 이행 — 미완료로 판정
+      const remaining = (db.prepare("SELECT COUNT(*) c FROM agents WHERE is_boss = 0").get() as any)?.c ?? 0;
+      if (remaining > 0) return { ok: false, detail: `전체 삭제 지시였지만 삭제 가능한 봇이 ${remaining}개 남아 있습니다 — agent_list로 남은 봇을 확인하고 모두 삭제하세요.` };
+    }
     if (gone) return { ok: true };
     if (after > beforeCount)
       return { ok: false, detail: `삭제 지시였는데 오히려 ${intent.object}가 ${beforeCount}건 → ${after}건으로 늘었습니다 — 반대 동작(등록)이 수행됐습니다. 이전 동작은 롤백할 수 없으니 사실대로 보고하고, 지금 routine_list로 ID를 확인해 *_delete로 실제 삭제하세요.` };
