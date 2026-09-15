@@ -136,6 +136,8 @@ export function SettingsModal({ endpoints, models, onClose }: { endpoints: Endpo
             <option value="tavily">Tavily API</option>
             <option value="brave">Brave Search API</option>
             <option value="bing">Bing (키 불필요)</option>
+            <option value="headless">Headless 브라우저 (키 불필요·차단 우회)</option>
+            <option value="ego">ego lite (실제 로그인 브라우저)</option>
             <option value="ddg">DuckDuckGo (차단 빈번)</option>
           </select>
           <Field k="searxng_url" label="SearXNG URL" ph="http://127.0.0.1:8080" />

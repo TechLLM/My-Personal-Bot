@@ -125,11 +125,66 @@ const brave: SearchProvider = {
   },
 };
 
-const PROVIDERS: Record<string, SearchProvider> = { bing, ddg, searxng, tavily, brave };
+// Headless Chromium 검색 — 실제 브라우저라 봇 차단·JS 의존 검색엔진 우회, 키 불필요
+const headless: SearchProvider = {
+  name: "headless",
+  async search(query, limit) {
+    const { getBrowser } = await import("../browser");
+    const browser = await getBrowser(true);
+    const page = await browser.newPage();
+    try {
+      await page.route(/\.(png|jpe?g|gif|webp|svg|woff2?|mp4|mp3)$/i, (r) => r.abort()).catch(() => {});
+      await page.goto(`https://www.bing.com/search?q=${encodeURIComponent(query)}&count=${limit * 2}&setlang=ko`, { timeout: 15000, waitUntil: "domcontentloaded" });
+      const rows = await page.evaluate((lim) => {
+        const out: { title: string; url: string; snippet: string }[] = [];
+        for (const li of document.querySelectorAll("li.b_algo")) {
+          const a = li.querySelector("h2 a") as HTMLAnchorElement | null;
+          const p = li.querySelector(".b_caption p, p");
+          if (a?.href?.startsWith("http")) {
+            out.push({ title: (a.textContent ?? "").trim(), url: a.href, snippet: (p?.textContent ?? "").trim() });
+          }
+          if (out.length >= lim) break;
+        }
+        return out;
+      }, limit);
+      // bing.com/ck/a 리다이렉트 래퍼 → 실제 URL
+      return rows.map((r) => ({ ...r, url: decodeBingUrl(r.url) })).filter((r) => r.url.startsWith("http"));
+    } finally {
+      await page.close().catch(() => {});
+    }
+  },
+};
+
+// ego lite 검색 — 사용자의 실제 로그인된 브라우저. 별도 Task Space라 사용자 탭을 건드리지 않음
+const ego: SearchProvider = {
+  name: "ego",
+  async search(query, limit) {
+    const { egoAvailable, egoRun } = await import("../ego");
+    if (!egoAvailable()) return [];
+    const out = await egoRun(
+      `await openOrReuseTab("https://www.bing.com/search?q=" + encodeURIComponent(${JSON.stringify(query)}), { wait: true, timeout: 20 });
+const rows = await js(\`[...document.querySelectorAll("li.b_algo")].slice(0, ${limit}).map(li => ({ title: li.querySelector("h2 a")?.textContent?.trim() ?? "", url: li.querySelector("h2 a")?.href ?? "", snippet: li.querySelector(".b_caption p, p")?.textContent?.trim() ?? "" }))\`);
+await closeTab().catch(() => {});
+cliLog(JSON.stringify(rows));`,
+      "mybot-search",
+      45_000,
+    );
+    try {
+      const line = out.trim().split("\n").filter(Boolean).pop() ?? "[]";
+      return (JSON.parse(line) as { title: string; url: string; snippet: string }[])
+        .map((r) => ({ ...r, url: decodeBingUrl(r.url ?? "") }))
+        .filter((r) => r.url?.startsWith("http"));
+    } catch {
+      return [];
+    }
+  },
+};
+
+const PROVIDERS: Record<string, SearchProvider> = { bing, ddg, searxng, tavily, brave, headless, ego };
 
 export async function webSearch(query: string, limit = 6): Promise<{ provider: string; results: SearchResult[] }> {
   const pref = getSetting("search_provider") ?? "auto";
-  const order = pref === "auto" ? ["searxng", "tavily", "brave", "bing", "ddg"] : [pref, "bing", "ddg"];
+  const order = pref === "auto" ? ["searxng", "tavily", "brave", "bing", "headless", "ego", "ddg"] : [pref, "bing", "headless", "ego", "ddg"];
   for (const name of order) {
     const p = PROVIDERS[name];
     try {

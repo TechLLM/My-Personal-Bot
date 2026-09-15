@@ -101,6 +101,14 @@ async function snapshot(page: Page): Promise<string> {
 // 봇이 쓰는 브라우저 도구
 export async function browserTool(agentKey: string, name: string, args: Record<string, unknown>): Promise<string> {
   try {
+    // ego lite 경유 — 사용자의 실제 로그인된 브라우저, 내장 브라우저를 띄우지 않음
+    if (name === "ego_run") {
+      const { egoAvailable, egoRun } = await import("./ego");
+      if (!egoAvailable()) return "브라우저 오류: ego lite가 설치돼 있지 않습니다 — 내장 browser_* 도구를 사용하세요";
+      const script = String(args.script ?? "");
+      if (!script.trim()) return "오류: script 필요";
+      return await egoRun(script, `mybot-${agentKey}`);
+    }
     const page = await pageFor(agentKey);
     switch (name) {
       case "browser_open": {
@@ -166,6 +174,18 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
         const stillForm = await page.locator('input[type="password"]').count().catch(() => 0);
         return `${stillForm ? "로그인 폼이 아직 남아 있습니다 — 실패했거나 추가 인증이 필요할 수 있습니다." : "로그인 완료."}\n\n${await snapshot(page)}`;
       }
+      case "browser_look": {
+        // 텍스트로 안 읽히는 화면(차트·캔버스·이미지 UI) — 스크린샷을 비전 모델이 설명
+        const png = await page.screenshot({ type: "png" });
+        const { resolveModel } = await import("./providers");
+        const { chatOnce } = await import("./providers/openaiCompat");
+        const { endpoint, model } = resolveModel("main");
+        const q = String(args.question ?? "이 화면에 보이는 내용을 자세히 설명해줘. 텍스트로 읽히지 않는 요소(차트·캔버스·이미지·아이콘)도 포함하고, 읽기 좋게 정리해줘");
+        const res = await chatOnce(endpoint, model, [
+          { role: "user", content: [{ type: "text", text: q }, { type: "image_url", image_url: { url: `data:image/png;base64,${png.toString("base64")}` } }] },
+        ]);
+        return `[화면 분석 — ${await page.title().catch(() => "")}]\n${res.content || "(설명 없음)"}`;
+      }
       default:
         return `알 수 없는 도구: ${name}`;
     }
@@ -181,6 +201,8 @@ export const BROWSER_TOOLS = [
   { type: "function", function: { name: "browser_type", description: "입력 필드에 텍스트를 입력합니다", parameters: { type: "object", properties: { selector: { type: "string" }, text: { type: "string" }, enter: { type: "boolean", description: "입력 후 Enter" } }, required: ["selector", "text"] } } },
   { type: "function", function: { name: "browser_scroll", description: "페이지를 스크롤합니다", parameters: { type: "object", properties: { direction: { type: "string", enum: ["down", "up"] } } } } },
   { type: "function", function: { name: "browser_login", description: "설정에 등록된 사이트 계정으로 자동 로그인합니다 (회사 그룹웨어·사내 시스템 등). 로그인 후 browser_read/browser_click으로 정보를 가져오세요.", parameters: { type: "object", properties: { site: { type: "string", description: "설정에 등록한 사이트 이름" } }, required: ["site"] } } },
+  { type: "function", function: { name: "browser_look", description: "현재 페이지를 스크린샷하고 비전 모델이 화면을 설명합니다 — 텍스트로 안 읽히는 차트·캔버스·이미지 기반 UI를 읽을 때 사용", parameters: { type: "object", properties: { question: { type: "string", description: "화면에서 알고 싶은 것 (예: '결재 대기 문서 제목들을 알려줘')" } } } } },
+  { type: "function", function: { name: "ego_run", description: "ego lite — 사용자의 실제 로그인된 브라우저에서 JavaScript를 실행합니다 (컴퓨트 유즈). 로그인 필요 사이트·복잡한 상호작용은 이 도구가 가장 강력합니다. script 안에서 쓸 수 있는 헬퍼: openOrReuseTab(url,{wait:true}), snapshotText()(요소를 [ref=N]으로 표시), click('@N' 또는 CSS), typeText(sel,text), fillInput(sel,text), pressKey('Enter'), scrollBy(픽셀), js('JS표현식'), captureScreenshot(), listTabs(), waitForElement(sel). 결과는 반드시 cliLog(...)로 출력하세요. 작업 공간은 자동으로 'mybot-{작업ID}' Space에서 실행됩니다.", parameters: { type: "object", properties: { script: { type: "string", description: "실행할 JS (top-level await 가능). 예: await openOrReuseTab('https://...', {wait:true}); cliLog(await snapshotText());" } }, required: ["script"] } } },
 ];
 
 // 등록된 사이트 계정 CRUD — 비밀번호는 목록/조회에서 절대 반환하지 않음 (write-only)
