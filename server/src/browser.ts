@@ -283,7 +283,7 @@ export const sitesRoute = new Hono()
             model: agent.model ?? defaultModel(), status: "running", steps: 0, toolLog: [] as any[], depth: 0,
           };
           (async () => {
-            await runAgent(state as any, agent, () => {}, AbortSignal.timeout(240_000));
+            await runAgent(state as any, agent, () => {}, AbortSignal.timeout(540_000));
             db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
               .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
             const { appendToAgentSession } = await import("./routes/chat");

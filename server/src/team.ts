@@ -99,6 +99,18 @@ export interface TeamAgentState {
 
 type Emit = (ev: object) => void;
 
+// 상한에 잘려 끝난 작업을 봇의 MEMORY.md 맨 앞에 체크포인트로 남김 — 다음 지시 시 봇이 읽고 이어서 진행
+function checkpointMemory(agent: Agent, task: string, result: string) {
+  try {
+    const p = join(WORK_DIR, "agents", agent.name, "MEMORY.md");
+    mkdirSync(join(p, ".."), { recursive: true });
+    const stamp = new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
+    const prev = existsSync(p) ? readFileSync(p, "utf8") : "";
+    const entry = `## ⏸ 시간 제한으로 중단된 작업 — ${stamp}\n- 지시: ${task.replace(/\s+/g, " ").slice(0, 300)}\n- 진행 결과·남은 작업:\n${result.slice(0, 1500)}\n\n---\n\n`;
+    writeFileSync(p, entry + prev);
+  } catch {}
+}
+
 function safePath(p: string): string {
   const clean = p.replace(/^\/+/, "").split("/").filter((s) => s !== "..").join("/");
   return join(WORK_DIR, clean);
@@ -163,7 +175,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     emit?.({ type: "agent_join", agent: { id: target.id, name: target.name, avatar: target.avatar, role: target.role_prompt, task: String(args.instruction ?? "").slice(0, 200), model: target.model, model_label: modelLabel(target.model ?? defaultModel()) } });
     emit?.({ type: "agent_start", agentId: target.id });
     // 외부 신호를 전파해 중첩 실행이 바깥 데드라인을 넘지 않게 함 (내부 4분 상한은 runAgent 자체에도 있음)
-    await runAgent(state, target, emit ?? (() => {}), signal ?? AbortSignal.timeout(240_000));
+    await runAgent(state, target, emit ?? (() => {}), signal ?? AbortSignal.timeout(540_000));
     emit?.({ type: "agent_done", agentId: target.id, status: state.status, result: (state.result ?? "").slice(0, 4000) });
     db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
       .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
@@ -309,15 +321,16 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
     { role: "user", content: state.task },
   ];
   // 봇당 최대 작업 시간 — 초과 시 수집된 결과로 즉시 보고 마무리
-  const deadline = Date.now() + 4 * 60_000;
+  const deadline = Date.now() + 8 * 60_000;
   try {
-    for (let round = 0; round < 8; round++) {
+    for (let round = 0; round < 12; round++) {
       if (Date.now() > deadline) {
         emit({ type: "agent_step", agentId: state.id, tool: "시간 제한 — 결과 정리" });
-        messages.push({ role: "user", content: "작업 시간 제한에 도달했습니다. 도구를 더 사용하지 말고, 지금까지 얻은 결과로 최종 보고서를 즉시 작성하세요." });
+        messages.push({ role: "user", content: "작업 시간 제한에 도달했습니다. 도구를 더 사용하지 말고, 지금까지 얻은 결과로 최종 보고서를 즉시 작성하세요. 완료하지 못한 작업이 있으면 보고서 끝에 '## 남은 작업' 항목으로 구체적으로 적으세요 — 다음 지시에서 이어서 진행하는 데 사용됩니다." });
         const res = await chatOnce(endpoint, model, messages, { signal });
         state.status = "done";
         state.result = res.content || "(시간 제한 — 결과 없음)";
+        checkpointMemory(agent, state.task, state.result);
         return;
       }
       const res = await chatOnce(endpoint, model, messages, { signal, tools });
@@ -373,6 +386,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
       state.result = "(도구 단계 상한에 도달해 작업을 마무리합니다)";
     }
     state.status = "done";
+    checkpointMemory(agent, state.task, state.result);
   } catch (e) {
     state.status = "error";
     state.result = `에이전트 오류: ${(e as Error).message}`;

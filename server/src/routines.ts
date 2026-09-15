@@ -31,7 +31,7 @@ export async function runRoutine(r: any): Promise<string> {
     role: agent.role_prompt, task: `예약된 정기 업무입니다. 수행하고 결과를 보고하세요.\n\n${r.prompt}`,
     model: useModel, status: "running", steps: 0, toolLog: [], depth: 0,
   };
-  await runAgent(state, agent, () => {}, AbortSignal.timeout(300_000));
+  await runAgent(state, agent, () => {}, AbortSignal.timeout(540_000));
   db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
     .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
   const out = state.result ?? "(결과 없음)";
