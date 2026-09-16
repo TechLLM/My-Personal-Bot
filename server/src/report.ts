@@ -1,4 +1,4 @@
-import { resolveModel } from "./providers";
+import { resolveModel, defaultModelId } from "./providers";
 
 // ── 출력 정제: 장식 이모지를 선형 텍스트 마커로 치환하고 나머지 픽토그래픽은 제거 ──
 // 어떤 모델이 만들어도 결과물이 정돈된 형식으로 보이게 하는 공통 정제층
@@ -50,7 +50,7 @@ export async function normalizeReport(agentName: string, task: string, result: s
   const cleaned = cleanOutput(result);
   if (!cleaned.trim()) return "## 요약\n봇이 결과를 생성하지 못했습니다.\n\n## 결과\n없음\n\n## 미확인\n전체 작업 미수행\n\n## 다음 단계\n같은 지시를 다시 보내 확인"; // 빈 원문이면 섹션만 있는 빈 보고서 대신 명시
   try {
-    const { endpoint, model } = resolveModel("fast");
+    const { endpoint, model } = resolveModel(defaultModelId());
     const { chatOnce } = await import("./providers/openaiCompat");
     const res = await chatOnce(endpoint, model, [
       {

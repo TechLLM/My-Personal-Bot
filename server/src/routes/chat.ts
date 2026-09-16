@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { db, uid, now, getSetting } from "../db";
-import { resolveModel } from "../providers";
+import { resolveModel, defaultModelId } from "../providers";
+import type { Intent } from "../intent";
 import { streamChat, type ChatMessage } from "../providers/openaiCompat";
 import { runDeepSearch } from "../deepsearch";
 import { cleanOutput } from "../report";
@@ -149,7 +150,7 @@ async function compactHistory(convId: string, path: Msg[]): Promise<{ summary: s
   const lastCovered = chunk[chunk.length - 1].created_at;
   const transcript = chunk.map((m) => `${m.role === "user" ? "사용자" : "봇"}: ${m.content.slice(0, 1500)}`).join("\n");
   try {
-    const { endpoint, model } = resolveModel("fast");
+    const { endpoint, model } = resolveModel(defaultModelId());
     let out = "";
     for await (const ev of streamChat(endpoint, model, [
       { role: "user", content: `이전 대화 요약과 새 대화를 하나로 합쳐, 대화를 이어가는 데 필요한 사실·결정·진행 상태·미완료 요청만 남긴 요약을 작성하세요 (12줄 이내, 불필요한 수사 제외).\n\n[이전 요약]\n${summary ?? "(없음)"}\n\n[추가 대화]\n${transcript.slice(0, 20000)}` },
@@ -170,7 +171,7 @@ async function compactHistory(convId: string, path: Msg[]): Promise<{ summary: s
 async function extractMemories(userText: string, assistantText: string, agentId?: string | null) {
   if (getSetting("memory_enabled") === "0") return;
   try {
-    const { endpoint, model } = resolveModel("fast");
+    const { endpoint, model } = resolveModel(defaultModelId());
     let out = "";
     for await (const ev of streamChat(endpoint, model, [
       { role: "user", content: `아래 대화 조각에서 나중 대화에 도움될 사실(사용자 정보, 프로젝트 상태, 진행 중인 업무, 결정 사항, 선호 등)만 JSON 배열로 추출. 없으면 []. 각 항목은 한 줄 요약.\n제외할 것: 일회성 작업 결과·그날 조회한 데이터(메일 내용, 결재 현황, 수치 등 — 순간 상태라 나중에 바뀜), 실패·오류·시뮬레이션이라고 언급된 내용, '확인 필요' 등 미검증 주장. 시간이 지나면 틀린 정보가 되는 내용은 절대 저장하지 마세요.\n\n사용자: ${userText.slice(0, 500)}\nAI: ${assistantText.slice(0, 500)}` },
@@ -192,7 +193,7 @@ async function extractMemories(userText: string, assistantText: string, agentId?
 
 async function autoTitle(convId: string, userText: string) {
   try {
-    const { endpoint, model } = resolveModel("fast");
+    const { endpoint, model } = resolveModel(defaultModelId());
     let title = "";
     for await (const ev of streamChat(endpoint, model, [
       { role: "user", content: `다음 사용자 메시지를 대표하는 대화 제목을 15자 이내 한국어 명사구로만 출력. 따옴표 없이.\n\n${userText.slice(0, 300)}` },
@@ -254,7 +255,7 @@ export const chatRoute = new Hono()
   .post("/stream", async (c) => {
     const body = await c.req.json();
     const signal = c.req.raw.signal;
-    const reqModel = body.model ?? "main";
+    const reqModel = body.model ?? defaultModelId();
     const mode = body.mode ?? "auto";
 
     let convId = body.conversationId as string | undefined;
@@ -460,8 +461,10 @@ export const chatRoute = new Hono()
             const { BROWSER_TOOLS, browserTool, closeAgentPage } = await import("../browser");
             const { BUILTIN_TOOLS, MANAGE_TOOLS, callBuiltin, getAgent, withToolTimeout } = await import("../team");
             const convAgent = getAgent(conv?.agent_id);
-            const openaiTools: any[] = [...BUILTIN_TOOLS, ...(convAgent?.is_boss || convAgent?.is_lead ? MANAGE_TOOLS : []), ...BROWSER_TOOLS];
-            if (mcpConfigured()) {
+            // CLI 어댑터 모델은 네이티브 도구 호출이 없음 — 도구 목록·검증 루프를 건너뛰고 단발 응답으로
+            const toolsCapable = endpoint.caps?.tools !== false;
+            const openaiTools: any[] = toolsCapable ? [...BUILTIN_TOOLS, ...(convAgent?.is_boss || convAgent?.is_lead ? MANAGE_TOOLS : []), ...BROWSER_TOOLS] : [];
+            if (toolsCapable && mcpConfigured()) {
               const tools = await mcpTools();
               openaiTools.push(...tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } })));
             }
@@ -481,7 +484,7 @@ export const chatRoute = new Hono()
             // ─── 검증 하네스: 지시 의도 파싱 → 내부 엔티티는 서버가 실측해 주입 ───
             // 모델이 목록·수량을 지어내지 못하게 DB 실측 상태를 미리 고정
             const { parseIntent, snapshot, verifyMutation, TOOL_CONTRACT } = await import("../intent");
-            const intent = parseIntent(userMsg?.content ?? "");
+            const intent: Intent = toolsCapable ? parseIntent(userMsg?.content ?? "") : { verb: null, object: null, all: false };
             let beforeCount = 0;
             let beforeIds = new Set<string>();
             if (intent.object) {

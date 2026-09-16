@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { db, uid, now } from "./db";
+import { defaultModelId } from "./providers";
 
 // 스케줄 형식: "every:30m" | "every:2h" | "daily:08:30"
 export function nextRunAt(schedule: string, from = Date.now()): number | null {
@@ -26,7 +27,7 @@ async function runRoutineInner(r: any): Promise<string> {
   const { ensureBossAgent, getAgent, runAgent } = await import("./team");
   type TeamAgentState = import("./team").TeamAgentState;
   const agent = (r.agent_id ? getAgent(r.agent_id) : null) ?? ensureBossAgent();
-  const useModel = agent.model ?? r.model ?? "main";
+  const useModel = agent.model ?? r.model ?? defaultModelId();
 
   const runId = uid();
   db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, NULL, ?, 'running', ?)")
@@ -134,7 +135,7 @@ export const routinesRoute = new Hono()
     if (b.agent_id && !db.prepare("SELECT 1 FROM agents WHERE id = ?").get(String(b.agent_id))) return c.json({ error: "agent_id에 해당하는 봇이 없습니다" }, 400);
     const id = uid();
     db.prepare("INSERT INTO routines (id, name, prompt, schedule, model, agent_id, enabled, trigger_type, email_filter, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)")
-      .run(id, b.name, b.prompt, isEmail ? "email" : b.schedule, b.model ?? "main", b.agent_id || null, isEmail ? "email" : "schedule", isEmail ? JSON.stringify(b.email_filter) : null, now());
+      .run(id, b.name, b.prompt, isEmail ? "email" : b.schedule, b.model ?? defaultModelId(), b.agent_id || null, isEmail ? "email" : "schedule", isEmail ? JSON.stringify(b.email_filter) : null, now());
     return c.json({ routine: db.prepare("SELECT * FROM routines WHERE id = ?").get(id) });
   })
   .post("/:id/toggle", (c) => {

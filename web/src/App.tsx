@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, streamChat, runTeam, mybotFetch, type Agent, type Conversation, type Endpoint, type Message, type Model, type TeamPlanTask, type SiteRequest, type Group, type ApprovalRequest } from "./api";
+import { api, streamChat, runTeam, mybotFetch, type Agent, type Conversation, type Message, type Model, type TeamPlanTask, type SiteRequest, type Group, type ApprovalRequest } from "./api";
 import { Sidebar } from "./components/Sidebar";
 import { Composer, type Mode, type Persona } from "./components/Composer";
 import { MessageItem } from "./components/MessageItem";
@@ -20,7 +20,7 @@ export default function App() {
   const [workspaces, setWorkspaces] = useState<{id:string;name:string}[]>([]);
   const [workspaceId, setWorkspaceId] = useState<string>("");
   const [skills, setSkills] = useState<{id:string;name:string;prompt:string}[]>([]);
-  const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
+  
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [convId, setConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -58,8 +58,8 @@ export default function App() {
   useEffect(() => {
     api.models().then((d) => {
       setModels(d.models);
-      setEndpoints(d.endpoints);
-      if (d.models.length && !d.models.find((m) => m.id === "main")) setModel(d.models[0].id);
+
+      if (d.models.length && !d.models.find((m) => m.id === model)) setModel(d.models[0].id);
     }).catch(() => {});
     mybotFetch("/api/personas").then((r) => r.json()).then((d) => {
       setPersonas(d.personas);
@@ -453,7 +453,7 @@ export default function App() {
           </div>
         )}
       </main>
-      {settingsOpen && <SettingsModal endpoints={endpoints} models={models} onClose={() => { setSettingsOpen(false); api.models().then((d) => { setModels(d.models); setEndpoints(d.endpoints); }); mybotFetch("/api/settings").then((r) => r.json()).then((d) => setDefaultModel(d.settings?.default_model ?? "")).catch(() => {}); }} />}
+      {settingsOpen && <SettingsModal models={models} onClose={() => { setSettingsOpen(false); api.models().then((d) => { setModels(d.models); }).catch(() => {}); mybotFetch("/api/settings").then((r) => r.json()).then((d) => setDefaultModel(d.settings?.default_model ?? "")).catch(() => {}); }} />}
       {credRequests[0] && (
         <CredentialModal
           request={credRequests[0]}

@@ -1,4 +1,5 @@
 import type { Endpoint } from "./index";
+import { responsesChatOnce, responsesStream, geminiChatOnce, geminiStream, cliChatOnce, cliStream } from "./adapters";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -24,6 +25,12 @@ export async function chatOnce(
   messages: any[],
   opts: { signal?: AbortSignal; tools?: { type: string; function: { name: string; description?: string; parameters?: object } }[]; toolChoice?: string | object } = {},
 ): Promise<ChatResult> {
+  // kind별 어댑터 디스패치 — responses(codex OAuth) / gemini(OAuth) / cli(로컬 브릿지)
+  switch (endpoint.kind) {
+    case "responses": return responsesChatOnce(endpoint, model, messages, { signal: opts.signal, tools: opts.tools });
+    case "gemini": return geminiChatOnce(endpoint, model, messages, { signal: opts.signal, tools: opts.tools });
+    case "cli": return cliChatOnce(endpoint, model, messages, { signal: opts.signal });
+  }
   // tool_choice 객체 형식은 프록시마다 다름 — airoute는 Responses식 평탄 형식만 받아 nested 형식을 400으로 거부.
   // 거부되면 tool_choice 없이 재시도 (호출 지시는 프롬프트·서버 폴백이 커버)
   let toolChoice: unknown = opts.toolChoice ?? "auto";
@@ -79,6 +86,11 @@ export async function* streamChat(
   messages: ChatMessage[],
   opts: { signal?: AbortSignal; temperature?: number; maxTokens?: number } = {},
 ): AsyncGenerator<StreamEvent> {
+  // kind별 어댑터 디스패치
+  if (endpoint.kind === "responses") { yield* responsesStream(endpoint, model, messages, { signal: opts.signal }); return; }
+  if (endpoint.kind === "gemini") { yield* geminiStream(endpoint, model, messages, { signal: opts.signal }); return; }
+  if (endpoint.kind === "cli") { yield* cliStream(endpoint, model, messages, { signal: opts.signal }); return; }
+
   const res = await fetch(`${endpoint.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {

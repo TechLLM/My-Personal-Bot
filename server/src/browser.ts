@@ -213,9 +213,9 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
       case "browser_look": {
         // 텍스트로 안 읽히는 화면(차트·캔버스·이미지 UI) — 스크린샷을 비전 모델이 설명
         const png = await page.screenshot({ type: "png" });
-        const { resolveModel } = await import("./providers");
+        const { resolveModel, defaultModelId } = await import("./providers");
         const { chatOnce } = await import("./providers/openaiCompat");
-        const { endpoint, model } = resolveModel("main");
+        const { endpoint, model } = resolveModel(defaultModelId());
         const q = String(args.question ?? "이 화면에 보이는 내용을 자세히 설명해줘. 텍스트로 읽히지 않는 요소(차트·캔버스·이미지·아이콘)도 포함하고, 읽기 좋게 정리해줘");
         const res = await chatOnce(endpoint, model, [
           { role: "user", content: [{ type: "text", text: q }, { type: "image_url", image_url: { url: `data:image/png;base64,${png.toString("base64")}` } }] },

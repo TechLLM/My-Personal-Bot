@@ -1,20 +1,29 @@
 export interface Model {
-  id: string;
+  id: string;            // "provider/model" 형식
   label: string;
   provider: string;
   providerName: string;
-  virtual?: boolean;
+  tools?: boolean;
   vision: boolean;
   reasoning: boolean;
   image: boolean;
 }
 
-export interface Endpoint {
+export interface ProviderCard {
   id: string;
   name: string;
-  baseUrl: string;
-  builtin: boolean;
-  hasKey: boolean;
+  kind: string;
+  authType: "apikey" | "oauth" | "cli" | "none";
+  authLabel: string;
+  doc?: string;
+  custom?: boolean;
+  enabled: boolean;
+  authed: boolean;
+  source?: string | null;   // 자격증명 출처: 설정|opencode|codex|gemini|keychain|env|cli|로컬
+  expired?: boolean;
+  hasManualKey?: boolean;
+  baseUrl?: string;
+  staticModels: string[];
 }
 
 export interface Conversation {
@@ -73,7 +82,14 @@ const j = (r: Response) => {
 
 export const api = {
   health: () => mybotFetch("/api/health").then(j),
-  models: () => mybotFetch("/api/models").then(j) as Promise<{ models: Model[]; endpoints: Endpoint[] }>,
+  models: () => mybotFetch("/api/models").then(j) as Promise<{ models: Model[] }>,
+  providers: () => mybotFetch("/api/models/providers").then(j) as Promise<{ providers: ProviderCard[] }>,
+  testProvider: (id: string) => mybotFetch(`/api/models/providers/${id}/test`, { method: "POST" }).then(j) as Promise<{ ok: boolean; ms?: number; detail?: string; error?: string }>,
+  setProviderKey: (id: string, key: string) => mybotFetch(`/api/models/providers/${id}/key`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key }) }).then(j),
+  toggleProvider: (id: string) => mybotFetch(`/api/models/providers/${id}/toggle`, { method: "POST" }).then(j),
+  addCustomProvider: (p: { id: string; name?: string; baseUrl: string; apiKey?: string; models?: string[] }) =>
+    mybotFetch("/api/models/providers/custom", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) }).then(j),
+  deleteCustomProvider: (id: string) => mybotFetch(`/api/models/providers/custom/${id}`, { method: "DELETE" }).then(j),
   conversations: () => mybotFetch("/api/chat/conversations").then(j) as Promise<{ conversations: Conversation[] }>,
   conversation: (id: string) => mybotFetch(`/api/chat/conversations/${id}`).then(j) as Promise<{ conversation: Conversation; messages: Message[] }>,
   renameConversation: (id: string, patch: { title?: string; model?: string }) =>
@@ -82,9 +98,7 @@ export const api = {
   createConversation: (body: { agentId?: string; model?: string; from_conv?: string }) =>
     mybotFetch("/api/chat/conversations", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(j) as Promise<{ conversation: Conversation }>,
   selectMessage: (id: string) => mybotFetch(`/api/chat/messages/${id}/select`, { method: "POST" }).then(j) as Promise<{ messages: Message[] }>,
-  addEndpoint: (ep: { id: string; name?: string; baseUrl: string; apiKey?: string }) =>
-    mybotFetch("/api/models/endpoints", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(ep) }).then(j),
-  deleteEndpoint: (id: string) => mybotFetch(`/api/models/endpoints/${id}`, { method: "DELETE" }).then(j),
+
   agents: () => mybotFetch("/api/agents").then(j) as Promise<{ agents: Agent[] }>,
   agentsRunning: () => mybotFetch("/api/agents/running").then(j) as Promise<{ running: { id: string; tool: string | null }[] }>,
   addAgent: (a: { name: string; role_prompt: string; model?: string; avatar?: string }) =>

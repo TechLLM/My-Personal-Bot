@@ -33,10 +33,9 @@ export function ModelPicker({ models, value, onChange }: { models: Model[]; valu
     return list;
   }, [models, provider, filter]);
 
-  const virtual = filtered.filter((m) => m.virtual);
   const groups = useMemo(() => {
     const g = new Map<string, Model[]>();
-    for (const m of filtered.filter((x) => !x.virtual)) {
+    for (const m of filtered) {
       const ns = nsOf(m);
       if (!g.has(ns)) g.set(ns, []);
       g.get(ns)!.push(m);
@@ -99,12 +98,6 @@ export function ModelPicker({ models, value, onChange }: { models: Model[]; valu
             />
           </div>
           <div className="max-h-[50vh] overflow-y-auto p-1">
-            {virtual.length > 0 && (
-              <>
-                <div className="px-2 py-1 text-[10px] font-semibold uppercase text-zinc-500">스마트 라우트</div>
-                {virtual.map((m) => <Row key={m.id} m={m} value={value} pick={pick} />)}
-              </>
-            )}
             {groups.map(([ns, ms]) => (
               <div key={ns}>
                 <button
@@ -135,10 +128,10 @@ function Row({ m, value, pick }: { m: Model; value: string; pick: (id: string) =
     >
       <span className="truncate">{name}</span>
       <span className="ml-auto flex shrink-0 gap-1">
-        {m.virtual && <span className="rounded bg-amber-900/40 px-1 text-[9px] text-amber-300">AUTO</span>}
         {m.reasoning && <span className="rounded bg-violet-900/40 px-1 text-[9px] text-violet-300">THINK</span>}
         {m.vision && <span className="rounded bg-emerald-900/40 px-1 text-[9px] text-emerald-300">EYE</span>}
-        {m.provider !== "airoute" && <span className="rounded bg-zinc-800 px-1 text-[9px] text-zinc-400">{m.provider}</span>}
+        {m.tools === false && <span className="rounded bg-zinc-800 px-1 text-[9px] text-zinc-500">TXT</span>}
+        <span className="rounded bg-zinc-800 px-1 text-[9px] text-zinc-400">{m.providerName || m.provider}</span>
       </span>
     </button>
   );
