@@ -55,6 +55,15 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  // 설정 변경은 봇·루틴·모델·페르소나 전반에 영향 — 모달 닫을 때 전부 다시 불러와 새로고침 없이 반영
+  const reloadAll = useCallback(() => {
+    api.models().then((d) => setModels(d.models)).catch(() => {});
+    mybotFetch("/api/settings").then((r) => r.json()).then((d) => setDefaultModel(d.settings?.default_model ?? "")).catch(() => {});
+    mybotFetch("/api/personas").then((r) => r.json()).then((d) => setPersonas(d.personas)).catch(() => {});
+    refreshConversations();
+    refreshAgents();
+  }, [refreshConversations, refreshAgents]);
+
   useEffect(() => {
     api.models().then((d) => {
       setModels(d.models);
@@ -466,7 +475,7 @@ export default function App() {
           </div>
         )}
       </main>
-      {settingsOpen && <SettingsModal models={models} onClose={() => { setSettingsOpen(false); api.models().then((d) => { setModels(d.models); }).catch(() => {}); mybotFetch("/api/settings").then((r) => r.json()).then((d) => setDefaultModel(d.settings?.default_model ?? "")).catch(() => {}); }} />}
+      {settingsOpen && <SettingsModal models={models} onClose={() => { setSettingsOpen(false); reloadAll(); }} />}
       {credRequests[0] && (
         <CredentialModal
           request={credRequests[0]}

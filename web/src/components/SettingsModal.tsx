@@ -97,8 +97,9 @@ function ProviderRow({ p, onChanged }: { p: ProviderCard; onChanged: () => void 
   );
 }
 
-export function SettingsModal({ models, onClose }: { models: Model[]; onClose: () => void }) {
+export function SettingsModal({ models: initialModels, onClose }: { models: Model[]; onClose: () => void }) {
   const [section, setSection] = useState<Section>("providers");
+  const [models, setModels] = useState<Model[]>(initialModels); // 모달 내부 모델 목록 — 프로바이더 변경 시 즉시 갱신
   const [s, setS] = useState<Record<string, string>>({});
   const [memories, setMemories] = useState<any[]>([]);
   const [memOpen, setMemOpen] = useState(false);
@@ -133,8 +134,11 @@ export function SettingsModal({ models, onClose }: { models: Model[]; onClose: (
   };
 
   const loadProviders = () => api.providers().then((d) => setProviders(d.providers)).catch(() => {});
+  // 프로바이더 변경은 모델 목록에도 영향 — 카드와 모델 드롭다운을 함께 갱신
+  const refreshProviders = () => { loadProviders(); api.models().then((d) => setModels(d.models)).catch(() => {}); };
   const load = () => {
     mybotFetch("/api/settings").then((r) => r.json()).then((d) => { setS(d.settings); setMemories(d.memories); setPersonas(d.personas); }).catch(() => {});
+    api.models().then((d) => setModels(d.models)).catch(() => {});
     mybotFetch("/api/workspaces").then((r) => r.json()).then((d) => setWorkspaces(d.workspaces)).catch(() => {});
     mybotFetch("/api/skills").then((r) => r.json()).then((d) => setSkills(d.skills)).catch(() => {});
     mybotFetch("/api/routines").then((r) => r.json()).then((d) => setRoutines(d.routines)).catch(() => {});
@@ -199,7 +203,7 @@ export function SettingsModal({ models, onClose }: { models: Model[]; onClose: (
                   API 키는 설정에 직접 입력하거나 로컬 자격증명 저장소에서 자동 인식됩니다.
                 </p>
                 <div className="space-y-2">
-                  {providers.map((p) => <ProviderRow key={p.id} p={p} onChanged={loadProviders} />)}
+                  {providers.map((p) => <ProviderRow key={p.id} p={p} onChanged={refreshProviders} />)}
                 </div>
 
                 {/* 커스텀 프로바이더 등록 */}
@@ -217,7 +221,7 @@ export function SettingsModal({ models, onClose }: { models: Model[]; onClose: (
                       if (!cpId.trim() || !cpUrl.trim()) return;
                       const r: any = await api.addCustomProvider({ id: cpId, name: cpName || undefined, baseUrl: cpUrl, apiKey: cpKey || undefined, models: cpModels ? cpModels.split(",").map((x) => x.trim()).filter(Boolean) : undefined }).catch((e) => ({ error: e.message }));
                       if (r?.error) setCpMsg(`실패: ${r.error}`);
-                      else { setCpMsg(""); setCpId(""); setCpName(""); setCpUrl(""); setCpKey(""); setCpModels(""); loadProviders(); }
+                      else { setCpMsg(""); setCpId(""); setCpName(""); setCpUrl(""); setCpKey(""); setCpModels(""); refreshProviders(); }
                     }}>등록</button>
                     {cpMsg && <span className="text-[10px] text-red-400">{cpMsg}</span>}
                   </div>
