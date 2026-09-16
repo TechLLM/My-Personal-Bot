@@ -91,6 +91,10 @@ export function resolveModel(modelId: string): Resolved {
 
   const def = findProvider(providerId);
   if (!def) throw new Error(`알 수 없는 프로바이더: ${providerId}`);
+  // 모델 id 대소문자 교정 — "minimax-m3"처럼 소문자로 써도 등록된 실제 id("MiniMax-M3")로 해석
+  const known = def.models ?? [];
+  const ci = known.find((k) => k.toLowerCase() === model.toLowerCase());
+  if (ci) model = ci;
   return { endpoint: endpointFor(def), model };
 }
 

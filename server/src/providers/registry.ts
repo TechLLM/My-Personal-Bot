@@ -72,7 +72,8 @@ export const PROVIDER_PRESETS: ProviderDef[] = [
       "claude-fable-5-thinking-high", "claude-fable-5-thinking-xhigh", "gpt-5.6-sol-high", "gpt-5.6-luna-high", "gemini-3.7-flash-high"],
   },
   {
-    id: "zai", name: "Z.AI GLM", kind: "openai", baseUrl: "https://api.z.ai/api/paas/v4",
+    // 코딩플랜 엔드포인트 — opencode의 zai 키는 코딩플랜이라 /paas/v4에서 1113 잔액 오류가 난다
+    id: "zai", name: "Z.AI GLM", kind: "openai", baseUrl: "https://api.z.ai/api/coding/paas/v4",
     authType: "apikey", authLabel: "API 키", env: "ZAI_API_KEY", ocKeys: ["zai", "zai-coding-plan"], keychain: "zhipu/apikey",
     doc: "https://z.ai — 코딩 플랜·API 키",
     models: ["glm-5.3", "glm-5-turbo", "glm-5.3-flash", "glm-5v-turbo", "glm-5", "glm-5.1", "glm-5.2"],
