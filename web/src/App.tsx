@@ -105,6 +105,7 @@ export default function App() {
   const loadConversation = useCallback((id: string) => {
     setConvId(id);
     setPendingAgent(null);
+    refreshConversations(); // 목록이 오래돼 현재 대화가 없으면 담당 봇 칩이 안 뜸 — 열 때마다 갱신
     api.conversation(id).then((d) => {
       setMessages(d.messages);
       if (d.conversation.model) setModel(d.conversation.model);
@@ -115,7 +116,7 @@ export default function App() {
         tokens_in: null, tokens_out: null, created_at: Date.now(),
       }]);
     });
-  }, []);
+  }, [refreshConversations]);
 
   const newConversation = useCallback(() => {
     setConvId(null);
@@ -403,10 +404,22 @@ export default function App() {
 
         <div ref={scrollRef} className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-3xl px-4 py-6">
-            {empty && !pendingAgent && (
+            {/* 봇 로비는 "세션 없음"일 때만 — convId가 있는 빈 세션(새 대화·/new)까지 덮으면 봇 선택이 풀린 것처럼 보임 */}
+            {empty && !convId && !pendingAgent && (
               <BotLobby agents={agents} agentsLoaded={agentsLoaded} models={models} defaultModel={defaultModel} routineAgentIds={routineAgentIds} createSignal={createSignal} onSelect={selectBot} onRefresh={refreshAgents} />
             )}
-            {empty && pendingAgent && (
+            {empty && convId && (
+              <div className="mt-[25vh] text-center">
+                {currentConv?.agent_name && (
+                  <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-zinc-800 text-zinc-300">
+                    <AgentIcon name={currentConv.agent_name} seed={currentConv.agent_avatar} size={22} />
+                  </div>
+                )}
+                <h1 className="text-lg font-semibold text-zinc-200">{currentConv?.agent_name ?? currentConv?.title ?? "새 세션"}</h1>
+                <p className="mt-1 text-xs text-zinc-500">이 봇에게 업무를 지시하세요</p>
+              </div>
+            )}
+            {empty && !convId && pendingAgent && (
               <div className="mt-[25vh] text-center">
                 <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-zinc-800 text-zinc-300">
                   <AgentIcon name={pendingAgent.name} seed={pendingAgent.avatar} size={22} />

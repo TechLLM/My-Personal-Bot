@@ -82,7 +82,7 @@ export function BotLobby({
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-w-2xl mx-auto">
         {list.map((a) => (
-          <div key={a.id} className="group rounded-xl border border-zinc-800 px-3.5 py-3 hover:bg-zinc-900 hover:border-zinc-700 transition-colors">
+          <div key={a.id} onClick={() => onSelect(a)} className="group cursor-pointer rounded-xl border border-zinc-800 px-3.5 py-3 hover:bg-zinc-900 hover:border-zinc-700 transition-colors" title={`${a.role_prompt || "범용 봇"} — 클릭하면 이 봇과 대화`}>
             <div className="flex items-center gap-2">
               <AgentIcon name={a.name} seed={a.avatar} size={18} className="shrink-0" />
               <span className="font-medium text-sm text-zinc-200 truncate">{a.name}</span>
@@ -92,7 +92,7 @@ export function BotLobby({
               {routineAgentIds.has(a.id) && (
                 <AlarmClock size={11} className="shrink-0 text-amber-400/80" />
               )}
-              <span className="ml-auto flex shrink-0 items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+              <span className="ml-auto flex shrink-0 items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
                 <button
                   className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
                   title="핀 고정 — 목록 상단에 표시"
