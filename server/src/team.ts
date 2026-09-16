@@ -160,7 +160,7 @@ export const BUILTIN_TOOLS = [
   { type: "function", function: { name: "web_search", description: "웹에서 정보를 검색합니다. '오늘/최근' 정보를 찾을 때는 검색어에 오늘 날짜와 연도를 포함하세요 — 그렇지 않으면 과거 결과가 나올 수 있습니다", parameters: { type: "object", properties: { query: { type: "string", description: "검색어" } }, required: ["query"] } } },
   { type: "function", function: { name: "read_file", description: "팀 작업 디렉터리의 파일을 읽습니다", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } },
   { type: "function", function: { name: "write_file", description: "팀 작업 디렉터리에 파일을 저장합니다", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } } },
-  { type: "function", function: { name: "list_files", description: "팀 작업 디렉터리의 파일 목록", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "list_files", description: "팀 작업 디렉터리의 파일 목록 — path를 주면 하위 디렉터리 안을 봅니다 (디렉터리인지 모를 때 read_file 대신 이걸 먼저 쓰세요)", parameters: { type: "object", properties: { path: { type: "string", description: "하위 디렉터리 경로 (비우면 작업 디렉터리 루트)" } } } } },
   { type: "function", function: { name: "routine_add", description: "예약 작업(루틴)을 등록합니다. 사용자가 반복·정기 작업을 요청할 때 사용하세요. 이 봇의 담당 업무로 등록됩니다. trigger: schedule(시간 기반) 또는 email(메일 도착 기반 — IMAP 설정 필요, email_from/email_subject 필터)", parameters: { type: "object", properties: { name: { type: "string", description: "루틴 이름" }, prompt: { type: "string", description: "매번 실행할 작업 지시" }, schedule: { type: "string", description: "every:30m | every:Nh | daily:HH:MM (trigger=schedule일 때)" }, trigger: { type: "string", description: "schedule | email" }, email_from: { type: "string", description: "트리거할 발신자 이메일 (trigger=email)" }, email_subject: { type: "string", description: "트리거할 제목 키워드 (trigger=email)" } }, required: ["name", "prompt"] } } },
   { type: "function", function: { name: "routine_list", description: "등록된 예약 작업 목록", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "routine_delete", description: "예약 작업 삭제 (id는 routine_list로 확인)", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } },
@@ -174,7 +174,7 @@ export const BUILTIN_TOOLS = [
 
 // 봇 관리 권한 — 관리자(CEO)는 전체, 팀장은 자기 하위 봇만 생성·수정·삭제 가능
 export const MANAGE_TOOLS = [
-  { type: "function", function: { name: "agent_create", description: "새 전문 봇을 만듭니다. 작업이 커지면 전문 봇을 만들어 위임하세요. 생성한 봇은 당신의 하위 봇이 됩니다", parameters: { type: "object", properties: { name: { type: "string", description: "봇 이름" }, role: { type: "string", description: "전문가 정체 — '20년 경력의 <분야> 시니어 전문가' 형식으로 전문 분야·책임 범위·완료 기준을 명확히 기술" }, model: { type: "string", description: "provider/model 형식 (비우면 기본 모델)" } }, required: ["name", "role"] } } },
+  { type: "function", function: { name: "agent_create", description: "새 전문 봇을 만듭니다. 작업이 커지면 전문 봇을 만들어 위임하세요. 생성한 봇은 당신의 하위 봇이 됩니다. 여러 봇을 한 번에 만들 때는 bots 배열을 사용하세요", parameters: { type: "object", properties: { name: { type: "string", description: "봇 이름" }, role: { type: "string", description: "전문가 정체 — '20년 경력의 <분야> 시니어 전문가' 형식으로 전문 분야·책임 범위·완료 기준을 명확히 기술" }, model: { type: "string", description: "provider/model 형식 (비우면 기본 모델)" }, bots: { type: "array", items: { type: "object", properties: { name: { type: "string" }, role: { type: "string" }, model: { type: "string" } }, required: ["name", "role"] }, description: "한 번에 여러 봇 생성 — [{name, role, model?}] 배열" } } } } },
   { type: "function", function: { name: "agent_update", description: "봇의 이름·역할 지침·모델을 수정하거나 팀장으로 지정/해제합니다 (관리자는 자신 포함 전체, 팀장은 자기 하위 봇만. lead·max_children 지정은 관리자만 가능)", parameters: { type: "object", properties: { name: { type: "string", description: "대상 봇의 현재 이름" }, new_name: { type: "string", description: "변경할 새 이름" }, role: { type: "string" }, model: { type: "string" }, lead: { type: "boolean", description: "true=팀장 지정, false=팀장 해제 (관리자만)" }, max_children: { type: "number", description: "팀장이 생성 가능한 하위 봇 한도 (관리자만, 기본 4)" } }, required: ["name"] } } },
   { type: "function", function: { name: "agent_delete", description: "봇을 삭제합니다. 관리자는 모든 봇, 팀장은 자기 하위 봇만 삭제 가능 (관리자 봇은 삭제 불가)", parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] } } },
   { type: "function", function: { name: "agent_reorder", description: "봇 목록의 표시 순서를 변경합니다 (관리자만 가능). names에 위쪽부터 표시할 봇 이름을 순서대로 나열하세요 — 빠진 봇은 뒤에 기존 순서로 이어집니다. 팀장을 옮기면 그 팀원 봇들도 함께 이동합니다", parameters: { type: "object", properties: { names: { type: "array", items: { type: "string" }, description: "위쪽부터 표시할 봇 이름 목록" } }, required: ["names"] } } },
@@ -193,6 +193,25 @@ function findAgentByName(raw: string): Agent | null {
   return (db.prepare("SELECT * FROM agents WHERE name LIKE ? ESCAPE '\\' OR REPLACE(name,' ','') LIKE ? ESCAPE '\\' ORDER BY LENGTH(name) LIMIT 1").get(`%${esc(nm)}%`, `%${esc(nm.replace(/\s+/g, ""))}%`) as Agent | undefined) ?? null;
 }
 
+// 인자 별칭 정규화 — 모델이 스키마와 다른 키(to/agent/target/bot/task/message)로 호출해도 흡수
+// 스키마 불일치 호출이 "도구 없음" 오류로 오인되는 것을 방지
+const pickStr = (args: Record<string, unknown>, ...keys: string[]) => {
+  for (const k of keys) { const v = args[k]; if (typeof v === "string" && v.trim()) return v.trim(); }
+  return "";
+};
+// 봇 대상 추출 — 단일(name/to/agent/target/bot) 또는 배열(names/targets/bots/agents, 요소는 문자열 또는 {name})
+const pickTargets = (args: Record<string, unknown>): string[] => {
+  for (const k of ["names", "targets", "bots", "agents"]) {
+    const v = args[k];
+    if (Array.isArray(v)) {
+      const out = v.map((x) => typeof x === "string" ? x : String((x as any)?.name ?? "")).map((s) => s.trim()).filter(Boolean);
+      if (out.length) return out;
+    }
+  }
+  const single = pickStr(args, "name", "to", "agent", "target", "bot");
+  return single ? [single] : [];
+};
+
 export async function callBuiltin(name: string, args: Record<string, unknown>, agentId?: string | null, signal?: AbortSignal, depth = 0, emit?: (ev: any) => void): Promise<string> {
   // --- 봇 협업·관리 도구 ---
   if (name === "agent_list") {
@@ -203,42 +222,62 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
       : "등록된 봇 없음";
   }
   if (name === "agent_create") {
-    const nm = String(args.name ?? "").trim();
-    if (!nm) return "오류: name 필요";
     const caller = agentId ? getAgent(agentId) : null;
     if (caller && !caller.is_boss && !caller.is_lead) return "권한 없음: 봇 생성은 관리자(CEO) 또는 팀장만 가능합니다 — 관리자에게 요청하세요";
-    // 팀장은 하위 봇 최대 4개(또는 CEO가 지정한 max_children) — 초과는 관리자(CEO)만 가능
+    // 인자 정규화 — 단일(name+role) 또는 배치(bots:[{name,role,model}] / names:[…]+role|roles 공유)
+    const specs: { name: string; role: string; model?: string }[] = [];
+    const rawArr = (Array.isArray(args.bots) ? args.bots : Array.isArray(args.agents) ? args.agents : null) as any[] | null;
+    if (rawArr) {
+      for (const b of rawArr) {
+        if (typeof b === "string") specs.push({ name: b, role: String(args.role ?? ""), model: args.model ? String(args.model) : undefined });
+        else if (b && typeof b === "object") specs.push({ name: String(b.name ?? ""), role: String(b.role ?? args.role ?? ""), model: b.model ? String(b.model) : (args.model ? String(args.model) : undefined) });
+      }
+    } else if (Array.isArray(args.names)) {
+      const roles = Array.isArray(args.roles) ? args.roles : [];
+      (args.names as unknown[]).forEach((n, i) => specs.push({ name: String(n), role: String(roles[i] ?? args.role ?? ""), model: args.model ? String(args.model) : undefined }));
+    } else {
+      specs.push({ name: pickStr(args, "name", "bot_name", "agent"), role: String(args.role ?? args.persona ?? ""), model: args.model ? String(args.model) : undefined });
+    }
+    const list = specs.filter((s) => s.name.trim());
+    if (!list.length) return '오류: 생성할 봇 이름이 없습니다 — {"name":"메일분석봇","role":"20년 경력의 메일 분석 시니어"} 형식 또는 {"bots":[{"name":"봇1","role":"..."},{"name":"봇2","role":"..."}]} 배치 형식으로 호출하세요';
+    // 팀장은 하위 봇 최대 4개(또는 CEO가 지정한 max_children) — 배치는 누적 합산으로 검사
     if (caller && !caller.is_boss) {
       const cap = caller.max_children ?? 4;
       const kids = (db.prepare("SELECT COUNT(*) c FROM agents WHERE parent_id = ?").get(caller.id) as any).c;
-      if (kids >= cap) return `하위 봇 한도 도달: 팀장은 최대 ${cap}개까지 생성 가능 (현재 ${kids}개) — 추가 생성은 관리자(CEO)에게 요청하세요`;
+      if (kids + list.length > cap) return `하위 봇 한도 초과: 팀장은 최대 ${cap}개까지 생성 가능 (현재 ${kids}개, 요청 ${list.length}개) — 초과분은 관리자(CEO)에게 요청하세요`;
     }
-    const id = uid();
-    // 팀장이 만든 봇은 팀장 바로 아래(기존 팀원 뒤)에 배치 — 그 외는 목록 끝
-    let sortOrder = ((db.prepare("SELECT COALESCE(MAX(sort_order), 0) m FROM agents").get() as any).m) + 1;
-    if (caller && !caller.is_boss && caller.is_lead) {
-      const sib = (db.prepare("SELECT MAX(sort_order) m FROM agents WHERE parent_id = ?").get(caller.id) as any).m;
-      const insertAt = (sib ?? caller.sort_order ?? sortOrder - 1) + 1;
-      db.prepare("UPDATE agents SET sort_order = sort_order + 1 WHERE sort_order >= ?").run(insertAt);
-      sortOrder = insertAt;
+    const results: string[] = [];
+    for (const s of list) {
+      const id = uid();
+      // 팀장이 만든 봇은 팀장 바로 아래(기존 팀원 뒤)에 배치 — 그 외는 목록 끝
+      let sortOrder = ((db.prepare("SELECT COALESCE(MAX(sort_order), 0) m FROM agents").get() as any).m) + 1;
+      if (caller && !caller.is_boss && caller.is_lead) {
+        const sib = (db.prepare("SELECT MAX(sort_order) m FROM agents WHERE parent_id = ?").get(caller.id) as any).m;
+        const insertAt = (sib ?? caller.sort_order ?? sortOrder - 1) + 1;
+        db.prepare("UPDATE agents SET sort_order = sort_order + 1 WHERE sort_order >= ?").run(insertAt);
+        sortOrder = insertAt;
+      }
+      const rawRole = s.role.trim();
+      // 시니어 전문가 프레임 — 봇 생성 주체가 뭐라 쓰든 수행 기준은 서버가 보장
+      const rolePrompt = rawRole && !rawRole.includes("[전문가 수행 기준]")
+        ? `${rawRole}\n\n[전문가 수행 기준] 당신은 해당 분야 20년 경력의 시니어 실무자입니다. 결과는 도구로 실제 확인·검증한 것만 보고하고, 추측 보고는 금지하며, 확인하지 못한 것은 반드시 '미확인'으로 표기합니다.`
+        : rawRole;
+      db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, is_boss, parent_id, sort_order, created_at) VALUES (?, ?, ?, ?, ?, NULL, 1, 0, ?, ?, ?)")
+        .run(id, uniqueName(s.name.slice(0, 30)), rolePrompt, String(s.model ?? defaultModel()), `face:${id}`, agentId ?? null, sortOrder, now());
+      const created = getAgent(id)!;
+      results.push(`봇 생성됨: ${created.name} (모델: ${modelLabel(created.model ?? defaultModel())}, 상위: ${caller?.name ?? "관리자"})`);
     }
-    const rawRole = String(args.role ?? "").trim();
-    // 시니어 전문가 프레임 — 봇 생성 주체가 뭐라 쓰든 수행 기준은 서버가 보장
-    const rolePrompt = rawRole && !rawRole.includes("[전문가 수행 기준]")
-      ? `${rawRole}\n\n[전문가 수행 기준] 당신은 해당 분야 20년 경력의 시니어 실무자입니다. 결과는 도구로 실제 확인·검증한 것만 보고하고, 추측 보고는 금지하며, 확인하지 못한 것은 반드시 '미확인'으로 표기합니다.`
-      : rawRole;
-    db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, is_boss, parent_id, sort_order, created_at) VALUES (?, ?, ?, ?, ?, NULL, 1, 0, ?, ?, ?)")
-      .run(id, uniqueName(nm.slice(0, 30)), rolePrompt, String(args.model ?? defaultModel()), `face:${id}`, agentId ?? null, sortOrder, now());
-    const created = getAgent(id)!;
-    return `봇 생성됨: ${created.name} (모델: ${modelLabel(created.model ?? defaultModel())}, 상위: 당신) — agent_direct로 즉시 업무를 지시하세요.`;
+    return `${results.join("\n")} — agent_direct로 즉시 업무를 지시하세요.`;
   }
   if (name === "agent_direct") {
     // names 배열로 여러 봇에 동시 지시 가능 (병렬 팬아웃 — 그록 멀티에이전트 대응)
-    const names: string[] = Array.isArray(args.names) ? args.names.map(String).filter(Boolean) : [String(args.name ?? "")].filter(Boolean);
-    if (!names.length) return "오류: name 또는 names 필요";
+    // 대상·지시 인자는 별칭을 허용 — 모델이 to/agent/target/task 등으로 불러도 동작해야 한다
+    const names = pickTargets(args);
+    if (!names.length) return '오류: 지시할 봇 이름이 없습니다 — {"name":"봇이름","instruction":"업무 지시"} 형식으로 호출하세요 (name·to·agent·target 또는 names·targets 배열 지원)';
     if (depth >= 2) return "위임 깊이 제한(2단계) — 이 봇에게 직접 수행하라고 지시하세요";
     const caller = agentId ? getAgent(agentId) : null;
-    const instruction = String(args.instruction ?? "");
+    const instruction = pickStr(args, "instruction", "task", "content", "message");
+    if (!instruction && !Array.isArray(args.instructions)) return '오류: 지시 내용이 없습니다 — instruction(또는 task) 필드로 구체적인 업무를 적어주세요';
     const perInstruction = (v: unknown, i: number) => Array.isArray(args.instructions) ? String(args.instructions[i] ?? instruction) : instruction;
 
     const runOne = async (nm: string, i: number): Promise<string> => {
@@ -284,11 +323,11 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
   }
   if (name === "agent_message") {
     // 비동기 핸드오프 — 보낸 봇은 기다리지 않고, 받는 봇이 백그라운드로 처리 후 회신
-    const target = findAgentByName(String(args.to ?? args.name ?? ""));
-    if (!target) return `봇 없음: ${args.to ?? args.name} — agent_list로 이름을 확인하세요`;
+    const target = findAgentByName(pickStr(args, "to", "name", "agent", "target", "bot"));
+    if (!target) return `봇 없음: ${pickStr(args, "to", "name", "agent", "target", "bot") || "(이름 없음)"} — agent_list로 이름을 확인하세요`;
     if (target.id === agentId) return "자기 자신에게는 보낼 수 없습니다";
-    const content = String(args.content ?? args.message ?? "").trim();
-    if (!content) return "오류: content 필요";
+    const content = pickStr(args, "content", "message", "instruction", "task");
+    if (!content) return "오류: content(메시지 내용) 필요";
     const caller = agentId ? getAgent(agentId) : null;
     // 봇 간 메시지 핑퐁 차단: 같은 두 봇 사이의 왕복 메시지가 30분 내 10건을 넘으면 거부
     if (agentId) {
@@ -311,8 +350,8 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     return "장기기억에 저장했습니다 — 세션이 압축되거나 끝나도 유지됩니다";
   }
   if (name === "request_credentials") {
-    const nm = String(args.site ?? "").trim();
-    if (!nm) return "오류: site 필요";
+    const nm = pickStr(args, "site", "name", "service", "service_name");
+    if (!nm) return "오류: site(서비스 이름) 필요";
     // 이미 저장된 계정이면 팝업 없이 재사용 — 한 번 입력하면 계속 기억됨
     const saved = db.prepare("SELECT name FROM site_logins WHERE name LIKE ? ESCAPE '\\'").get(`%${nm.replace(/[\\%_]/g, (c) => `\\${c}`)}%`) as any;
     if (saved) return `"${saved.name}" 계정이 이미 저장되어 있습니다 — 팝업 없이 바로 browser_login(site: "${saved.name}")을 호출하세요. 사용자에게 다시 묻지 마세요.`;
@@ -324,8 +363,8 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     return `사용자 화면에 "${nm}" 계정 입력 팝업을 띄웠습니다. 입력된 계정은 암호화되어 저장되고, 사용자가 입력을 완료하면 작업이 자동으로 재개됩니다. 이번 응답은 "화면의 팝업에 계정을 입력해 달라"고만 안내하고 마치세요 — 절대 채팅으로 비밀번호를 직접 받지 마세요.`;
   }
   if (name === "agent_update") {
-    const target = findAgentByName(String(args.name ?? ""));
-    if (!target) return `봇 없음: ${args.name}`;
+    const target = findAgentByName(pickStr(args, "name", "to", "agent", "target", "bot"));
+    if (!target) return `봇 없음: ${pickStr(args, "name", "to", "agent", "target", "bot") || "(이름 없음)"} — agent_list로 이름을 확인하세요`;
     const caller = agentId ? getAgent(agentId) : null;
     if (caller && !caller.is_boss && !(caller.is_lead && target.parent_id === caller.id))
       return `권한 없음: 팀장은 자기 하위 봇만 수정할 수 있습니다 (${target.name}의 상위 봇이 아님)`;
@@ -350,8 +389,8 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     return `봇 수정됨: ${target.name}${renamed && renamed !== target.name ? ` → ${renamed}` : ""}${args.lead !== undefined && (!caller || caller.is_boss) ? (args.lead ? " — 팀장 지정" : " — 팀장 해제") : ""}${args.max_children !== undefined && (!caller || caller.is_boss) ? ` — 하위 봇 한도 ${mc}개` : ""}`;
   }
   if (name === "agent_delete") {
-    const target = findAgentByName(String(args.name ?? ""));
-    if (!target) return `봇 없음: ${args.name}`;
+    const target = findAgentByName(pickStr(args, "name", "to", "agent", "target", "bot"));
+    if (!target) return `봇 없음: ${pickStr(args, "name", "to", "agent", "target", "bot") || "(이름 없음)"} — agent_list로 이름을 확인하세요`;
     if (target.is_boss) return "관리자(CEO) 봇은 삭제할 수 없습니다";
     const caller = agentId ? getAgent(agentId) : null;
     if (caller && !caller.is_boss && !(caller.is_lead && target.parent_id === caller.id))
@@ -390,50 +429,70 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
   if (name === "routine_add") {
     const { nextRunAt } = await import("./routines");
     const isEmail = String(args.trigger ?? "") === "email";
+    let schedule = pickStr(args, "schedule", "every", "interval", "time", "cron");
+    // 접두사 없는 값 정규화 — "30m"→every:30m, "09:00"→daily:09:00 (모델이 형식을 빼먹는 경우 흡수)
+    if (schedule && !schedule.includes(":")) { if (/^\d+[mhd]$/.test(schedule)) schedule = `every:${schedule}`; }
+    else if (schedule && /^\d{1,2}:\d{2}$/.test(schedule)) schedule = `daily:${schedule}`;
     if (isEmail) {
       if (!args.email_from && !args.email_subject) return "오류: 이메일 트리거는 email_from 또는 email_subject가 필요합니다";
     } else {
-      const schedule = String(args.schedule ?? "");
-      if (!nextRunAt(schedule)) return `schedule 형식 오류 — every:30m, every:2h, daily:08:30 같은 형식으로 입력하세요 (받은 값: ${schedule})`;
+      if (!nextRunAt(schedule)) return `schedule 형식 오류 — every:30m, every:2h, daily:08:30 같은 형식으로 입력하세요 (받은 값: ${schedule || "(없음)"})`;
     }
+    const prompt = pickStr(args, "prompt", "task", "instruction", "content");
+    if (!prompt) return "오류: prompt(매번 실행할 작업 지시)가 필요합니다";
     const id = uid();
     const emailFilter = isEmail ? JSON.stringify({ from: args.email_from ?? null, subject: args.email_subject ?? null }) : null;
     db.prepare("INSERT INTO routines (id, name, prompt, schedule, model, agent_id, enabled, trigger_type, email_filter, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)")
-      .run(id, String(args.name ?? "루틴").slice(0, 50), String(args.prompt ?? ""), isEmail ? "email" : String(args.schedule), null, agentId ?? null, isEmail ? "email" : "schedule", emailFilter, now());
-    return `루틴 등록됨: ${args.name} (${isEmail ? `메일 트리거 — 발신:${args.email_from ?? "전체"} 제목:${args.email_subject ?? "전체"}` : args.schedule}) — 담당 봇: ${agentId ? "이 봇" : "대장"}${isEmail ? ". IMAP 설정(imap_host/user/pass)이 서버 설정에 있어야 동작합니다" : ""}`;
+      .run(id, String(args.name ?? "루틴").slice(0, 50), prompt, isEmail ? "email" : schedule, null, agentId ?? null, isEmail ? "email" : "schedule", emailFilter, now());
+    return `루틴 등록됨: ${args.name} (${isEmail ? `메일 트리거 — 발신:${args.email_from ?? "전체"} 제목:${args.email_subject ?? "전체"}` : schedule}) — 담당 봇: ${agentId ? "이 봇" : "대장"}${isEmail ? ". IMAP 설정(imap_host/user/pass)이 서버 설정에 있어야 동작합니다" : ""}`;
   }
   if (name === "routine_list") {
     const rows = db.prepare("SELECT r.id, r.name, r.schedule, r.enabled, a.name agent_name FROM routines r LEFT JOIN agents a ON a.id = r.agent_id ORDER BY r.created_at").all() as any[];
     return rows.length ? rows.map((r) => `- [${r.id}] ${r.name} · ${r.schedule} · ${r.enabled ? "활성" : "비활성"} · 담당: ${r.agent_name ?? "대장"}`).join("\n") : "등록된 루틴 없음";
   }
   if (name === "routine_delete") {
-    const r = db.prepare("DELETE FROM routines WHERE id = ?").run(String(args.id ?? ""));
-    return r.changes ? `루틴 삭제됨: ${args.id}` : `루틴 없음: ${args.id} — 삭제된 것이 아닙니다. routine_list로 실제 ID를 확인한 뒤 다시 호출하세요.`;
+    // id가 없으면 이름으로 해석 — 모델이 id 대신 루틴 이름을 보내는 경우를 흡수
+    let rid = pickStr(args, "id", "routine_id");
+    if (!rid) {
+      const byName = pickStr(args, "name", "routine");
+      if (byName) rid = String((db.prepare("SELECT id FROM routines WHERE name LIKE ? ESCAPE '\\' LIMIT 1").get(`%${byName.replace(/[\\%_]/g, (c) => `\\${c}`)}%`) as any)?.id ?? "");
+    }
+    const r = rid ? db.prepare("DELETE FROM routines WHERE id = ?").run(rid) : { changes: 0 };
+    return r.changes ? `루틴 삭제됨: ${rid}` : `루틴 없음: ${rid || args.id || args.name || "(식별자 없음)"} — 삭제된 것이 아닙니다. routine_list로 실제 ID를 확인한 뒤 다시 호출하세요.`;
   }
   if (name === "web_search") {
-    const r = await webSearch(String(args.query ?? ""), 6);
+    const r = await webSearch(pickStr(args, "query", "q", "keyword", "search"), 6);
     return r.results.length
       ? r.results.map((x, i) => `[${i + 1}] ${x.title}\n${x.url}\n${x.snippet}`).join("\n\n")
       : "검색 결과 없음";
   }
   if (name === "read_file") {
-    const p = safePath(String(args.path ?? ""));
-    if (!existsSync(p)) return `파일 없음: ${args.path} — list_files로 실제 경로를 확인하세요`;
+    const filePath = pickStr(args, "path", "file", "filename", "file_path");
+    const p = safePath(filePath);
+    if (!existsSync(p)) return `파일 없음: ${filePath} — list_files로 실제 경로를 확인하세요`;
     // 디렉터리를 넘기면 readFileSync가 EISDIR로 터짐 — 명확한 안내로 대체 (list_files 안내)
-    if (statSync(p).isDirectory()) return `경로가 파일이 아닌 디렉터리입니다: ${args.path} — 하위 항목은 list_files로 확인하세요`;
+    if (statSync(p).isDirectory()) return `경로가 파일이 아닌 디렉터리입니다: ${filePath} — 하위 항목은 list_files로 확인하세요`;
     const full = readFileSync(p, "utf8");
     const sliced = full.slice(0, 20000);
     return full.length > 20000 ? `${sliced}\n\n…(잘림 — 전체 ${full.length}자 중 20000자. 필요한 부분만 다시 읽거나 요약하세요)` : sliced;
   }
   if (name === "write_file") {
-    const p = safePath(String(args.path ?? ""));
+    const filePath = pickStr(args, "path", "file", "filename", "file_path");
+    const p = safePath(filePath);
     // 기존 디렉터리에 쓰기를 시도하면 EISDIR — 조기에 명확한 오류 반환
-    if (existsSync(p) && statSync(p).isDirectory()) return `경로가 디렉터리입니다: ${args.path} — 파일명을 지정하세요`;
+    if (existsSync(p) && statSync(p).isDirectory()) return `경로가 디렉터리입니다: ${filePath} — 파일명을 지정하세요`;
     mkdirSync(join(p, ".."), { recursive: true }); // 하위 디렉터리 자동 생성 — ENOENT 재시도 방지
     writeFileSync(p, String(args.content ?? ""));
-    return `저장됨: ${args.path}`;
+    return `저장됨: ${filePath}`;
   }
-  if (name === "list_files") return readdirSync(WORK_DIR).join("\n") || "(비어 있음)";
+  if (name === "list_files") {
+    const sub = pickStr(args, "path", "dir", "directory");
+    const p = sub ? safePath(sub) : WORK_DIR;
+    if (!existsSync(p)) return `경로 없음: ${sub || "."} — 상위 항목은 list_files()로 확인하세요`;
+    if (!statSync(p).isDirectory()) return `디렉터리가 아닙니다: ${sub} — 파일은 read_file로 읽으세요`;
+    const entries = readdirSync(p).map((e) => statSync(join(p, e)).isDirectory() ? `${e}/` : e);
+    return entries.join("\n") || "(비어 있음)";
+  }
   return `알 수 없는 도구: ${name}`;
 }
 
