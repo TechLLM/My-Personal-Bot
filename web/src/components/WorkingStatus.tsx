@@ -5,6 +5,18 @@ import type { SearchEvent } from "./SearchTrace";
 // 순환 상태어 — 도구 이벤트가 없을 때 순서대로 돎
 const WORDS = ["Thinking", "Pondering", "Working", "Navigating", "Reading", "Writing", "Synthesizing"];
 
+// PGE 단계 → 상태어 — 파이프라인 진행 위치를 그대로 반영
+export function phaseWord(phase?: string): string | null {
+  if (!phase) return null;
+  if (phase === "plan") return "Planning";
+  if (phase === "exec") return "Working";
+  if (phase === "gen") return "Generating";
+  if (phase === "verify") return "Verifying";
+  if (phase === "verify_done") return "Verified";
+  if (phase === "done") return "Finishing";
+  return null;
+}
+
 // 마지막 도구 이벤트로 현재 상태어 추론 — 실제 무슨 일을 하는지 반영
 export function toolWord(title?: string): string | null {
   const t = title ?? "";
@@ -50,7 +62,9 @@ export function WorkingStatus({ events = [], agent, compact = false }: {
     const t = setInterval(() => setI((v) => v + 1), 1700);
     return () => clearInterval(t);
   }, []);
-  const tw = toolWord([...events].reverse().find((e) => e.title)?.title);
+  // 최신 이벤트 우선 — 단계 이벤트가 있으면 그 위치를, 없으면 도구 이벤트로 추론
+  const lastPhase = [...events].reverse().find((e) => e.type === "phase")?.phase;
+  const tw = phaseWord(lastPhase) ?? toolWord([...events].reverse().find((e) => e.title)?.title);
   const word = tw ?? WORDS[i % WORDS.length];
   return (
     <div className={`flex items-center gap-2 ${compact ? "text-xs" : "text-sm"} text-zinc-400`}>

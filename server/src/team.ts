@@ -530,6 +530,9 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
   }
   // 봇당 최대 작업 시간 — 초과 시 수집된 결과로 즉시 보고 마무리
   const deadline = Date.now() + 8 * 60_000;
+  let evalCount = 0; // PGE 평가-재작업 루프 카운터 — 상한으로 무한 반복 차단
+  const { shouldEvaluate, evaluateResult, EVAL_MAX_ROUNDS } = await import("./evaluate");
+  trackEmit({ type: "agent_phase", agentId: state.id, phase: "exec", label: "작업 실행" });
   try {
     for (let round = 0; round < 12; round++) {
       if (Date.now() > deadline) {
@@ -571,6 +574,22 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
             messages.push({ role: "assistant", content: res.content || "" });
             messages.push({ role: "user", content: `[시스템] DB 실측 검증 결과 지시가 이행되지 않았습니다 — ${verdict.detail}\n현재 실제 상태:\n${snapshot(intent.object).text}` });
             continue;
+          }
+          // ─── PGE 평가 단계 — 실측 검증을 통과한 결과물의 품질을 독립 평가 ───
+          // 미달이면 지적사항과 함께 재작업 (최대 EVAL_MAX_ROUNDS회, 이후 최선 결과를 받음)
+          if (evalCount < EVAL_MAX_ROUNDS
+            && shouldEvaluate(state.task, res.content ?? "", calledTools.size, toolsCapable)
+            && Date.now() < deadline - 30_000) {
+            trackEmit({ type: "agent_phase", agentId: state.id, phase: "verify", label: "결과 검증" });
+            const v = await evaluateResult(endpoint, model, state.task, res.content ?? "", { toolLog: state.toolLog, signal });
+            if (!v.pass) {
+              evalCount++;
+              trackEmit({ type: "agent_step", agentId: state.id, tool: `품질 평가 ${v.score}점 — 보완 재작업` });
+              messages.push({ role: "assistant", content: res.content || "" });
+              messages.push({ role: "user", content: `[시스템] 품질 평가 ${v.score}점(기준 70)으로 미달 — 다음 지적사항을 실제로 보완해 결과물을 다시 작성하세요: ${v.issues.join(" / ") || "지시 이행도 부족"}. 필요하면 도구를 더 사용해도 됩니다.` });
+              continue;
+            }
+            trackEmit({ type: "agent_phase", agentId: state.id, phase: "verify_done", label: `검증 통과 (${v.score}점)` });
           }
           state.status = "done";
           state.result = res.content?.trim() ? res.content : "(빈 응답 — 결과 없음)"; // 빈 결과가 보고서·세션으로 흐르지 않게

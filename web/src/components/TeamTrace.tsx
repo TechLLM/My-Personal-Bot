@@ -16,11 +16,13 @@ export interface TeamAgentInfo {
 }
 
 export interface TeamEvent {
-  type: "team_planning" | "team_plan" | "agent_start" | "agent_step" | "agent_done";
+  type: "team_planning" | "team_plan" | "agent_start" | "agent_step" | "agent_phase" | "agent_done";
   agents?: TeamAgentInfo[];
   pending?: boolean;
   agentId?: string;
   tool?: string;
+  phase?: string;
+  label?: string;
   status?: string;
   result?: string;
 }
@@ -33,18 +35,22 @@ export function TeamTrace({ events, done }: { events: TeamEvent[]; done: boolean
   const plans = events.filter((e) => e.type === "team_plan");
   const plan = plans[plans.length - 1];
   const pending = plan?.pending === true;
-  const agents = new Map<string, TeamAgentInfo & { toolLog: string[] }>();
+  const agents = new Map<string, TeamAgentInfo & { toolLog: string[]; phase?: string }>();
   for (const [i, a] of (plan?.agents ?? []).entries()) agents.set(a.id ?? `plan-${i}`, { ...a, status: "waiting", toolLog: [] });
   for (const e of events) {
     if (e.type === "agent_start" && e.agentId) {
       const a = agents.get(e.agentId);
       if (a) a.status = "running";
+    } else if (e.type === "agent_phase" && e.agentId) {
+      const a = agents.get(e.agentId);
+      if (a) a.phase = e.label ?? e.phase;
     } else if (e.type === "agent_step" && e.agentId) {
       const a = agents.get(e.agentId);
-      if (a) { a.status = "running"; a.toolLog.push(e.tool ?? ""); }
+      // 연속 동일 도구는 중복 표기하지 않음 — 같은 행이 반복 출력되는 것 방지
+      if (a) { a.status = "running"; if (e.tool && a.toolLog[a.toolLog.length - 1] !== e.tool) a.toolLog.push(e.tool); }
     } else if (e.type === "agent_done" && e.agentId) {
       const a = agents.get(e.agentId);
-      if (a) { a.status = e.status ?? "done"; a.result = e.result; }
+      if (a) { a.status = e.status ?? "done"; a.result = e.result; a.phase = undefined; }
     }
   }
 
@@ -70,12 +76,12 @@ export function TeamTrace({ events, done }: { events: TeamEvent[]; done: boolean
               <span className="min-w-0 flex-1 truncate text-zinc-500">{a.role}</span>
               <span className="ml-auto shrink-0 font-mono text-[10px] text-zinc-600">{a.model_label ?? a.model}</span>
               <span className={`shrink-0 ${a.status === "done" ? "text-emerald-400" : a.status === "error" ? "text-red-400" : "text-amber-400"}`}>
-                {a.status === "done" ? "● 완료" : a.status === "error" ? "● 오류" : a.status === "running" ? "◐ 실행 중" : "○ 대기"}
+                {a.status === "done" ? "● 완료" : a.status === "error" ? "● 오류" : a.status === "running" ? `◐ ${a.phase ?? "실행 중"}` : "○ 대기"}
               </span>
             </div>
             <div className="mt-1 text-[11px] text-zinc-500">작업: {a.task}</div>
             {a.toolLog.length > 0 && (
-              <div className="mt-1 text-[10px] text-zinc-600">도구: {a.toolLog.join(" → ")}</div>
+              <div className="mt-1 text-[10px] italic text-zinc-600">도구: {a.toolLog.join(" → ")}</div>
             )}
             {a.result && (
               <button

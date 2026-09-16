@@ -116,7 +116,7 @@ export function MessageItem({
             <span className="ml-auto">{showReasoning ? "▾" : "▸"}</span>
           </button>
           {showReasoning && (
-            <div className="border-t border-zinc-800 px-3 py-2 text-xs text-zinc-400 whitespace-pre-wrap max-h-64 overflow-y-auto">
+            <div className="border-t border-zinc-800 px-3 py-2 text-xs italic text-zinc-500 whitespace-pre-wrap max-h-64 overflow-y-auto">
               {m.reasoning}
             </div>
           )}

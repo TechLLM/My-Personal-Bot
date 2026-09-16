@@ -5,19 +5,27 @@ html, body, #root { height: 100%; }
 body { background: #09090b; color: #e4e4e7; }
 
 .markdown pre {
-  background: #18181b;
-  border: 1px solid #27272a;
+  background: #0d1117;                /* 에디터 다크 — 코드는 구분된 캔버스에 */
+  border: 1px solid #21262d;
+  border-left: 2px solid #38bdf8;     /* 좌측 액센트 — 에디터 gutter 느낌 */
   border-radius: 0.5rem;
   padding: 0.75rem 1rem;
   overflow-x: auto;
   font-size: 0.85rem;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  line-height: 1.55;
 }
+.markdown pre code { font-family: inherit; }
 .markdown code:not(pre code) {
   background: #27272a;
   border-radius: 0.25rem;
   padding: 0.1rem 0.3rem;
   font-size: 0.85em;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
+/* diff 블록 — 추가/삭제 라인을 에디터처럼 색으로 구분 */
+.markdown .hljs-addition { color: #4ade80; background: rgba(74, 222, 128, 0.08); display: inline-block; width: 100%; }
+.markdown .hljs-deletion { color: #f87171; background: rgba(248, 113, 113, 0.08); display: inline-block; width: 100%; }
 .markdown p { margin: 0.5rem 0; }
 .markdown ul, .markdown ol { margin: 0.5rem 0; padding-left: 1.5rem; }
 .markdown ul { list-style: disc; }

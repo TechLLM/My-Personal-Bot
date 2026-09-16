@@ -479,6 +479,12 @@ export const chatRoute = new Hono()
               toolEvents.push(ev);
               send("search", ev);
             };
+            // PGE 단계 이벤트 — 프론트가 분석→실행→생성→검증→완료 타임라인으로 표시
+            const emitPhase = (phase: string, label: string) => {
+              const ev = { type: "phase", phase, label };
+              toolEvents.push(ev);
+              send("search", ev);
+            };
             const calledTools = new Set<string>();
             const gatedTools = new Set<string>(); // 승인 게이트에 걸려 미실행·승인 대기가 된 도구
             // ─── 검증 하네스: 지시 의도 파싱 → 내부 엔티티는 서버가 실측해 주입 ───
@@ -493,6 +499,7 @@ export const chatRoute = new Hono()
               beforeIds = new Set(snap.rows.map((r) => r.id));
               history.push({ role: "system", content: `[서버 실측] 현재 ${intent.object} 실제 상태 (방금 DB에서 조회 — 이 데이터만이 사실이며 여기 없는 항목을 지어내면 안 됩니다):\n${snap.text}` });
             }
+            emitPhase("plan", "지시 분석");
             let popupShown = false; // request_credentials가 실제로 팝업을 생성했는지 (저장 계정 재사용 시 false)
             // 모델이 도구 호출을 텍스트 형식(]<]minimax[><invoke name=…>)으로 새어내면 파싱해 실제 호출로 전환
             const parseLeaked = (text: string): { id: string; name: string; arguments: string }[] => {
@@ -555,9 +562,9 @@ export const chatRoute = new Hono()
               }
               return out;
             };
+            emitPhase("exec", "작업 실행");
             for (let round = 0; round < 4; round++) {
               if (Date.now() > deadline) break;
-              emitTool(`봇 작업 중… (라운드 ${round + 1})`);
               const res = await chatOnce(endpoint, realModel, history, { signal, tools: openaiTools });
               if (!res.toolCalls?.length) {
                 const leaked = parseLeaked(res.content ?? "");
@@ -576,6 +583,7 @@ export const chatRoute = new Hono()
             if (toolEvents.length) searchMeta = { ...(searchMeta ?? {}), type: searchMeta?.type ?? "tools", events: toolEvents };
             if (browserUsed) closeAgentPage(browserKey).catch(() => {});
 
+          emitPhase("gen", "답변 생성");
           for await (const ev of streamChat(endpoint, realModel, history, { signal })) {
             if (ev.type === "content" && ev.text) {
               content += ev.text;
@@ -627,15 +635,30 @@ export const chatRoute = new Hono()
           const approvalPending = !degenerate && !leakedCalls.length && !!verdict.pendingApproval;
           // 승인 대기인데 "삭제 완료"로 보고하는 것도 불일치 — 승인 대기임을 명시해야 함
           const pendingMisreport = approvalPending && !/승인|대기|팝업/.test(content) && /(삭제|제거|완료|처리)[가-힣]{0,3}\s*(했|함|됐|됨|완료)/.test(content);
-          const needsFix = (claimsPopup && !calledTools.has("request_credentials")) || claimsAction || actionMismatch || jsonLeak || degenerate || leakedCalls.length > 0 || dodges || stateUnmet || pendingMisreport;
+          let needsFix = (claimsPopup && !calledTools.has("request_credentials")) || claimsAction || actionMismatch || jsonLeak || degenerate || leakedCalls.length > 0 || dodges || stateUnmet || pendingMisreport;
+          // ─── PGE 평가 단계 — 형식·실측 검증을 통과한 응답도 결과물 품질을 독립 채점 ───
+          // 미달이면 지적사항과 함께 보정 루프로 재생성 (shouldEvaluate로 저렴한 선별 후 호출)
+          let evalIssues: string[] = [];
+          if (!needsFix && !signal.aborted && toolsCapable && Date.now() < deadline) {
+            const { shouldEvaluate, evaluateResult } = await import("../evaluate");
+            if (shouldEvaluate(userMsg?.content ?? "", content, calledTools.size, toolsCapable)) {
+              emitPhase("verify", "결과 검증");
+              const v = await evaluateResult(endpoint, realModel, userMsg?.content ?? "", content, { signal });
+              if (!v.pass) { needsFix = true; evalIssues = v.issues; }
+              else emitPhase("verify_done", `검증 통과 ${v.score}점`);
+            }
+          }
           const fixDeadline = Date.now() + 2 * 60_000; // 보정은 별도 2분 예산 — 도구 루프가 8분을 다 써도 빈 응답은 반드시 재시도
           if (needsFix && !signal.aborted && Date.now() < fixDeadline) {
+            emitPhase("verify", "보정 중");
             history.push({ role: "assistant", content });
             for (const tc of leakedCalls) {
               const out = await execTool(tc);
               history.push({ role: "tool", tool_call_id: tc.id, content: String(out).slice(0, 8000) } as any);
             }
-            history.push({ role: "user", content: leakedCalls.length
+            history.push({ role: "user", content: evalIssues.length
+              ? `[시스템] 품질 평가 미달 — 다음 지적사항을 실제로 보완해 답변을 다시 작성하세요: ${evalIssues.join(" / ")}. 필요하면 도구를 더 사용해도 됩니다.`
+              : leakedCalls.length
               ? "[시스템] 방금 도구 호출이 텍스트 형식으로 출력되어 서버가 대신 실행했습니다. 위 도구 결과를 확인하고 작업을 계속하세요 — 추가 도구는 반드시 정식 도구 호출(function call)로 사용하고, 완료되면 정상 문장으로 답변하세요."
               : claimsPopup
                 ? "[시스템] 방금 응답에서 계정 입력 팝업을 띄우겠다고 했지만 request_credentials 도구가 실제로 호출되지 않았습니다. 지금 즉시 request_credentials를 호출해 팝업을 실제로 띄우세요. site에는 언급된 서비스 이름을 넣으세요."
@@ -690,7 +713,7 @@ export const chatRoute = new Hono()
             const fixStripped = fixText.replace(/<think>[\s\S]*?(<\/think>|$)/g, "").replace(/\]\([^)]*\)/g, "]").replace(/https?:\/\/\S+/g, "");
             const fixOk = (fixStripped.match(/[가-힣A-Za-z0-9]/g) ?? []).length > 0;
             if (degenerate || leakedCalls.length) content = fixOk ? fixText : "⚠️ 응답 생성에 실패했습니다 — 같은 지시를 다시 보내주세요.";
-            else if (fixOk && (claimsAction || dodges || actionMismatch || jsonLeak || stateUnmet || pendingMisreport)) content = fixText;
+            else if (fixOk && (claimsAction || dodges || actionMismatch || jsonLeak || stateUnmet || pendingMisreport || evalIssues.length)) content = fixText;
             else if (popupShown && claimsPopup) content += "\n\n> ✅ 보안 입력 팝업을 지금 띄웠습니다 — 팝업에 계정을 입력해 주세요.";
             else if (calledTools.size) content += "\n\n> ⤵ 위에 보고한 작업을 실제 도구로 수행했습니다 — 세부 결과는 실제 실행 결과와 다를 수 있습니다.";
             if (toolEvents.length) searchMeta = { ...(searchMeta ?? {}), type: searchMeta?.type ?? "tools", events: toolEvents };
@@ -738,6 +761,7 @@ export const chatRoute = new Hono()
           if (!content.trim()) content = "⚠️ 응답이 생성되지 않았습니다 — 같은 지시를 다시 보내주세요."; // 어떤 경로로든 빈 메시지는 저장하지 않음
           content = cleanOutput(content); // 장식 이모지 제거·마커 치환 — 화면에 정돈된 결과만 저장
           q.msgUpdate.run(content, reasoning || null, usedModel, searchMeta ? JSON.stringify(searchMeta) : null, usage?.prompt_tokens ?? null, usage?.completion_tokens ?? null, asstMsg.id);
+          emitPhase("done", "완료");
           send("done", { message: withSiblings(q.msgGet.get(asstMsg.id) as Msg) });
 
           // 첫 교환이면 제목 자동 생성
