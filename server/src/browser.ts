@@ -100,6 +100,16 @@ export async function closeAgentPage(key: string) {
   try { await p?.close(); } catch {}
 }
 
+// 이 프로세스가 ego lite에 연 Task Space (key = browserTool의 agentKey) — 종료 시 정리 대상
+const egoSpaces = new Set<string>();
+
+// 작업 종료 시 ego Task Space 정리 — 공간+탭을 닫아 사용자 브라우저에 mybot-* 공간이 남지 않게 함
+export async function closeAgentEgoSpace(key: string) {
+  if (!egoSpaces.delete(key)) return;
+  const { egoCloseSpace } = await import("./ego");
+  await egoCloseSpace(`mybot-${key}`).catch(() => {});
+}
+
 // 페이지를 텍스트로 요약 (LLM이 읽기 좋은 형태)
 async function snapshot(page: Page): Promise<string> {
   const title = await page.title().catch(() => "");
@@ -128,6 +138,7 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
       if (!egoAvailable()) return "브라우저 오류: ego lite가 설치돼 있지 않습니다 — 내장 browser_* 도구를 사용하세요";
       const script = String(args.script ?? "");
       if (!script.trim()) return "오류: script 필요";
+      egoSpaces.add(agentKey); // run 종료 시 closeAgentEgoSpace가 이 공간을 닫음
       return await egoRun(script, `mybot-${agentKey}`);
     }
     const page = await pageFor(agentKey);

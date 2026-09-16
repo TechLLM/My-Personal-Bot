@@ -12,10 +12,9 @@ export function egoAvailable(): boolean {
 }
 
 // ego-browser nodejs 런타임에 스크립트를 stdin으로 전달 — cliLog() 출력을 모아 반환
-export function egoRun(script: string, space: string, timeoutMs = 60_000): Promise<string> {
+function egoExec(script: string, timeoutMs: number): Promise<string> {
   return new Promise((resolve) => {
-    // 모든 스크립트는 Task Space로 시작 — 같은 공간을 재사용하면 탭·상태가 이어짐
-    const wrapped = `const task = await useOrCreateTaskSpace(${JSON.stringify(space)});\n${script}`;
+    const wrapped = script;
     const proc = spawn(EGO_BIN, ["nodejs"], { stdio: ["pipe", "pipe", "pipe"] });
     let out = "";
     let err = "";
@@ -39,6 +38,17 @@ export function egoRun(script: string, space: string, timeoutMs = 60_000): Promi
   });
 }
 
+// 에이전트 스크립트 — 전용 Task Space에서 실행 (같은 공간 재사용 시 탭·상태가 이어짐)
+export function egoRun(script: string, space: string, timeoutMs = 60_000): Promise<string> {
+  return egoExec(`const task = await useOrCreateTaskSpace(${JSON.stringify(space)});\n${script}`, timeoutMs);
+}
+
+// 작업 종료 시 Task Space 정리 — 공간과 안의 탭을 완전히 닫는다 (공간이 없어도 조용히 통과)
+export async function egoCloseSpace(space: string): Promise<void> {
+  if (!egoAvailable()) return;
+  await egoExec(`await completeTaskSpace(${JSON.stringify(space)}, { keep: false }).catch(() => {});`, 20_000).catch(() => {});
+}
+
 // DeepSearch용 페이지 읽기 — 실제 로그인된 브라우저라 JS 렌더링·로그인 필요 페이지도 읽음
 export async function egoReadPage(url: string, maxChars = 6000): Promise<{ title: string; text: string } | null> {
   if (!egoAvailable()) return null;
@@ -51,6 +61,8 @@ cliLog(JSON.stringify({ title: info.title ?? "", text: String(snap) }));`,
     "mybot-deepsearch",
     45_000,
   );
+  // 읽기가 끝나면 공간 자체를 닫아 mybot-* 공간이 브라우저에 누적되지 않게 함
+  void egoCloseSpace("mybot-deepsearch");
   try {
     const line = out.trim().split("\n").filter(Boolean).pop() ?? "";
     const d = JSON.parse(line) as { title?: string; text?: string };

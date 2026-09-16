@@ -66,7 +66,9 @@ export async function chatOnce(
     const data = await res.json();
     const msg = data.choices?.[0]?.message ?? {};
     const toolCalls = (msg.tool_calls ?? []).map((tc: any, i: number) => ({ id: tc.id ?? `call_${i}`, name: tc.function?.name, arguments: tc.function?.arguments ?? "{}" }));
-    return { content: msg.content ?? "", toolCalls: toolCalls.length ? toolCalls : undefined };
+    // 추론 모델이 content에 <think> 태그를 섞어 보내는 경우 제거 — 보고서에 추론 원문이 새지 않게
+    const content = String(msg.content ?? "").replace(/<think>[\s\S]*?(<\/think>|$)/g, "").trim();
+    return { content, toolCalls: toolCalls.length ? toolCalls : undefined };
   }
   throw lastErr ?? new Error(opts.signal?.aborted ? "작업 중단 — 중지 요청 또는 시간 초과" : "chatOnce 실패");
 }
