@@ -24,9 +24,12 @@ export async function chatOnce(
   messages: any[],
   opts: { signal?: AbortSignal; tools?: { type: string; function: { name: string; description?: string; parameters?: object } }[]; toolChoice?: string | object } = {},
 ): Promise<ChatResult> {
-  const body = JSON.stringify({ model, messages, stream: false, ...(opts.tools?.length ? { tools: opts.tools, tool_choice: opts.toolChoice ?? "auto" } : {}) });
+  // tool_choice 객체 형식은 프록시마다 다름 — airoute는 Responses식 평탄 형식만 받아 nested 형식을 400으로 거부.
+  // 거부되면 tool_choice 없이 재시도 (호출 지시는 프롬프트·서버 폴백이 커버)
+  let toolChoice: unknown = opts.toolChoice ?? "auto";
+  const makeBody = () => JSON.stringify({ model, messages, stream: false, ...(opts.tools?.length ? { tools: opts.tools, tool_choice: toolChoice } : {}) });
   let lastErr: Error | null = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     if (opts.signal?.aborted) break;
     if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
     let res: Response;
@@ -37,7 +40,7 @@ export async function chatOnce(
           "Content-Type": "application/json",
           ...(endpoint.apiKey ? { Authorization: `Bearer ${endpoint.apiKey}` } : {}),
         },
-        body,
+        body: makeBody(),
         signal: opts.signal ?? AbortSignal.timeout(120000),
       });
     } catch (e) {
@@ -48,15 +51,17 @@ export async function chatOnce(
     if (!res.ok) {
       const txt = (await res.text()).slice(0, 300);
       const err = new Error(`오류 ${res.status}: ${txt}`);
+      // tool_choice 형식 거부 → 형식을 빼고 재시도
+      if (res.status === 400 && /tool_choice/i.test(txt) && toolChoice !== "auto") { toolChoice = "auto"; continue; }
       if (res.status >= 500 || res.status === 429) { lastErr = err; continue; } // transient만 재시도
-      throw err; // 4xx는 즉시 실패
+      throw err; // 나머지 4xx는 즉시 실패
     }
     const data = await res.json();
     const msg = data.choices?.[0]?.message ?? {};
     const toolCalls = (msg.tool_calls ?? []).map((tc: any, i: number) => ({ id: tc.id ?? `call_${i}`, name: tc.function?.name, arguments: tc.function?.arguments ?? "{}" }));
     return { content: msg.content ?? "", toolCalls: toolCalls.length ? toolCalls : undefined };
   }
-  throw lastErr ?? new Error("chatOnce 실패");
+  throw lastErr ?? new Error(opts.signal?.aborted ? "작업 중단 — 중지 요청 또는 시간 초과" : "chatOnce 실패");
 }
 
 export interface StreamEvent {

@@ -23,7 +23,9 @@ const VERB_RULES: [RegExp, IntentVerb][] = [
   [new RegExp(`등록${ADNOMINAL}|추가${ADNOMINAL}|생성${ADNOMINAL}|만들어(?!진)|새로(?!운)`), "create"],
   [/목록|리스트|보여|알려|확인|조회|몇|뭐|있나|있어|어떤/, "read"],
 ];
-const NEGATED = /지\s*마|지\s*말|지\s*못|말고|말아/;
+// "…지시가 아닙니다" 같은 보고문 속 부정도 명령이 아님 — 보고를 지시로 오독해
+// 하네스가 없는 작업을 강제(반대 방향 실행 압박)하는 사고를 막는다
+const NEGATED = /지\s*마|지\s*말|지\s*못|말고|말아|(지시|명령|요청|실행|처리|작업)\S*\s*아니/;
 
 const OBJECT_RULES: [RegExp, IntentObject][] = [
   [/루틴|예약\s*작업|스케줄/, "routines"],

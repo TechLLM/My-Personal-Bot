@@ -106,6 +106,7 @@ export function dispatchAgentMessage(msgId: string) {
       id: target.id, runId, name: target.name, avatar: target.avatar ?? "🤖", role: target.role_prompt,
       task: `[${sender?.name ?? "사용자"} 봇의 비동기 메시지입니다. 처리하고 회신할 내용을 보고하세요 — 회신은 보낸 봇의 세션에 전달됩니다]\n\n${msg.content}`,
       model: target.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: 0,
+      verifyIntent: false, // 메시지 본문은 보고·알림 — 지시-실측 검증 대상이 아님 (보고 속 단어를 지시로 오독해 반대 실행을 강제하는 사고 방지)
     };
     try {
       await runAgent(state, target, () => {}, AbortSignal.timeout(540_000));

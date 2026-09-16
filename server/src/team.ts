@@ -99,6 +99,7 @@ export interface TeamAgentState {
   steps: number;
   toolLog: ToolLogEntry[];
   depth: number; // 위임 깊이 — agent_direct 재귀 제한용
+  verifyIntent?: boolean; // false면 지시-실측 검증 생략 — 봇 간 메시지(보고·알림)는 지시가 아니라서 의도 파싱이 오독됨
 }
 
 type Emit = (ev: object) => void;
@@ -253,8 +254,10 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
       // 화면에 하위 봇 작업이 실시간으로 보이도록 이벤트 전파 (봇 카드 + 작업 애니메이션)
       emit?.({ type: "agent_join", agent: { id: target.id, name: target.name, avatar: target.avatar, role: target.role_prompt, task: inst.slice(0, 200), model: target.model, model_label: modelLabel(target.model ?? defaultModel()) } });
       emit?.({ type: "agent_start", agentId: target.id });
-      // 외부 신호를 전파해 중첩 실행이 바깥 데드라인을 넘지 않게 함 (내부 8분 상한은 runAgent 자체에도 있음)
-      await runAgent(state, target, emit ?? (() => {}), signal ?? AbortSignal.timeout(540_000));
+      // 위임 실행은 독립 시간 상한으로 분리 — 호출 측 signal(HTTP 요청 생명주기)을 전파하면
+      // 스트림 종료·연결 끊김 시 진행 중인 하위 작업이 "chatOnce 실패"로 죽는다.
+      // 상한은 runAgent 내부 8분 데드라인 + 여기 540초로 충분히 제한된다.
+      await runAgent(state, target, emit ?? (() => {}), AbortSignal.timeout(540_000));
       emit?.({ type: "agent_done", agentId: target.id, status: state.status, result: (state.result ?? "").slice(0, 4000) });
       db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
         .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
@@ -505,7 +508,9 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
   const calledTools = new Set<string>();
   const gatedTools = new Set<string>();
   const { parseIntent, snapshot, verifyMutation } = await import("./intent");
-  const intent = parseIntent(state.task);
+  // 봇 간 비동기 메시지는 보고·알림이라 지시가 아님 — 본문의 "추가/삭제" 등 단어가
+  // 의도로 오독되면 하네스가 없는 작업을 강제해 반대 방향 사고가 난다
+  const intent = state.verifyIntent === false ? { verb: null, object: null, all: false } : parseIntent(state.task);
   let beforeCount = 0;
   let beforeIds = new Set<string>();
   if (intent.object) {
