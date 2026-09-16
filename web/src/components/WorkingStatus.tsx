@@ -69,7 +69,7 @@ export function WorkingStatus({ events = [], agent, compact = false }: {
   return (
     <div className={`flex items-center gap-2 ${compact ? "text-xs" : "text-sm"} text-stone-600`}>
       {agent && !compact && <AgentIcon name={agent.name} seed={agent.avatar} size={17} working />}
-      <span className="mb-spark text-sky-300/70"><i /><i /><i /><i /></span>
+      <span className="mb-spark text-sky-600/80"><i /><i /><i /><i /></span>
       <span key={word} className="mb-shimmer mb-word font-semibold tracking-wide">{word}…</span>
       {agent && !compact && <span className="text-[10px] text-stone-400">{agent.name}</span>}
     </div>

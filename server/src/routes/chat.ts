@@ -651,7 +651,9 @@ export const chatRoute = new Hono()
           const fixDeadline = Date.now() + 2 * 60_000; // 보정은 별도 2분 예산 — 도구 루프가 8분을 다 써도 빈 응답은 반드시 재시도
           if (needsFix && !signal.aborted && Date.now() < fixDeadline) {
             emitPhase("verify", "보정 중");
-            history.push({ role: "assistant", content });
+            // assistant 메시지에 tool_calls를 함께 기록 — 뒤따르는 tool 결과가 참조할 ID가 없으면
+            // 엄격한 프로바이더(minimax·openai)가 "tool id not found" 400으로 전체 라운드를 거부함
+            history.push({ role: "assistant", content, ...(leakedCalls.length ? { tool_calls: leakedCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })) } : {}) } as any);
             for (const tc of leakedCalls) {
               const out = await execTool(tc);
               history.push({ role: "tool", tool_call_id: tc.id, content: String(out).slice(0, 8000) } as any);

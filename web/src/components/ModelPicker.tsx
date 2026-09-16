@@ -123,7 +123,7 @@ function Row({ m, value, pick }: { m: Model; value: string; pick: (id: string) =
   const name = m.id.includes("/") ? m.id.slice(m.id.indexOf("/") + 1) : m.id;
   return (
     <button
-      className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 pl-6 text-left text-xs hover:bg-stone-200 ${m.id === value ? "bg-stone-200 text-sky-300" : "text-stone-700"}`}
+      className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 pl-6 text-left text-xs hover:bg-stone-200 ${m.id === value ? "bg-stone-200 text-sky-600" : "text-stone-700"}`}
       onClick={() => pick(m.id)}
     >
       <span className="truncate">{name}</span>

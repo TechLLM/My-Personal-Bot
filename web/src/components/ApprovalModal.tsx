@@ -16,7 +16,7 @@ export function ApprovalModal({ request, onDone }: { request: ApprovalRequest; o
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/30 p-4">
       <div className="w-full max-w-sm rounded-2xl border border-stone-200 bg-white p-5 shadow-[0_8px_30px_rgba(0,0,0,0.06)]">
         <div className="mb-4 flex items-start gap-3">
-          <div className="rounded-xl bg-amber-500/10 p-2 text-amber-400"><ShieldAlert size={18} /></div>
+          <div className="rounded-xl bg-amber-50 p-2 text-amber-600"><ShieldAlert size={18} /></div>
           <div className="flex-1">
             <h2 className="text-sm font-semibold">봇이 승인을 요청했습니다</h2>
             <p className="mt-0.5 text-xs leading-relaxed text-stone-500">
@@ -25,7 +25,7 @@ export function ApprovalModal({ request, onDone }: { request: ApprovalRequest; o
           </div>
         </div>
         <div className="rounded-lg bg-stone-200/70 px-3 py-2.5">
-          <div className="font-mono text-[11px] text-amber-300/90">{request.tool}</div>
+          <div className="font-mono text-[11px] text-amber-700">{request.tool}</div>
           <div className="mt-1 break-all text-xs leading-relaxed text-stone-600">{request.summary}</div>
         </div>
         <div className="mt-4 grid grid-cols-2 gap-2">

@@ -127,7 +127,7 @@ export function Composer({
               className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs hover:bg-stone-200"
               onClick={() => { setText(`/${sk.name} `); ref.current?.focus(); }}
             >
-              <span className="font-mono text-sky-300">/{sk.name}</span>
+              <span className="font-mono text-sky-600">/{sk.name}</span>
               <span className="truncate text-stone-500">{sk.prompt.slice(0, 40)}</span>
             </button>
           ))}

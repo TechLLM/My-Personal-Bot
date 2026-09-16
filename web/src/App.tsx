@@ -399,7 +399,7 @@ export default function App() {
           </span>
           {!convId && pendingAgent && (
             <span className="flex shrink-0 items-center gap-1 rounded-full bg-stone-200 px-2 py-0.5 text-[11px] text-stone-600">
-              {!!pendingAgent.is_boss && <Crown size={10} className="text-amber-400" />}
+              {!!pendingAgent.is_boss && <Crown size={10} className="text-amber-600" />}
               <AgentIcon name={pendingAgent.name} seed={pendingAgent.avatar} size={11} /> {pendingAgent.name}
               <button className="ml-0.5 text-stone-400 hover:text-stone-700" onClick={() => setPendingAgent(null)}>×</button>
             </span>

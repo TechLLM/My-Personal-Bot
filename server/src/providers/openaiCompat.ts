@@ -27,7 +27,7 @@ export async function chatOnce(
 ): Promise<ChatResult> {
   // kind별 어댑터 디스패치 — responses(codex OAuth) / gemini(OAuth) / cli(로컬 브릿지)
   switch (endpoint.kind) {
-    case "responses": return responsesChatOnce(endpoint, model, messages, { signal: opts.signal, tools: opts.tools });
+    case "responses": return responsesChatOnce(endpoint, model, messages, { signal: opts.signal, tools: opts.tools, toolChoice: opts.toolChoice });
     case "gemini": return geminiChatOnce(endpoint, model, messages, { signal: opts.signal, tools: opts.tools });
     case "cli": return cliChatOnce(endpoint, model, messages, { signal: opts.signal });
   }

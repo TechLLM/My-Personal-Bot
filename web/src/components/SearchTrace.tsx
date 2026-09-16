@@ -40,8 +40,8 @@ export function SearchTrace({ events, done }: { events: SearchEvent[]; done: boo
   const dedupedReads = reads.filter((r, i) => i === 0 || r.title !== reads[i - 1].title);
 
   return (
-    <div className="rounded-xl border border-sky-900/40 bg-sky-950/20 px-4 py-3 text-sm">
-      <div className="flex items-center gap-2 font-medium text-sky-300">
+    <div className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm">
+      <div className="flex items-center gap-2 font-medium text-sky-600">
         <span className={done ? "" : "thinking-dot"}>{isSearch ? <Search size={14} /> : <Bot size={14} />}</span>
         {isSearch
           ? done ? "DeepSearch 완료" : synthesizing ? "출처 종합 중…" : "DeepSearch 진행 중…"
@@ -56,8 +56,8 @@ export function SearchTrace({ events, done }: { events: SearchEvent[]; done: boo
               <div key={s.key} className="flex items-center gap-1.5">
                 {i > 0 && <span className="text-stone-300">→</span>}
                 <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
-                  current ? "bg-sky-500/20 text-sky-300 mb-shimmer"
-                  : passed ? "bg-emerald-500/10 text-emerald-400"
+                  current ? "bg-sky-100 text-sky-600 mb-shimmer"
+                  : passed ? "bg-emerald-50 text-emerald-600"
                   : "bg-stone-200/60 text-stone-400"
                 }`}>
                   {passed ? "✓ " : ""}{s.label}
@@ -81,7 +81,7 @@ export function SearchTrace({ events, done }: { events: SearchEvent[]; done: boo
             {!r.url ? (
               <span>· {r.title || r.url}</span>
             ) : (
-              <span>· 읽음: <a href={r.url} target="_blank" rel="noreferrer" className="hover:text-sky-400 underline decoration-stone-300">{r.title}</a></span>
+              <span>· 읽음: <a href={r.url} target="_blank" rel="noreferrer" className="hover:text-sky-600 underline decoration-stone-300">{r.title}</a></span>
             )}
           </div>
         ))}

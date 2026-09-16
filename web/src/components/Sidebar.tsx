@@ -83,14 +83,14 @@ export function Sidebar({
               <span className="flex items-center gap-1">
                 <span className="truncate">{a.name}</span>
                 {!!a.pinned && <Pin size={10} className="shrink-0 text-stone-500" />}
-                {!!a.is_boss && <Crown size={11} className="shrink-0 text-amber-400" />}
+                {!!a.is_boss && <Crown size={11} className="shrink-0 text-amber-600" />}
                 {!!a.is_lead && !a.is_boss && <span className="shrink-0 rounded bg-stone-300 px-1 text-[9px] text-stone-700">팀장</span>}
                 {!!a.hidden && <EyeOff size={10} className="shrink-0 text-stone-400" />}
               </span>
               {isWorking ? (
                 <span className="flex items-center gap-1 truncate text-[10px] leading-tight">
-                  <span className="mb-spark text-sky-300/70"><i /><i /></span>
-                  <span className="mb-shimmer font-medium text-sky-300/90">{toolWord(tool ?? "") ?? "Working"}…</span>
+                  <span className="mb-spark text-sky-600/80"><i /><i /></span>
+                  <span className="mb-shimmer font-medium text-sky-600">{toolWord(tool ?? "") ?? "Working"}…</span>
                   <span className="truncate text-stone-500">{toolLabel(tool)}</span>
                 </span>
               ) : (

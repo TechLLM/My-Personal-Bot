@@ -87,17 +87,17 @@ export function BotLobby({
               <AgentIcon name={a.name} seed={a.avatar} size={18} className="shrink-0" />
               <span className="font-medium text-sm text-stone-800 truncate">{a.name}</span>
               {!!a.is_boss && (
-                <span className="flex items-center gap-0.5 rounded bg-amber-900/50 px-1 py-px text-[9px] text-amber-300"><Crown size={9} /> CEO</span>
+                <span className="flex items-center gap-0.5 rounded bg-amber-100 px-1 py-px text-[9px] text-amber-700"><Crown size={9} /> CEO</span>
               )}
               {routineAgentIds.has(a.id) && (
-                <AlarmClock size={11} className="shrink-0 text-amber-400/80" />
+                <AlarmClock size={11} className="shrink-0 text-amber-600" />
               )}
               <span className="ml-auto flex shrink-0 items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
                 <button
                   className="rounded p-1 text-stone-500 hover:bg-stone-200 hover:text-stone-800"
                   title="핀 고정 — 목록 상단에 표시"
                   onClick={() => api.updateAgent(a.id, { pinned: a.pinned ? 0 : 1 }).then(onRefresh).catch(() => {})}
-                ><Pin size={11} className={a.pinned ? "text-amber-400" : ""} /></button>
+                ><Pin size={11} className={a.pinned ? "text-amber-600" : ""} /></button>
                 <button
                   className="rounded p-1 text-stone-500 hover:bg-stone-200 hover:text-stone-800"
                   title="복제 — 역할·모델·스킬만 복사 (대화·기억은 복사되지 않음)"
@@ -199,7 +199,7 @@ export function BotLobby({
               <div className="flex items-center gap-3">
                 <label className="flex items-center gap-1.5 text-xs text-stone-600">
                   <input type="checkbox" checked={asBoss} onChange={(e) => setAsBoss(e.target.checked)} />
-                  <Crown size={12} className="text-amber-400" /> CEO로 지정 — 모든 봇의 관리자가 됩니다
+                  <Crown size={12} className="text-amber-600" /> CEO로 지정 — 모든 봇의 관리자가 됩니다
                 </label>
                 <button
                   className="ml-auto rounded-lg bg-stone-900 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-stone-700"

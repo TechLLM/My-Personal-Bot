@@ -38,7 +38,7 @@ export function CredentialModal({ request, onDone }: { request: SiteRequest; onD
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/30 p-4">
       <div className="w-full max-w-sm rounded-2xl border border-stone-200 bg-white p-5 shadow-[0_8px_30px_rgba(0,0,0,0.06)]">
         <div className="mb-4 flex items-start gap-3">
-          <div className="rounded-xl bg-emerald-500/10 p-2 text-emerald-400"><ShieldCheck size={18} /></div>
+          <div className="rounded-xl bg-emerald-50 p-2 text-emerald-600"><ShieldCheck size={18} /></div>
           <div className="flex-1">
             <h2 className="text-sm font-semibold">봇이 계정 정보를 요청했습니다</h2>
             <p className="mt-0.5 text-xs leading-relaxed text-stone-500">

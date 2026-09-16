@@ -42,13 +42,17 @@ function toResponsesInput(msgs: Msg[]): { instructions?: string; input: any[] } 
   return { instructions: instructions.filter(Boolean).join("\n\n") || undefined, input };
 }
 
-function responsesBody(endpoint: Endpoint, model: string, messages: Msg[], tools: any[], stream: boolean): any {
+function responsesBody(endpoint: Endpoint, model: string, messages: Msg[], tools: any[], stream: boolean, toolChoice?: string | object): any {
   const { instructions, input } = toResponsesInput(messages);
   const body: any = { model, instructions, input, stream: true, store: false }; // codex 백엔드는 stream 필수
   void stream;
   if (tools?.length) {
     body.tools = tools.map((t) => ({ type: "function", name: t.function.name, description: t.function.description, parameters: t.function.parameters ?? { type: "object" } }));
-    body.tool_choice = "auto";
+    // codex 백엔드는 tool_choice "auto" 문자열을 거부 — 미지정(기본 auto)으로 두거나, 강제 시 {type:"function", name}
+    if (toolChoice && typeof toolChoice === "object") {
+      const fn = (toolChoice as any).function?.name ?? (toolChoice as any).name;
+      if (fn) body.tool_choice = { type: "function", name: fn };
+    }
   }
   return body;
 }
@@ -82,7 +86,7 @@ function fromResponses(j: any): ChatResult {
   return { content: reasoning ? `<think>${reasoning}</think>\n\n${content}` : content, toolCalls: parts.calls.length ? parts.calls : undefined };
 }
 
-export async function responsesChatOnce(endpoint: Endpoint, model: string, messages: Msg[], opts: { signal?: AbortSignal; tools?: any[] } = {}): Promise<ChatResult> {
+export async function responsesChatOnce(endpoint: Endpoint, model: string, messages: Msg[], opts: { signal?: AbortSignal; tools?: any[]; toolChoice?: string | object } = {}): Promise<ChatResult> {
   const base = (endpoint.baseUrl ?? "https://api.openai.com/v1").replace(/\/$/, "");
   let lastErr: Error | null = null;
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -92,7 +96,7 @@ export async function responsesChatOnce(endpoint: Endpoint, model: string, messa
     try {
       res = await fetch(`${base}/responses`, {
         method: "POST", headers: responsesHeaders(endpoint),
-        body: JSON.stringify(responsesBody(endpoint, model, messages, opts.tools ?? [], true)),
+        body: JSON.stringify(responsesBody(endpoint, model, messages, opts.tools ?? [], true, opts.toolChoice)),
         signal: opts.signal ?? AbortSignal.timeout(120000),
       });
     } catch (e) {

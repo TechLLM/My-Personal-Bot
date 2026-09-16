@@ -129,8 +129,8 @@ export function MessageItem({
         </div>
       )}
       {meta?.type === "team" && meta.status === "pending" && meta.agents && (
-        <div className="mt-1 rounded-xl border border-amber-900/40 bg-amber-950/20 px-3 py-2.5">
-          <div className="flex items-center gap-1.5 text-xs font-medium text-amber-300/90 mb-2"><Bot size={13} /> 팀 작업 계획 — 실행할 봇을 선택하세요</div>
+        <div className="mt-1 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5">
+          <div className="flex items-center gap-1.5 text-xs font-medium text-amber-700 mb-2"><Bot size={13} /> 팀 작업 계획 — 실행할 봇을 선택하세요</div>
           <div className="space-y-1.5">
             {meta.agents.map((a, i) => (
               <label key={i} className="flex items-start gap-2 rounded-lg bg-white/60 px-2.5 py-2 text-xs cursor-pointer">
@@ -138,7 +138,7 @@ export function MessageItem({
                 <AgentIcon name={a.name} size={13} className="mt-0.5 shrink-0 text-stone-500" />
                 <span className="min-w-0 flex-1">
                   <span className="font-medium text-stone-800">{a.name}</span>
-                  <span className={`ml-1.5 rounded px-1 text-[9px] ${a.existing ? "bg-sky-900/60 text-sky-300" : "bg-emerald-900/60 text-emerald-300"}`}>
+                  <span className={`ml-1.5 rounded px-1 text-[9px] ${a.existing ? "bg-sky-100 text-sky-600" : "bg-emerald-100 text-emerald-600"}`}>
                     {a.existing ? "기존 봇" : "새 봇"}
                   </span>
                   <span className="ml-1.5 font-mono text-[10px] text-stone-400">{a.model_label ?? a.model}</span>
@@ -167,12 +167,12 @@ export function MessageItem({
         </div>
       )}
       {meta?.type === "team" && meta.status !== "pending" && meta.status !== "cancelled" && meta.agents && (
-        <div className="mt-1 rounded-xl border border-amber-900/40 bg-amber-950/20 px-3 py-2">
-          <div className="flex items-center gap-1.5 text-xs font-medium text-amber-300/90 mb-1"><Bot size={13} /> 팀 작업 — 봇 {meta.agents.length}개</div>
+        <div className="mt-1 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
+          <div className="flex items-center gap-1.5 text-xs font-medium text-amber-700 mb-1"><Bot size={13} /> 팀 작업 — 봇 {meta.agents.length}개</div>
           <div className="space-y-1 text-xs text-stone-500">
             {meta.agents.map((a, i) => (
               <div key={i} className="flex items-center gap-1.5">
-                <span className={a.status === "done" ? "text-emerald-400" : "text-red-400"}>●</span>
+                <span className={a.status === "done" ? "text-emerald-600" : "text-red-600"}>●</span>
                 <AgentIcon name={a.name} size={12} className="text-stone-500" />
                 <span className="text-stone-700">{a.name}</span>
                 {a.model_label && <span className="font-mono text-[9px] text-stone-400">{a.model_label}</span>}
@@ -187,7 +187,7 @@ export function MessageItem({
           <div className="text-xs font-medium text-stone-600 mb-1"><Bot size={11} className="inline -mt-0.5" /> 봇 도구 사용 {meta.events.filter((e) => e.title && !e.title.includes("라운드")).length}회</div>
           <div className="flex flex-wrap gap-1">
             {meta.events.filter((e) => e.title && !e.title.includes("라운드")).map((e, i) => (
-              <span key={i} className={`rounded-full px-2 py-0.5 text-[10px] ${e.title!.startsWith("⚠") ? "bg-red-950/50 text-red-400" : "bg-stone-200 text-stone-500"}`}>{e.title}</span>
+              <span key={i} className={`rounded-full px-2 py-0.5 text-[10px] ${e.title!.startsWith("⚠") ? "bg-red-50 text-red-600" : "bg-stone-200 text-stone-500"}`}>{e.title}</span>
             ))}
           </div>
         </div>
@@ -198,7 +198,7 @@ export function MessageItem({
           <ol className="text-xs text-stone-500 space-y-0.5">
             {meta.sources!.map((s, i) => (
               <li key={i}>
-                <a href={s.url} target="_blank" rel="noreferrer" className="hover:text-sky-400">
+                <a href={s.url} target="_blank" rel="noreferrer" className="hover:text-sky-600">
                   [{i + 1}] {s.title}
                 </a>
               </li>

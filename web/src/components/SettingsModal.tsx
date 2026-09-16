@@ -44,7 +44,7 @@ function ProviderRow({ p, onChanged }: { p: ProviderCard; onChanged: () => void 
   };
 
   const status = !p.enabled ? { t: "비활성", c: "text-stone-500", dot: "bg-stone-400" }
-    : p.authed ? (p.expired ? { t: "토큰 만료 — 재로그인 필요", c: "text-amber-400", dot: "bg-amber-400" } : { t: `연결됨${p.source ? ` · ${p.source}` : ""}`, c: "text-emerald-400", dot: "bg-emerald-400" })
+    : p.authed ? (p.expired ? { t: "토큰 만료 — 재로그인 필요", c: "text-amber-600", dot: "bg-amber-500" } : { t: `연결됨${p.source ? ` · ${p.source}` : ""}`, c: "text-emerald-600", dot: "bg-emerald-500" })
     : { t: "인증 필요", c: "text-stone-500", dot: "bg-stone-400" };
 
   return (
@@ -79,7 +79,7 @@ function ProviderRow({ p, onChanged }: { p: ProviderCard; onChanged: () => void 
             {testing ? <Loader2 size={13} className="animate-spin" /> : <Zap size={13} />}
           </button>
           {p.custom && (
-            <button onClick={() => api.deleteCustomProvider(p.id).then(onChanged)} className="rounded-lg p-1.5 text-stone-400 hover:bg-stone-200 hover:text-red-400" title="삭제">
+            <button onClick={() => api.deleteCustomProvider(p.id).then(onChanged)} className="rounded-lg p-1.5 text-stone-400 hover:bg-stone-200 hover:text-red-600" title="삭제">
               <Trash2 size={13} />
             </button>
           )}
@@ -92,7 +92,7 @@ function ProviderRow({ p, onChanged }: { p: ProviderCard; onChanged: () => void 
           <button onClick={saveKey} className="rounded-lg bg-stone-900 px-2.5 text-xs font-medium text-white">저장</button>
         </div>
       )}
-      {result && <p className={`mt-1.5 text-[10px] ${result.startsWith("✓") ? "text-emerald-400" : "text-red-400"}`}>{result}</p>}
+      {result && <p className={`mt-1.5 text-[10px] ${result.startsWith("✓") ? "text-emerald-600" : "text-red-600"}`}>{result}</p>}
     </div>
   );
 }
@@ -185,7 +185,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
             >
               <Icon size={13} className="shrink-0" />
               <span className="truncate">{label}</span>
-              {id === "providers" && authed.length > 0 && <span className="ml-auto rounded bg-emerald-500/15 px-1 text-[9px] text-emerald-400">{authed.length}</span>}
+              {id === "providers" && authed.length > 0 && <span className="ml-auto rounded bg-emerald-50 px-1 text-[9px] text-emerald-600">{authed.length}</span>}
             </button>
           ))}
           <div className="mt-auto px-2 pb-1 text-[10px] text-stone-300">MyBot 로컬 설정</div>
@@ -223,7 +223,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                       if (r?.error) setCpMsg(`실패: ${r.error}`);
                       else { setCpMsg(""); setCpId(""); setCpName(""); setCpUrl(""); setCpKey(""); setCpModels(""); refreshProviders(); }
                     }}>등록</button>
-                    {cpMsg && <span className="text-[10px] text-red-400">{cpMsg}</span>}
+                    {cpMsg && <span className="text-[10px] text-red-600">{cpMsg}</span>}
                   </div>
                   <p className="mt-1.5 text-[10px] text-stone-400">Ollama: http://127.0.0.1:11434/v1 · LM Studio: http://127.0.0.1:1234/v1</p>
                 </div>
@@ -253,20 +253,20 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                         <AgentIcon name={a.name} seed={a.avatar} size={14} className="shrink-0" />
                         <span className="font-medium">{a.name}</span>
                         {a.is_boss ? (
-                          <span className="flex items-center gap-0.5 rounded bg-amber-900/50 px-1 text-[9px] text-amber-300"><Crown size={9} /> CEO</span>
+                          <span className="flex items-center gap-0.5 rounded bg-amber-100 px-1 text-[9px] text-amber-700"><Crown size={9} /> CEO</span>
                         ) : (
-                          <button className="rounded bg-stone-200 px-1 text-[9px] text-stone-500 hover:text-amber-300" title="이 봇을 CEO로 지정" onClick={() => api.setAgentBoss(a.id).then(load)}>CEO 지정</button>
+                          <button className="rounded bg-stone-200 px-1 text-[9px] text-stone-500 hover:text-amber-700" title="이 봇을 CEO로 지정" onClick={() => api.setAgentBoss(a.id).then(load)}>CEO 지정</button>
                         )}
-                        {a.is_lead ? <span className="rounded bg-sky-900/50 px-1 text-[9px] text-sky-300">팀장</span> : null}
+                        {a.is_lead ? <span className="rounded bg-sky-100 px-1 text-[9px] text-sky-600">팀장</span> : null}
                         <select className="max-w-[160px] truncate rounded bg-stone-200 px-1 py-0.5 text-[10px] text-stone-600 outline-none" value={a.model ?? ""} title={a.model_label ?? a.model ?? ""} onChange={(e) => api.updateAgent(a.id, { model: e.target.value }).then(load)}>
                           {models.map((m) => <option key={m.id} value={m.id}>{m.providerName} · {m.label}</option>)}
                           {a.model && !models.find((m) => m.id === a.model) && <option value={a.model}>{a.model}</option>}
                         </select>
                         {routines.some((r) => r.agent_id === a.id && r.enabled) && (
-                          <span className="flex items-center gap-0.5 rounded bg-amber-900/50 px-1 text-[9px] text-amber-300"><AlarmClock size={9} /> 루틴</span>
+                          <span className="flex items-center gap-0.5 rounded bg-amber-100 px-1 text-[9px] text-amber-700"><AlarmClock size={9} /> 루틴</span>
                         )}
                         {!a.is_boss && (
-                          <button className="ml-auto text-stone-400 hover:text-red-400" onClick={() => mybotFetch(`/api/agents/${a.id}`, { method: "DELETE" }).then(load)}><Trash2 size={12} /></button>
+                          <button className="ml-auto text-stone-400 hover:text-red-600" onClick={() => mybotFetch(`/api/agents/${a.id}`, { method: "DELETE" }).then(load)}><Trash2 size={12} /></button>
                         )}
                       </div>
                       <div className="mt-0.5 truncate text-stone-500">{a.role_prompt}</div>
@@ -298,7 +298,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   {routines.map((r) => (
                     <div key={r.id} className="rounded-lg bg-white px-2.5 py-2 text-xs">
                       <div className="flex items-center gap-2">
-                        <button onClick={() => mybotFetch(`/api/routines/${r.id}/toggle`, { method: "POST" }).then(load)} className={r.enabled ? "text-emerald-400" : "text-stone-400"}>{r.enabled ? "●" : "○"}</button>
+                        <button onClick={() => mybotFetch(`/api/routines/${r.id}/toggle`, { method: "POST" }).then(load)} className={r.enabled ? "text-emerald-600" : "text-stone-400"}>{r.enabled ? "●" : "○"}</button>
                         <span className="font-medium">{r.name}</span>
                         <span className="text-stone-500">{r.schedule}</span>
                         {r.agent_id && (
@@ -307,8 +307,8 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                             {agents.find((a) => a.id === r.agent_id)?.name ?? "봇"}
                           </span>
                         )}
-                        <button className="ml-auto text-stone-400 hover:text-sky-400" onClick={() => mybotFetch(`/api/routines/${r.id}/run`, { method: "POST" }).then(load)}>지금 실행</button>
-                        <button className="text-stone-400 hover:text-red-400" onClick={() => mybotFetch(`/api/routines/${r.id}`, { method: "DELETE" }).then(load)}>삭제</button>
+                        <button className="ml-auto text-stone-400 hover:text-sky-600" onClick={() => mybotFetch(`/api/routines/${r.id}/run`, { method: "POST" }).then(load)}>지금 실행</button>
+                        <button className="text-stone-400 hover:text-red-600" onClick={() => mybotFetch(`/api/routines/${r.id}`, { method: "DELETE" }).then(load)}>삭제</button>
                       </div>
                       <div className="mt-0.5 truncate text-stone-500">{r.prompt}</div>
                     </div>
@@ -383,7 +383,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                         <Folder size={13} className="shrink-0 text-stone-500" />
                         <span>{w.name}</span>
                         <span className="flex-1 truncate text-stone-500">{w.instructions}</span>
-                        <button className="text-stone-400 hover:text-red-400" onClick={() => mybotFetch(`/api/workspaces/${w.id}`, { method: "DELETE" }).then(load)}>삭제</button>
+                        <button className="text-stone-400 hover:text-red-600" onClick={() => mybotFetch(`/api/workspaces/${w.id}`, { method: "DELETE" }).then(load)}>삭제</button>
                       </div>
                     ))}
                   </div>
@@ -401,9 +401,9 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   <div className="space-y-1.5">
                     {skills.map((sk) => (
                       <div key={sk.id} className="flex items-center gap-2 rounded-lg bg-white px-2.5 py-1.5 text-xs">
-                        <span className="font-mono text-sky-300">/{sk.name}</span>
+                        <span className="font-mono text-sky-600">/{sk.name}</span>
                         <span className="flex-1 truncate text-stone-500">{sk.prompt}</span>
-                        <button className="text-stone-400 hover:text-red-400" onClick={() => mybotFetch(`/api/skills/${sk.id}`, { method: "DELETE" }).then(load)}>삭제</button>
+                        <button className="text-stone-400 hover:text-red-600" onClick={() => mybotFetch(`/api/skills/${sk.id}`, { method: "DELETE" }).then(load)}>삭제</button>
                       </div>
                     ))}
                   </div>
@@ -424,7 +424,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                         <AgentIcon name={p.name} size={13} className="text-stone-500" />
                         <span>{p.name}</span>
                         <span className="flex-1 truncate text-stone-500">{p.prompt || "(기본)"}</span>
-                        {!p.builtin && <button className="text-stone-400 hover:text-red-400" onClick={() => mybotFetch(`/api/personas/${p.id}`, { method: "DELETE" }).then(load)}>삭제</button>}
+                        {!p.builtin && <button className="text-stone-400 hover:text-red-600" onClick={() => mybotFetch(`/api/personas/${p.id}`, { method: "DELETE" }).then(load)}>삭제</button>}
                       </div>
                     ))}
                   </div>
@@ -464,7 +464,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                         <span className="font-medium">{st.name}</span>
                         <span className="truncate text-stone-500">{st.url}</span>
                         <span className="text-stone-400">{st.username}</span>
-                        <button className="ml-auto text-stone-400 hover:text-red-400" onClick={() => api.deleteSite(st.id).then(load)}><Trash2 size={12} /></button>
+                        <button className="ml-auto text-stone-400 hover:text-red-600" onClick={() => api.deleteSite(st.id).then(load)}><Trash2 size={12} /></button>
                       </div>
                     ))}
                   </div>
@@ -533,7 +533,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   {shownMemories.map((m) => (
                     <div key={m.id} className="flex items-center gap-2 rounded-lg bg-white px-2.5 py-1.5 text-xs text-stone-600">
                       <span className="flex-1 truncate">{m.content}</span>
-                      <button className="shrink-0 text-stone-400 hover:text-red-400" onClick={() => {
+                      <button className="shrink-0 text-stone-400 hover:text-red-600" onClick={() => {
                         mybotFetch(`/api/settings/memories/${m.id}`, { method: "DELETE" }).then(() => setMemories(memories.filter((x) => x.id !== m.id)));
                       }}>삭제</button>
                     </div>
@@ -566,8 +566,8 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
           {/* 하단 저장 바 */}
           <div className="flex items-center gap-3 border-t border-stone-200 px-5 py-3">
             <button onClick={saveAll} className="rounded-lg bg-stone-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-stone-700">저장</button>
-            {dirty && <span className="text-[11px] text-amber-400">저장되지 않은 변경 사항 있음</span>}
-            {savedMsg && <span className="text-[11px] text-emerald-400">{savedMsg}</span>}
+            {dirty && <span className="text-[11px] text-amber-600">저장되지 않은 변경 사항 있음</span>}
+            {savedMsg && <span className="text-[11px] text-emerald-600">{savedMsg}</span>}
             <button onClick={onClose} className="ml-auto text-xs text-stone-500 hover:text-stone-800">닫기</button>
           </div>
         </div>
