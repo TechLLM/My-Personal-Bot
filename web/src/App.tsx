@@ -43,6 +43,8 @@ export default function App() {
   const [runningInfo, setRunningInfo] = useState<Record<string, string | null>>({}); // 서버에서 실행 중인 봇: id → 현재 도구 — 사이드바 실시간 작업 표시용
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // 응답 스트리밍 중 전송된 명령 대기열 — 현재 응답이 끝나면 순서대로 자동 전송 ("1번→2번→3번" 연속 지시)
+  const [queued, setQueued] = useState<{ text: string; mode: Mode; attachments: { url: string; name: string; mime: string }[] }[]>([]);
 
   const refreshConversations = useCallback(() => {
     api.conversations().then((d) => setConversations(d.conversations)).catch(() => {});
@@ -110,6 +112,21 @@ export default function App() {
     const t = setInterval(poll, 4000);
     return () => clearInterval(t);
   }, []);
+
+  // 백그라운드 봇의 회신·완료 보고를 열린 대화에 실시간 반영 — 각 봇이 끝나는 순서대로 메시지가 도착.
+  // 회신 기록이 run 종료보다 늦을 수 있어(normalizeReport LLM 호출) 유휴 중엔 항상 4초 주기로 읽되,
+  // 변화가 없으면 같은 배열을 반환해 스크롤 점프를 막는다.
+  useEffect(() => {
+    if (streaming || !convId) return;
+    api.conversation(convId).then((d) => {
+      setMessages((prev) => {
+        const last = prev[prev.length - 1], lastD = d.messages[d.messages.length - 1];
+        if (prev.length === d.messages.length && last?.id === lastD?.id && last?.content === lastD?.content) return prev;
+        const ids = new Set(d.messages.map((m) => m.id));
+        return [...d.messages, ...prev.filter((m) => m.id.startsWith("err") && !ids.has(m.id))];
+      });
+    }).catch(() => {});
+  }, [runningInfo, convId, streaming]);
 
   const loadConversation = useCallback((id: string) => {
     setConvId(id);
@@ -181,7 +198,11 @@ export default function App() {
   }, []);
 
   const send = useCallback(async (text: string, mode: Mode, attachments: { url: string; name: string; mime: string }[]) => {
-    if (streaming) return;
+    if (streaming) {
+      // 응답 진행 중 보낸 명령은 대기열에 쌓음 — 응답 완료 후 순서대로 자동 전송
+      setQueued((prev) => [...prev, { text, mode, attachments }]);
+      return;
+    }
     // "/new" — 현재 봇의 새 세션 시작. 이전 세션은 삭제되지 않고 요약만 이어받아 맥락 유지 (계정·키값은 봇 장기기억이 보존)
     const newMatch = text.trim().match(/^\/new(?:\s+([\s\S]*))?$/);
     if (newMatch) {
@@ -265,7 +286,17 @@ export default function App() {
     });
   }, [convId, currentConv, effectiveModel, streaming, patchMessage, refreshConversations, refreshAgents, pendingAgent, agents, conversations, personaId, workspaceId]);
 
+  // 스트리밍이 끝나면 대기 중인 명령을 한 건씩 자동 전송 — 다음 건은 다시 스트리밍이 끝날 때 전송
+  useEffect(() => {
+    if (!streaming && queued.length) {
+      const [next, ...rest] = queued;
+      setQueued(rest);
+      send(next.text, next.mode, next.attachments);
+    }
+  }, [streaming, queued, send]);
+
   const stop = useCallback(() => {
+    setQueued([]);
     abortRef.current?.abort();
     setStreaming(false);
   }, []);
@@ -470,7 +501,7 @@ export default function App() {
         {(!agentsLoaded || agents.length > 0 || convId || pendingAgent) && (
           <div className="px-3 pt-1 sm:px-4 pb-[calc(3.5rem+env(safe-area-inset-bottom))]">
             <div className="mx-auto max-w-3xl">
-              <Composer models={models} model={effectiveModel} onModelChange={changeModel} onSend={send} onStop={stop} streaming={streaming} personas={personas} personaId={personaId} onPersonaChange={setPersonaId} skills={skills} />
+              <Composer models={models} model={effectiveModel} onModelChange={changeModel} onSend={send} onStop={stop} streaming={streaming} queued={queued} onRemoveQueued={(i) => setQueued((prev) => prev.filter((_, j) => j !== i))} personas={personas} personaId={personaId} onPersonaChange={setPersonaId} skills={skills} />
             </div>
           </div>
         )}

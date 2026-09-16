@@ -16,6 +16,8 @@ export function Composer({
   onSend,
   onStop,
   streaming,
+  queued,
+  onRemoveQueued,
   personas,
   personaId,
   onPersonaChange,
@@ -27,6 +29,8 @@ export function Composer({
   onSend: (text: string, mode: Mode, attachments: Attachment[]) => void;
   onStop: () => void;
   streaming: boolean;
+  queued: { text: string; mode: Mode; attachments: Attachment[] }[];
+  onRemoveQueued: (i: number) => void;
   personas: Persona[];
   personaId: string;
   onPersonaChange: (id: string) => void;
@@ -65,7 +69,7 @@ export function Composer({
 
   const send = () => {
     const t = text.trim();
-    if ((!t && !attachments.length) || streaming) return;
+    if (!t && !attachments.length) return; // 스트리밍 중이면 App의 대기열로 들어가 응답 후 자동 전송됨
     onSend(t, mode, attachments);
     setText("");
     setAttachments([]);
@@ -119,6 +123,17 @@ export function Composer({
         </div>
       )}
       <input ref={fileRef} type="file" multiple accept="image/*,.pdf,.txt,.md" className="hidden" onChange={(e) => { if (e.target.files) upload(e.target.files); e.target.value = ""; }} />
+      {queued.length > 0 && (
+        <div className="mb-2 space-y-1 px-1">
+          {queued.map((q, i) => (
+            <div key={i} className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-stone-600">
+              <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-500" />
+              <span className="min-w-0 flex-1 truncate"><span className="text-amber-700">대기 중</span> {q.text}</span>
+              <button onClick={() => onRemoveQueued(i)} className="shrink-0 text-stone-400 hover:text-stone-700" title="대기열에서 제거"><X size={12} /></button>
+            </div>
+          ))}
+        </div>
+      )}
       {slashMatches.length > 0 && (
         <div className="mb-2 rounded-xl border border-stone-200 bg-white p-1">
           {slashMatches.map((sk) => (
@@ -190,20 +205,22 @@ export function Composer({
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z" /><path d="M19 10v2a7 7 0 01-14 0v-2M12 19v4" /></svg>
         </button>
-        {streaming ? (
-          <button onClick={onStop} className="rounded-full bg-stone-900 p-2 text-white hover:bg-stone-700" title="중단">
+        {streaming && (
+          <button onClick={onStop} className="rounded-full border border-stone-300 bg-white p-2 text-stone-600 hover:bg-stone-100" title="중단 (대기 중인 명령도 취소)">
             <svg width="14" height="14" viewBox="0 0 14 14"><rect x="2" y="2" width="10" height="10" rx="2" fill="currentColor" /></svg>
           </button>
-        ) : (
-          <button
-            onClick={send}
-            disabled={!text.trim()}
-            className="rounded-full bg-stone-900 p-2 text-white hover:bg-stone-700 disabled:opacity-30"
-            title="전송"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
-          </button>
         )}
+        <button
+          onClick={send}
+          disabled={!text.trim()}
+          className="relative rounded-full bg-stone-900 p-2 text-white hover:bg-stone-700 disabled:opacity-30"
+          title={streaming ? "대기열에 추가 — 현재 응답 완료 후 자동 전송" : "전송"}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
+          {queued.length > 0 && (
+            <span className="absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-sky-600 px-1 text-[9px] font-bold text-white">{queued.length}</span>
+          )}
+        </button>
       </div>
     </div>
   );
