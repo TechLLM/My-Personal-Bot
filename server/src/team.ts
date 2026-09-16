@@ -267,10 +267,10 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
         const { normalizeReport } = await import("./report");
         const runMeta = JSON.stringify({ type: "tools", events: state.toolLog.map((l) => ({ type: "read", title: l.tool, url: "" })) });
         const task = `[${caller?.name ?? "사용자"} 지시] ${inst}`;
-        const report = await normalizeReport(target.name, inst, state.result ?? "(결과 없음)", state.toolLog.map((l) => l.tool));
+        const report = await normalizeReport(target.name, inst, state.result?.trim() || "(결과 없음)", state.toolLog.map((l) => l.tool));
         appendToAgentSession(agentSessionConvId(target.id), task, report, target.model, runMeta);
       }
-      return `[${target.name} 실행 결과 — ${state.status === "done" ? "완료" : "실패"}]\n${state.result ?? "(결과 없음)"}`;
+      return `[${target.name} 실행 결과 — ${state.status === "done" ? "완료" : "실패"}]\n${state.result?.trim() || "(결과 없음)"}`;
     };
 
     // 단일 지시는 순차, 다중 지시는 병렬로 동시 실행 — 결과를 합쳐 반환
@@ -564,7 +564,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
             continue;
           }
           state.status = "done";
-          state.result = res.content;
+          state.result = res.content?.trim() ? res.content : "(빈 응답 — 결과 없음)"; // 빈 결과가 보고서·세션으로 흐르지 않게
           return;
         }
       }

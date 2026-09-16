@@ -113,12 +113,12 @@ export function dispatchAgentMessage(msgId: string) {
       db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
         .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
       db.prepare("UPDATE agent_messages SET status = ?, reply = ?, done_at = ? WHERE id = ?")
-        .run(state.status === "done" ? "done" : "failed", (state.result ?? "").slice(0, 4000), now(), msgId);
+        .run(state.status === "done" ? "done" : "failed", (state.result?.trim() || "(결과 없음)").slice(0, 4000), now(), msgId);
       // 양쪽 봇 세션에 기록 — 받는 봇은 처리 내역, 보낸 봇은 회신
       const { appendToAgentSession } = await import("./routes/chat");
       const { normalizeReport } = await import("./report");
       const meta = JSON.stringify({ type: "tools", events: state.toolLog.map((l: any) => ({ type: "read", title: l.tool, url: "" })) });
-      const report = await normalizeReport(target.name, msg.content, state.result ?? "(결과 없음)", state.toolLog.map((l: any) => l.tool));
+      const report = await normalizeReport(target.name, msg.content, state.result?.trim() || "(결과 없음)", state.toolLog.map((l: any) => l.tool));
       appendToAgentSession(agentSessionConvId(target.id), `[${sender?.name ?? "사용자"} 메시지] ${msg.content}`, report, target.model, meta);
       if (sender) appendToAgentSession(agentSessionConvId(sender.id), `[${target.name} 회신 도착] ${msg.content.slice(0, 100)}`, report, target.model, meta);
     } catch (e) {
@@ -219,5 +219,5 @@ async function resumeAgent(req: any, task: string) {
   const { appendToAgentSession } = await import("./routes/chat");
   const { normalizeReport } = await import("./report");
   const meta = JSON.stringify({ type: "tools", events: state.toolLog.map((l: any) => ({ type: "read", title: l.tool, url: "" })) });
-  appendToAgentSession(agentSessionConvId(agent.id), `[승인 처리 — 작업 재개] ${req.tool}`, await normalizeReport(agent.name, req.resume || req.tool, state.result ?? "(결과 없음)", state.toolLog.map((l: any) => l.tool)), agent.model, meta);
+  appendToAgentSession(agentSessionConvId(agent.id), `[승인 처리 — 작업 재개] ${req.tool}`, await normalizeReport(agent.name, req.resume || req.tool, state.result?.trim() || "(결과 없음)", state.toolLog.map((l: any) => l.tool)), agent.model, meta);
 }

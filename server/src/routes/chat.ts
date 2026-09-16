@@ -385,11 +385,11 @@ export const chatRoute = new Hono()
               db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
                 .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
               const meta = JSON.stringify({ type: "tools", events: state.toolLog.map((l: any) => ({ type: "read", title: l.tool, url: "" })) });
-              const report = await normalizeReport(bot.name, userMsg.content, state.result ?? "(결과 없음)", state.toolLog.map((l: any) => l.tool));
+              const report = await normalizeReport(bot.name, userMsg.content, state.result?.trim() || "(결과 없음)", state.toolLog.map((l: any) => l.tool));
               const botMsg = insertMessage(convId!, lastMsgId, "assistant", report, null, bot.name, meta);
               lastMsgId = botMsg.id;
               send("assistant_message", { message: withSiblings(botMsg) });
-              send("team", { type: "agent_done", agentId: bot.id, status: state.status, result: (state.result ?? "").slice(0, 4000) });
+              send("team", { type: "agent_done", agentId: bot.id, status: state.status, result: (state.result?.trim() || "(결과 없음)").slice(0, 4000) });
               // 봇 자기 세션에도 동일하게 기록 — 봇별 작업 이력 유지
               appendToAgentSession(agentSessionConvId(bot.id), `[그룹 대화 지시] ${userMsg.content}`, report, bot.model, meta);
             }

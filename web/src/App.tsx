@@ -45,7 +45,7 @@ export default function App() {
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const refreshConversations = useCallback(() => {
-    api.conversations().then((d) => setConversations(d.conversations));
+    api.conversations().then((d) => setConversations(d.conversations)).catch(() => {});
   }, []);
 
   const refreshAgents = useCallback(() => {
@@ -108,6 +108,12 @@ export default function App() {
     api.conversation(id).then((d) => {
       setMessages(d.messages);
       if (d.conversation.model) setModel(d.conversation.model);
+    }).catch(() => {
+      setMessages([{ // 로드 실패가 조용히 지나가지 않게 명시 — 서버 재시작 중 열기 등
+        id: "err" + Date.now(), conversation_id: id, parent_id: null, role: "assistant",
+        content: "⚠️ 대화를 불러오지 못했습니다 — 서버 연결을 확인한 뒤 다시 시도해 주세요.", reasoning: null, model: null, search_meta: null, attachments: null,
+        tokens_in: null, tokens_out: null, created_at: Date.now(),
+      }]);
     });
   }, []);
 

@@ -48,6 +48,7 @@ export function cleanOutput(text: string): string {
 // 모델 품질과 무관하게 최소한의 정보(요약/결과/미확인/다음 단계)가 항상 담기게 함
 export async function normalizeReport(agentName: string, task: string, result: string, tools?: string[]): Promise<string> {
   const cleaned = cleanOutput(result);
+  if (!cleaned.trim()) return "## 요약\n봇이 결과를 생성하지 못했습니다.\n\n## 결과\n없음\n\n## 미확인\n전체 작업 미수행\n\n## 다음 단계\n같은 지시를 다시 보내 확인"; // 빈 원문이면 섹션만 있는 빈 보고서 대신 명시
   try {
     const { endpoint, model } = resolveModel("fast");
     const { chatOnce } = await import("./providers/openaiCompat");
