@@ -54,11 +54,11 @@ export function SearchTrace({ events, done }: { events: SearchEvent[]; done: boo
             const current = i === stageIdx && !done && lastPhase !== "verify_done";
             return (
               <div key={s.key} className="flex items-center gap-1.5">
-                {i > 0 && <span className="text-zinc-700">→</span>}
+                {i > 0 && <span className="text-stone-300">→</span>}
                 <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
                   current ? "bg-sky-500/20 text-sky-300 mb-shimmer"
                   : passed ? "bg-emerald-500/10 text-emerald-400"
-                  : "bg-zinc-800/60 text-zinc-600"
+                  : "bg-stone-200/60 text-stone-400"
                 }`}>
                   {passed ? "✓ " : ""}{s.label}
                 </span>
@@ -68,20 +68,20 @@ export function SearchTrace({ events, done }: { events: SearchEvent[]; done: boo
         </div>
       )}
       {plan?.queries && (
-        <div className="mt-2 text-xs text-zinc-400">
-          검색 계획: {plan.queries.map((q, i) => <span key={i} className="mr-1.5 inline-block rounded bg-zinc-800 px-1.5 py-0.5">{q}</span>)}
+        <div className="mt-2 text-xs text-stone-600">
+          검색 계획: {plan.queries.map((q, i) => <span key={i} className="mr-1.5 inline-block rounded bg-stone-200 px-1.5 py-0.5">{q}</span>)}
         </div>
       )}
       <div className="mt-2 space-y-1 text-xs max-h-48 overflow-y-auto">
         {searches.map((s, i) => (
-          <div key={`s${i}`} className="italic text-zinc-500">· "{s.query}" → {s.results?.length ?? 0}건</div>
+          <div key={`s${i}`} className="italic text-stone-500">· "{s.query}" → {s.results?.length ?? 0}건</div>
         ))}
         {dedupedReads.map((r, i) => (
-          <div key={`r${i}`} className="italic text-zinc-500">
+          <div key={`r${i}`} className="italic text-stone-500">
             {!r.url ? (
               <span>· {r.title || r.url}</span>
             ) : (
-              <span>· 읽음: <a href={r.url} target="_blank" rel="noreferrer" className="hover:text-sky-400 underline decoration-zinc-700">{r.title}</a></span>
+              <span>· 읽음: <a href={r.url} target="_blank" rel="noreferrer" className="hover:text-sky-400 underline decoration-stone-300">{r.title}</a></span>
             )}
           </div>
         ))}

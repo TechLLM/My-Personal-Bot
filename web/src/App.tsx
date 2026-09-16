@@ -392,20 +392,20 @@ export default function App() {
         working={runningInfo}
       />
       <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center gap-2 border-b border-zinc-800/60 px-3 py-2 sm:px-4 sm:py-2.5">
-          <button className="-ml-1 p-1.5 text-zinc-500 hover:text-zinc-200" onClick={() => setSidebarOpen(!sidebarOpen)}><Menu size={16} strokeWidth={1.8} /></button>
-          <span className="text-sm text-zinc-400 truncate">
+        <header className="flex items-center gap-2 border-b border-stone-200/60 px-3 py-2 sm:px-4 sm:py-2.5">
+          <button className="-ml-1 p-1.5 text-stone-500 hover:text-stone-800" onClick={() => setSidebarOpen(!sidebarOpen)}><Menu size={16} strokeWidth={1.8} /></button>
+          <span className="text-sm text-stone-600 truncate">
             {convId ? currentConv?.agent_name ?? currentConv?.title ?? "세션" : pendingAgent ? `${pendingAgent.name}와의 새 세션` : "봇 선택"}
           </span>
           {!convId && pendingAgent && (
-            <span className="flex shrink-0 items-center gap-1 rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-400">
+            <span className="flex shrink-0 items-center gap-1 rounded-full bg-stone-200 px-2 py-0.5 text-[11px] text-stone-600">
               {!!pendingAgent.is_boss && <Crown size={10} className="text-amber-400" />}
               <AgentIcon name={pendingAgent.name} seed={pendingAgent.avatar} size={11} /> {pendingAgent.name}
-              <button className="ml-0.5 text-zinc-600 hover:text-zinc-300" onClick={() => setPendingAgent(null)}>×</button>
+              <button className="ml-0.5 text-stone-400 hover:text-stone-700" onClick={() => setPendingAgent(null)}>×</button>
             </span>
           )}
           {convId && currentConv?.agent_name && (
-            <span className="flex shrink-0 items-center gap-1 rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-400" title="이 세션을 담당하는 봇 — 모델을 바꿔도 봇의 기억·맥락은 유지됩니다">
+            <span className="flex shrink-0 items-center gap-1 rounded-full bg-stone-200 px-2 py-0.5 text-[11px] text-stone-600" title="이 세션을 담당하는 봇 — 모델을 바꿔도 봇의 기억·맥락은 유지됩니다">
               <AgentIcon name={currentConv.agent_name} seed={currentConv.agent_avatar} size={11} /> {currentConv.agent_name}
             </span>
           )}
@@ -420,22 +420,22 @@ export default function App() {
             {empty && convId && (
               <div className="mt-[25vh] text-center">
                 {currentConv?.agent_name && (
-                  <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-zinc-800 text-zinc-300">
+                  <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-stone-200 text-stone-700">
                     <AgentIcon name={currentConv.agent_name} seed={currentConv.agent_avatar} size={22} />
                   </div>
                 )}
-                <h1 className="text-lg font-semibold text-zinc-200">{currentConv?.agent_name ?? currentConv?.title ?? "새 세션"}</h1>
-                <p className="mt-1 text-xs text-zinc-500">이 봇에게 업무를 지시하세요</p>
+                <h1 className="font-display text-2xl font-semibold text-stone-900">{currentConv?.agent_name ?? currentConv?.title ?? "새 세션"}</h1>
+                <p className="mt-1 text-xs text-stone-500">이 봇에게 업무를 지시하세요</p>
               </div>
             )}
             {empty && !convId && pendingAgent && (
               <div className="mt-[25vh] text-center">
-                <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-zinc-800 text-zinc-300">
+                <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-stone-200 text-stone-700">
                   <AgentIcon name={pendingAgent.name} seed={pendingAgent.avatar} size={22} />
                 </div>
-                <h1 className="text-lg font-semibold text-zinc-200">{pendingAgent.name}</h1>
-                <p className="mt-1 text-xs text-zinc-500 max-w-md mx-auto">{pendingAgent.role_prompt || "이 봇에게 업무를 지시하세요"}</p>
-                <p className="mt-0.5 font-mono text-[10px] text-zinc-600">{pendingAgent.model_label ?? pendingAgent.model}</p>
+                <h1 className="font-display text-2xl font-semibold text-stone-900">{pendingAgent.name}</h1>
+                <p className="mt-1 text-xs text-stone-500 max-w-md mx-auto">{pendingAgent.role_prompt || "이 봇에게 업무를 지시하세요"}</p>
+                <p className="mt-0.5 font-mono text-[10px] text-stone-400">{pendingAgent.model_label ?? pendingAgent.model}</p>
               </div>
             )}
             <div className="space-y-6">
@@ -452,7 +452,7 @@ export default function App() {
                 />
               ))}
               {streaming && (
-                <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 px-4 py-2.5">
+                <div className="rounded-xl border border-stone-200/60 bg-white/30 px-4 py-2.5">
                   <WorkingStatus events={searchEvents} agent={activeAgent} />
                 </div>
               )}

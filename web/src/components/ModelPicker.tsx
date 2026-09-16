@@ -67,31 +67,31 @@ export function ModelPicker({ models, value, onChange }: { models: Model[]; valu
   return (
     <div ref={ref} className="relative shrink-0">
       <button
-        className="rounded-full bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-700 max-w-[200px] truncate whitespace-nowrap"
+        className="rounded-full bg-stone-200 px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-300 max-w-[200px] truncate whitespace-nowrap"
         onClick={() => setOpen(!open)}
         title={value}
       >
         {current?.label ?? value ?? "모델 선택"} ▾
       </button>
       {open && (
-        <div className="absolute bottom-full mb-2 left-0 z-50 w-96 max-w-[85vw] rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl">
-          <div className="flex gap-1 overflow-x-auto border-b border-zinc-800 p-2">
+        <div className="absolute bottom-full mb-2 left-0 z-50 w-96 max-w-[85vw] rounded-xl border border-stone-200 bg-white shadow-[0_8px_30px_rgba(0,0,0,0.06)]">
+          <div className="flex gap-1 overflow-x-auto border-b border-stone-200 p-2">
             <button
               onClick={() => setProvider("all")}
-              className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium ${provider === "all" ? "bg-sky-600 text-white" : "bg-zinc-800 text-zinc-400"}`}
+              className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium ${provider === "all" ? "bg-sky-600 text-white" : "bg-stone-200 text-stone-600"}`}
             >전체</button>
             {providers.map((p) => (
               <button
                 key={p}
                 onClick={() => setProvider(p)}
-                className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium ${provider === p ? "bg-sky-600 text-white" : "bg-zinc-800 text-zinc-400"}`}
+                className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium ${provider === p ? "bg-sky-600 text-white" : "bg-stone-200 text-stone-600"}`}
               >{p}</button>
             ))}
           </div>
-          <div className="border-b border-zinc-800 p-2">
+          <div className="border-b border-stone-200 p-2">
             <input
               autoFocus
-              className="w-full rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs outline-none placeholder:text-zinc-600"
+              className="w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none placeholder:text-stone-400"
               placeholder="모델 검색…"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
@@ -101,17 +101,17 @@ export function ModelPicker({ models, value, onChange }: { models: Model[]; valu
             {groups.map(([ns, ms]) => (
               <div key={ns}>
                 <button
-                  className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-[10px] font-semibold uppercase text-zinc-500 hover:text-zinc-300"
+                  className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-[10px] font-semibold uppercase text-stone-500 hover:text-stone-700"
                   onClick={() => toggleGroup(ns)}
                 >
                   <span>{expanded(ns) ? "▾" : "▸"}</span>
                   {ns}
-                  <span className="font-normal text-zinc-600">({ms.length})</span>
+                  <span className="font-normal text-stone-400">({ms.length})</span>
                 </button>
                 {expanded(ns) && ms.map((m) => <Row key={m.id} m={m} value={value} pick={pick} />)}
               </div>
             ))}
-            {!filtered.length && <div className="px-3 py-4 text-xs text-zinc-600">일치하는 모델 없음</div>}
+            {!filtered.length && <div className="px-3 py-4 text-xs text-stone-400">일치하는 모델 없음</div>}
           </div>
         </div>
       )}
@@ -123,15 +123,15 @@ function Row({ m, value, pick }: { m: Model; value: string; pick: (id: string) =
   const name = m.id.includes("/") ? m.id.slice(m.id.indexOf("/") + 1) : m.id;
   return (
     <button
-      className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 pl-6 text-left text-xs hover:bg-zinc-800 ${m.id === value ? "bg-zinc-800 text-sky-300" : "text-zinc-300"}`}
+      className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 pl-6 text-left text-xs hover:bg-stone-200 ${m.id === value ? "bg-stone-200 text-sky-300" : "text-stone-700"}`}
       onClick={() => pick(m.id)}
     >
       <span className="truncate">{name}</span>
       <span className="ml-auto flex shrink-0 gap-1">
-        {m.reasoning && <span className="rounded bg-violet-900/40 px-1 text-[9px] text-violet-300">THINK</span>}
-        {m.vision && <span className="rounded bg-emerald-900/40 px-1 text-[9px] text-emerald-300">EYE</span>}
-        {m.tools === false && <span className="rounded bg-zinc-800 px-1 text-[9px] text-zinc-500">TXT</span>}
-        <span className="rounded bg-zinc-800 px-1 text-[9px] text-zinc-400">{m.providerName || m.provider}</span>
+        {m.reasoning && <span className="rounded bg-violet-100 px-1 text-[9px] text-violet-700">THINK</span>}
+        {m.vision && <span className="rounded bg-emerald-100 px-1 text-[9px] text-emerald-700">EYE</span>}
+        {m.tools === false && <span className="rounded bg-stone-200 px-1 text-[9px] text-stone-500">TXT</span>}
+        <span className="rounded bg-stone-200 px-1 text-[9px] text-stone-600">{m.providerName || m.provider}</span>
       </span>
     </button>
   );

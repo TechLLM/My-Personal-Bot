@@ -49,7 +49,7 @@ export function AgentIcon({ name, seed, size = 14, className = "", working = fal
     <svg
       width={size} height={size} viewBox="0 0 24 24"
       className={`${className}${working ? " mb-working" : ""}`}
-      style={{ color: `hsl(${hue} 45% 68%)` }}
+      style={{ color: `hsl(${hue} 38% 44%)` }}
       aria-hidden
     >
       <g className="mb-look" style={{ animationDelay: `-${delay}s` }}>

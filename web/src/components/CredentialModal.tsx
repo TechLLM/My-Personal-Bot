@@ -32,21 +32,21 @@ export function CredentialModal({ request, onDone }: { request: SiteRequest; onD
     }
   };
 
-  const input = "w-full rounded-lg bg-zinc-800 px-3 py-2 text-sm outline-none placeholder:text-zinc-600";
+  const input = "w-full rounded-lg bg-stone-200 px-3 py-2 text-sm outline-none placeholder:text-stone-400";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-      <div className="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/30 p-4">
+      <div className="w-full max-w-sm rounded-2xl border border-stone-200 bg-white p-5 shadow-[0_8px_30px_rgba(0,0,0,0.06)]">
         <div className="mb-4 flex items-start gap-3">
           <div className="rounded-xl bg-emerald-500/10 p-2 text-emerald-400"><ShieldCheck size={18} /></div>
           <div className="flex-1">
             <h2 className="text-sm font-semibold">봇이 계정 정보를 요청했습니다</h2>
-            <p className="mt-0.5 text-xs leading-relaxed text-zinc-500">
+            <p className="mt-0.5 text-xs leading-relaxed text-stone-500">
               {request.reason || `"${request.name}" 로그인에 필요합니다.`}
-              <br />입력한 계정은 <b className="text-zinc-300">암호화되어 이 맥미니에만</b> 저장되며, 대화 기록과 AI 모델에는 노출되지 않습니다.
+              <br />입력한 계정은 <b className="text-stone-700">암호화되어 이 맥미니에만</b> 저장되며, 대화 기록과 AI 모델에는 노출되지 않습니다.
             </p>
           </div>
-          <button onClick={later} className="text-zinc-500 hover:text-zinc-200"><X size={16} /></button>
+          <button onClick={later} className="text-stone-500 hover:text-stone-800"><X size={16} /></button>
         </div>
         <div className="space-y-2">
           <input className={input} placeholder="사이트 이름" value={name} onChange={(e) => setName(e.target.value)} />
@@ -56,9 +56,9 @@ export function CredentialModal({ request, onDone }: { request: SiteRequest; onD
             onKeyDown={(e) => { if (e.key === "Enter") save(); }} />
         </div>
         <div className="mt-4 flex gap-2">
-          <button onClick={later} disabled={busy} className="flex-1 rounded-lg bg-zinc-800 py-2 text-xs text-zinc-400 hover:text-zinc-200">나중에</button>
+          <button onClick={later} disabled={busy} className="flex-1 rounded-lg bg-stone-200 py-2 text-xs text-stone-600 hover:text-stone-800">나중에</button>
           <button onClick={save} disabled={busy || !name.trim() || !url.trim() || !username.trim() || !password}
-            className="flex-1 rounded-lg bg-zinc-100 py-2 text-xs font-semibold text-zinc-900 disabled:opacity-40">
+            className="flex-1 rounded-lg bg-stone-900 py-2 text-xs font-semibold text-white disabled:opacity-40">
             {busy ? "저장 중…" : "암호화하여 저장"}
           </button>
         </div>

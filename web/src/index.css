@@ -1,49 +1,75 @@
 @import "tailwindcss";
-@import "highlight.js/styles/github-dark.css";
+@import "highlight.js/styles/github.css";
+
+/* ── 디자인 토큰 — 웜 모노크롬 + 절제된 파스텔 액센트 ── */
+:root {
+  --canvas: #F7F6F3;
+  --ink: #2F3437;
+  --ink-strong: #16181A;
+  --ink-mute: #787774;
+  --line: #E7E5E1;
+  --serif: "Newsreader", "Instrument Serif", ui-serif, Georgia, "Apple SD Gothic Neo", serif;
+  --sans: "Pretendard", "SF Pro Display", -apple-system, "Helvetica Neue", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  --mono: "Geist Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+}
 
 html, body, #root { height: 100%; }
-body { background: #09090b; color: #e4e4e7; }
+body {
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--sans);
+  letter-spacing: -0.011em;
+  -webkit-font-smoothing: antialiased;
+}
+.font-display { font-family: var(--serif); letter-spacing: -0.025em; }
 
+::selection { background: #E1F3FE; }
+
+/* ── 마크다운 — 문서처럼 읽히는 타이포그래피 ── */
+.markdown { line-height: 1.68; }
 .markdown pre {
-  background: #0d1117;                /* 에디터 다크 — 코드는 구분된 캔버스에 */
-  border: 1px solid #21262d;
-  border-left: 2px solid #38bdf8;     /* 좌측 액센트 — 에디터 gutter 느낌 */
+  background: #F6F8FA;                 /* 라이트 에디터 캔버스 */
+  border: 1px solid var(--line);
+  border-left: 2px solid #9CCFEC;      /* 좌측 액센트 — 에디터 gutter */
   border-radius: 0.5rem;
   padding: 0.75rem 1rem;
   overflow-x: auto;
   font-size: 0.85rem;
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--mono);
   line-height: 1.55;
+  color: #1F2328;
 }
 .markdown pre code { font-family: inherit; }
 .markdown code:not(pre code) {
-  background: #27272a;
+  background: #EFF1F3;
   border-radius: 0.25rem;
   padding: 0.1rem 0.3rem;
   font-size: 0.85em;
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--mono);
 }
-/* diff 블록 — 추가/삭제 라인을 에디터처럼 색으로 구분 */
-.markdown .hljs-addition { color: #4ade80; background: rgba(74, 222, 128, 0.08); display: inline-block; width: 100%; }
-.markdown .hljs-deletion { color: #f87171; background: rgba(248, 113, 113, 0.08); display: inline-block; width: 100%; }
+/* diff 블록 — GitHub 라이트 색상 */
+.markdown .hljs-addition { color: #1A7F37; background: #DAFBE1; display: inline-block; width: 100%; }
+.markdown .hljs-deletion { color: #D1242F; background: #FFEBE9; display: inline-block; width: 100%; }
 .markdown p { margin: 0.5rem 0; }
 .markdown ul, .markdown ol { margin: 0.5rem 0; padding-left: 1.5rem; }
 .markdown ul { list-style: disc; }
 .markdown ol { list-style: decimal; }
-.markdown h1, .markdown h2, .markdown h3 { font-weight: 600; margin: 1rem 0 0.5rem; }
+.markdown h1, .markdown h2, .markdown h3 { font-weight: 650; letter-spacing: -0.02em; margin: 1.1rem 0 0.5rem; color: var(--ink-strong); }
 .markdown h1 { font-size: 1.4rem; }
 .markdown h2 { font-size: 1.2rem; }
 .markdown h3 { font-size: 1.05rem; }
 .markdown table { border-collapse: collapse; margin: 0.75rem 0; }
-.markdown th, .markdown td { border: 1px solid #3f3f46; padding: 0.35rem 0.75rem; }
-.markdown blockquote { border-left: 3px solid #3f3f46; padding-left: 1rem; color: #a1a1aa; margin: 0.5rem 0; }
-.markdown a { color: #7dd3fc; text-decoration: underline; }
+.markdown th, .markdown td { border: 1px solid var(--line); padding: 0.35rem 0.75rem; }
+.markdown th { background: #FBFBFA; font-weight: 600; }
+.markdown blockquote { border-left: 3px solid var(--line); padding-left: 1rem; color: var(--ink-mute); margin: 0.5rem 0; }
+.markdown a { color: #1F6C9F; text-decoration: underline; text-decoration-color: #B9DFF2; }
 
 @keyframes pulse-soft { 0%,100% { opacity: 1 } 50% { opacity: 0.4 } }
 .thinking-dot { animation: pulse-soft 1.2s ease-in-out infinite; }
 
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 4px; }
+::-webkit-scrollbar-thumb { background: #D6D3CD; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #C4C1BA; }
 ::-webkit-scrollbar-track { background: transparent; }
 
 /* 봇 얼굴 아이콘 — 눈 깜빡임 + 시선 이동 */
@@ -66,6 +92,10 @@ body { background: #09090b; color: #e4e4e7; }
 .mb-spark i:nth-child(3) { animation-delay: .44s; }
 .mb-spark i:nth-child(4) { animation-delay: .66s; }
 @keyframes mb-shine { to { background-position: -200% 0; } }
-.mb-shimmer { background: linear-gradient(90deg, #71717a 25%, #f4f4f5 50%, #71717a 75%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: mb-shine 1.8s linear infinite; }
+.mb-shimmer { background: linear-gradient(90deg, #A8A29E 25%, #292524 50%, #A8A29E 75%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: mb-shine 1.8s linear infinite; }
 @keyframes mb-word-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 .mb-word { display: inline-block; animation: mb-word-in .3s ease-out; }
+
+/* 진입 모션 — 조용한 페이드+상승 */
+@keyframes mb-rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+.mb-rise { animation: mb-rise .55s cubic-bezier(0.16, 1, 0.3, 1) both; }

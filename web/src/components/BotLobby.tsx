@@ -71,9 +71,9 @@ export function BotLobby({
   return (
     <div className="mt-[10vh]">
       <div className="text-center mb-6">
-        <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-zinc-100 text-2xl font-bold text-zinc-900">M</div>
-        <h1 className="text-xl font-semibold text-zinc-200">{agentsLoaded && agents.length === 0 ? "첫 봇을 만드세요" : "봇을 선택하거나 새로 만드세요"}</h1>
-        <p className="mt-2 text-sm text-zinc-500">
+        <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-stone-900 font-display text-2xl font-semibold text-white">M</div>
+        <h1 className="font-display text-2xl font-semibold text-stone-900">{agentsLoaded && agents.length === 0 ? "첫 봇을 만드세요" : "봇을 선택하거나 새로 만드세요"}</h1>
+        <p className="mt-2 text-sm text-stone-500">
           {agentsLoaded && agents.length === 0
             ? "모든 대화는 봇이 담당합니다 — 먼저 봇을 만들어야 대화할 수 있습니다. CEO로 지정하면 다른 봇들을 관리합니다"
             : "모든 대화는 봇이 담당합니다 — 봇을 고르면 그 봇의 기억·역할·도구로 일합니다"}
@@ -82,10 +82,10 @@ export function BotLobby({
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-w-2xl mx-auto">
         {list.map((a) => (
-          <div key={a.id} onClick={() => onSelect(a)} className="group cursor-pointer rounded-xl border border-zinc-800 px-3.5 py-3 hover:bg-zinc-900 hover:border-zinc-700 transition-colors" title={`${a.role_prompt || "범용 봇"} — 클릭하면 이 봇과 대화`}>
+          <div key={a.id} onClick={() => onSelect(a)} className="group cursor-pointer rounded-xl border border-stone-200 px-3.5 py-3 hover:bg-white hover:border-stone-300 transition-colors" title={`${a.role_prompt || "범용 봇"} — 클릭하면 이 봇과 대화`}>
             <div className="flex items-center gap-2">
               <AgentIcon name={a.name} seed={a.avatar} size={18} className="shrink-0" />
-              <span className="font-medium text-sm text-zinc-200 truncate">{a.name}</span>
+              <span className="font-medium text-sm text-stone-800 truncate">{a.name}</span>
               {!!a.is_boss && (
                 <span className="flex items-center gap-0.5 rounded bg-amber-900/50 px-1 py-px text-[9px] text-amber-300"><Crown size={9} /> CEO</span>
               )}
@@ -94,61 +94,61 @@ export function BotLobby({
               )}
               <span className="ml-auto flex shrink-0 items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
                 <button
-                  className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+                  className="rounded p-1 text-stone-500 hover:bg-stone-200 hover:text-stone-800"
                   title="핀 고정 — 목록 상단에 표시"
                   onClick={() => api.updateAgent(a.id, { pinned: a.pinned ? 0 : 1 }).then(onRefresh).catch(() => {})}
                 ><Pin size={11} className={a.pinned ? "text-amber-400" : ""} /></button>
                 <button
-                  className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+                  className="rounded p-1 text-stone-500 hover:bg-stone-200 hover:text-stone-800"
                   title="복제 — 역할·모델·스킬만 복사 (대화·기억은 복사되지 않음)"
                   onClick={() => api.duplicateAgent(a.id).then(onRefresh).catch(() => {})}
                 ><Copy size={11} /></button>
                 <button
-                  className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+                  className="rounded p-1 text-stone-500 hover:bg-stone-200 hover:text-stone-800"
                   title={a.hidden ? "숨김 해제" : "숨기기 — 사이드바에서 감춤"}
                   onClick={() => api.updateAgent(a.id, { hidden: a.hidden ? 0 : 1 }).then(onRefresh).catch(() => {})}
                 >{a.hidden ? <Eye size={11} /> : <EyeOff size={11} />}</button>
                 <button
-                  className="flex items-center gap-1 rounded-full bg-zinc-100 px-2.5 py-1 text-[11px] font-medium text-zinc-900 hover:bg-white"
+                  className="flex items-center gap-1 rounded-full bg-stone-900 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-stone-700"
                   onClick={() => onSelect(a)}
                 ><MessageSquare size={11} /> 대화</button>
               </span>
             </div>
-            <div className="mt-1 text-[11px] text-zinc-500 truncate">{a.role_prompt || "범용 봇"}</div>
-            <div className="mt-0.5 font-mono text-[10px] text-zinc-600">{a.model_label ?? a.model ?? "subagent"}</div>
+            <div className="mt-1 text-[11px] text-stone-500 truncate">{a.role_prompt || "범용 봇"}</div>
+            <div className="mt-0.5 font-mono text-[10px] text-stone-400">{a.model_label ?? a.model ?? "subagent"}</div>
           </div>
         ))}
 
         {/* 새 봇 만들기 카드 */}
         <button
           onClick={() => setCreating(!creating)}
-          className={`rounded-xl border border-dashed px-3.5 py-3 text-left transition-colors ${creating ? "border-zinc-600 bg-zinc-900" : "border-zinc-800 hover:bg-zinc-900 hover:border-zinc-700"}`}
+          className={`rounded-xl border border-dashed px-3.5 py-3 text-left transition-colors ${creating ? "border-stone-400 bg-white" : "border-stone-200 hover:bg-white hover:border-stone-300"}`}
         >
-          <div className="flex items-center gap-2 text-sm text-zinc-400">
+          <div className="flex items-center gap-2 text-sm text-stone-600">
             <Plus size={15} /> 새 봇 만들기
             {agents.length > 6 && (
-              <span className="ml-auto text-[11px] text-zinc-600" onClick={(e) => { e.stopPropagation(); setShowAll(!showAll); }}>
+              <span className="ml-auto text-[11px] text-stone-400" onClick={(e) => { e.stopPropagation(); setShowAll(!showAll); }}>
                 {showAll ? <ChevronUp size={12} className="inline" /> : <ChevronDown size={12} className="inline" />} {agents.length - 6}개 더
               </span>
             )}
           </div>
-          <div className="mt-1 text-[11px] text-zinc-600">이름·역할을 정하고 바로 대화를 시작합니다</div>
+          <div className="mt-1 text-[11px] text-stone-400">이름·역할을 정하고 바로 대화를 시작합니다</div>
         </button>
       </div>
 
       {creating && (
-        <div className="mx-auto mt-3 max-w-2xl rounded-xl border border-zinc-700 bg-zinc-900 p-4">
-          <div className="mb-3 flex items-center gap-1.5 text-[10px] font-medium text-zinc-500">
-            <span className={step === 1 ? "text-zinc-200" : ""}>1. 이름·얼굴</span>
+        <div className="mx-auto mt-3 max-w-2xl rounded-xl border border-stone-300 bg-white p-4">
+          <div className="mb-3 flex items-center gap-1.5 text-[10px] font-medium text-stone-500">
+            <span className={step === 1 ? "text-stone-800" : ""}>1. 이름·얼굴</span>
             <span>→</span>
-            <span className={step === 2 ? "text-zinc-200" : ""}>2. 페르소나·역할</span>
+            <span className={step === 2 ? "text-stone-800" : ""}>2. 페르소나·역할</span>
           </div>
 
           {step === 1 && (
             <div className="space-y-2.5">
               <div className="flex items-center gap-3">
                 <button
-                  className="shrink-0 rounded-xl bg-zinc-800 p-2 hover:bg-zinc-700 transition-colors"
+                  className="shrink-0 rounded-xl bg-stone-200 p-2 hover:bg-stone-300 transition-colors"
                   onClick={() => setFaceSeed(Math.random().toString(36).slice(2, 10))}
                   title="다른 얼굴"
                 >
@@ -157,20 +157,20 @@ export function BotLobby({
                 <div className="flex-1">
                   <div className="flex gap-2">
                     <input
-                      className="flex-1 rounded-lg bg-zinc-800 px-2.5 py-1.5 text-sm outline-none"
+                      className="flex-1 rounded-lg bg-stone-200 px-2.5 py-1.5 text-sm outline-none"
                       placeholder="봇 이름 (예: 회의록 정리봇)"
                       value={name} onChange={(e) => setName(e.target.value)}
                       autoFocus
                       onKeyDown={(e) => { if (e.key === "Enter" && name.trim()) setStep(2); }}
                     />
-                    <button className="shrink-0 rounded-lg bg-zinc-800 px-2.5 text-xs text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200" onClick={suggestName}>자동 이름</button>
+                    <button className="shrink-0 rounded-lg bg-stone-200 px-2.5 text-xs text-stone-600 hover:bg-stone-300 hover:text-stone-800" onClick={suggestName}>자동 이름</button>
                   </div>
-                  <p className="mt-1.5 text-[10px] text-zinc-600">얼굴은 자동으로 만들어집니다 — 아이콘을 눌러 다른 얼굴로 바꿀 수 있어요</p>
+                  <p className="mt-1.5 text-[10px] text-stone-400">얼굴은 자동으로 만들어집니다 — 아이콘을 눌러 다른 얼굴로 바꿀 수 있어요</p>
                 </div>
               </div>
               <div className="flex justify-end">
                 <button
-                  className="rounded-lg bg-zinc-100 px-3.5 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-white disabled:opacity-40"
+                  className="rounded-lg bg-stone-900 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-stone-700 disabled:opacity-40"
                   disabled={!name.trim()}
                   onClick={() => setStep(2)}
                 >다음 →</button>
@@ -180,29 +180,29 @@ export function BotLobby({
 
           {step === 2 && (
             <div className="space-y-2.5">
-              <div className="flex items-center gap-2 text-sm text-zinc-300">
+              <div className="flex items-center gap-2 text-sm text-stone-700">
                 <AgentIcon seed={`face:${faceSeed}`} size={20} />
                 <span className="font-medium">{name}</span>
-                <button className="text-[10px] text-zinc-600 hover:text-zinc-400" onClick={() => setStep(1)}>이름 변경</button>
+                <button className="text-[10px] text-stone-400 hover:text-stone-600" onClick={() => setStep(1)}>이름 변경</button>
               </div>
               <div className="flex gap-2">
                 <textarea
-                  className="flex-1 rounded-lg bg-zinc-800 px-2.5 py-1.5 text-xs outline-none" rows={2}
+                  className="flex-1 rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none" rows={2}
                   placeholder="페르소나·역할 지침 (예: 회의록을 요약하고 액션 아이템을 뽑는 비서)"
                   value={role} onChange={(e) => setRole(e.target.value)} autoFocus
                 />
-                <select className="w-40 self-start rounded-lg bg-zinc-800 px-2 py-1.5 text-xs outline-none" value={model} onChange={(e) => { setModel(e.target.value); setModelTouched(true); }} title={models.find((m) => m.id === model)?.id ?? model}>
+                <select className="w-40 self-start rounded-lg bg-stone-200 px-2 py-1.5 text-xs outline-none" value={model} onChange={(e) => { setModel(e.target.value); setModelTouched(true); }} title={models.find((m) => m.id === model)?.id ?? model}>
                   {models.map((m) => <option key={m.id} value={m.id}>{m.label}{m.id === defaultModel ? " (기본)" : ""}</option>)}
                   {!models.find((m) => m.id === model) && <option value={model}>{model}</option>}
                 </select>
               </div>
               <div className="flex items-center gap-3">
-                <label className="flex items-center gap-1.5 text-xs text-zinc-400">
+                <label className="flex items-center gap-1.5 text-xs text-stone-600">
                   <input type="checkbox" checked={asBoss} onChange={(e) => setAsBoss(e.target.checked)} />
                   <Crown size={12} className="text-amber-400" /> CEO로 지정 — 모든 봇의 관리자가 됩니다
                 </label>
                 <button
-                  className="ml-auto rounded-lg bg-zinc-100 px-3.5 py-1.5 text-xs font-semibold text-zinc-900 hover:bg-white"
+                  className="ml-auto rounded-lg bg-stone-900 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-stone-700"
                   onClick={create}
                 >만들고 대화 시작</button>
               </div>
