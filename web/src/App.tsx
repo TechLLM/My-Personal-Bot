@@ -43,6 +43,8 @@ export default function App() {
   const [runningInfo, setRunningInfo] = useState<Record<string, string | null>>({}); // 서버에서 실행 중인 봇: id → 현재 도구 — 사이드바 실시간 작업 표시용
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const nearBottomRef = useRef(true); // 사용자가 하단 근처를 보고 있을 때만 자동 스크롤 — 위쪽 읽기 중엔 위치 고정
+  const [showJump, setShowJump] = useState(false); // 위를 읽는 중 새 콘텐츠 도착 시 "최신으로" 버튼
   // 응답 스트리밍 중 전송된 명령 대기열 — 현재 응답이 끝나면 순서대로 자동 전송 ("1번→2번→3번" 연속 지시)
   const [queued, setQueued] = useState<{ text: string; mode: Mode; attachments: { url: string; name: string; mime: string }[] }[]>([]);
 
@@ -85,8 +87,19 @@ export default function App() {
     refreshAgents();
   }, [refreshConversations, refreshAgents]);
 
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    nearBottomRef.current = near;
+    if (near) setShowJump(false);
+  };
+
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+    const el = scrollRef.current;
+    if (!el) return;
+    if (nearBottomRef.current) el.scrollTo({ top: el.scrollHeight });
+    else setShowJump(true);
   }, [messages, searchEvents]);
 
   // 봇이 request_credentials로 요청한 계정 입력을 주기적으로 확인해 팝업 표시
@@ -422,7 +435,7 @@ export default function App() {
         workingId={streaming ? activeAgent?.id ?? null : null}
         working={runningInfo}
       />
-      <main className="flex min-w-0 flex-1 flex-col">
+      <main className="relative flex min-w-0 flex-1 flex-col">
         <header className="flex items-center gap-2 border-b border-stone-200/60 px-3 py-2 sm:px-4 sm:py-2.5">
           <button className="-ml-1 p-1.5 text-stone-500 hover:text-stone-800" onClick={() => setSidebarOpen(!sidebarOpen)}><Menu size={16} strokeWidth={1.8} /></button>
           <span className="text-sm text-stone-600 truncate">
@@ -442,7 +455,7 @@ export default function App() {
           )}
         </header>
 
-        <div ref={scrollRef} className="flex-1 overflow-y-auto">
+        <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-3xl px-4 py-6">
             {/* 봇 로비는 "세션 없음"일 때만 — convId가 있는 빈 세션(새 대화·/new)까지 덮으면 봇 선택이 풀린 것처럼 보임 */}
             {empty && !convId && !pendingAgent && (
@@ -496,6 +509,14 @@ export default function App() {
             </div>
           </div>
         </div>
+
+        {/* 위쪽을 읽는 동안 새 메시지·회신이 도착하면 표시 — 누르면 최신으로 이동 */}
+        {showJump && (
+          <button
+            onClick={() => { nearBottomRef.current = true; setShowJump(false); scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); }}
+            className="absolute bottom-32 left-1/2 z-10 -translate-x-1/2 rounded-full border border-stone-200 bg-white px-3.5 py-1.5 text-xs font-medium text-stone-600 shadow-[0_4px_16px_rgba(0,0,0,0.08)] hover:bg-stone-50"
+          >↓ 새 내용 — 최신으로</button>
+        )}
 
         {/* 봇이 하나도 없으면 입력창 없음 — 첫 화면은 봇 생성부터 */}
         {(!agentsLoaded || agents.length > 0 || convId || pendingAgent) && (
