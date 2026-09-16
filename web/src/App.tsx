@@ -42,11 +42,14 @@ export default function App() {
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null); // 현재 열린 그룹 대화
   const [runningInfo, setRunningInfo] = useState<Record<string, string | null>>({}); // 서버에서 실행 중인 봇: id → 현재 도구 — 사이드바 실시간 작업 표시용
   const abortRef = useRef<AbortController | null>(null);
+  const convIdRef = useRef<string | null>(null); // 현재 보고 있는 대화 — 오래된 스트림 클로저에서도 읽을 수 있게
+  convIdRef.current = convId;
+  const streamConvRef = useRef<string | null>(null); // 진행 중 스트림의 소속 대화 — 다른 세션으로 이동해도 이벤트가 새지 않게
   const scrollRef = useRef<HTMLDivElement>(null);
   const nearBottomRef = useRef(true); // 사용자가 하단 근처를 보고 있을 때만 자동 스크롤 — 위쪽 읽기 중엔 위치 고정
   const [showJump, setShowJump] = useState(false); // 위를 읽는 중 새 콘텐츠 도착 시 "최신으로" 버튼
   // 응답 스트리밍 중 전송된 명령 대기열 — 현재 응답이 끝나면 순서대로 자동 전송 ("1번→2번→3번" 연속 지시)
-  const [queued, setQueued] = useState<{ text: string; mode: Mode; attachments: { url: string; name: string; mime: string }[] }[]>([]);
+  const [queued, setQueued] = useState<{ text: string; mode: Mode; attachments: { url: string; name: string; mime: string }[]; forConv: string | null }[]>([]);
 
   const refreshConversations = useCallback(() => {
     api.conversations().then((d) => setConversations(d.conversations)).catch(() => {});
@@ -213,7 +216,7 @@ export default function App() {
   const send = useCallback(async (text: string, mode: Mode, attachments: { url: string; name: string; mime: string }[]) => {
     if (streaming) {
       // 응답 진행 중 보낸 명령은 대기열에 쌓음 — 응답 완료 후 순서대로 자동 전송
-      setQueued((prev) => [...prev, { text, mode, attachments }]);
+      setQueued((prev) => [...prev, { text, mode, attachments, forConv: convId }]);
       return;
     }
     // "/new" — 현재 봇의 새 세션 시작. 이전 세션은 삭제되지 않고 요약만 이어받아 맥락 유지 (계정·키값은 봇 장기기억이 보존)
@@ -245,6 +248,8 @@ export default function App() {
     setStreaming(true);
     setSearchEvents([]);
     setTeamEvents([]);
+    streamConvRef.current = sendConvId;
+    const onThisConv = () => convIdRef.current === streamConvRef.current;
     const abort = new AbortController();
     abortRef.current = abort;
 
@@ -252,14 +257,15 @@ export default function App() {
       { conversationId: sendConvId ?? undefined, content: text, model: effectiveModel, mode, attachments, personaId, workspaceId: workspaceId || undefined, agentId: sendConvId ? undefined : sendAgent?.id },
       {
         onConversation: (id) => {
+          streamConvRef.current = id;
           if (!sendConvId) { setConvId(id); setPendingAgent(null); }
         },
-        onUserMessage: (m) => setMessages((prev) => [...prev, m]),
-        onAssistantMessage: (m) => setMessages((prev) => [...prev, m]),
-        onDelta: (id, t) => setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, content: m.content + t } : m))),
-        onReasoning: (id, t) => setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, reasoning: (m.reasoning ?? "") + t } : m))),
-        onSearch: (ev) => setSearchEvents((prev) => [...prev, ev]),
-        onTeam: (ev) => setTeamEvents((prev) => [...prev, ev]),
+        onUserMessage: (m) => { if (onThisConv()) setMessages((prev) => [...prev, m]); },
+        onAssistantMessage: (m) => { if (onThisConv()) setMessages((prev) => [...prev, m]); },
+        onDelta: (id, t) => { if (onThisConv()) setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, content: m.content + t } : m))); },
+        onReasoning: (id, t) => { if (onThisConv()) setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, reasoning: (m.reasoning ?? "") + t } : m))); },
+        onSearch: (ev) => { if (onThisConv()) setSearchEvents((prev) => [...prev, ev]); },
+        onTeam: (ev) => { if (onThisConv()) setTeamEvents((prev) => [...prev, ev]); },
         onDone: (m) => {
           patchMessage(m.id, m);
           setStreaming(false);
@@ -279,8 +285,8 @@ export default function App() {
         },
         onError: (msg) => {
           setStreaming(false);
-          setMessages((prev) => [...prev, {
-            id: "err" + Date.now(), conversation_id: convId ?? "", parent_id: null, role: "assistant",
+          if (onThisConv()) setMessages((prev) => [...prev, {
+            id: "err" + Date.now(), conversation_id: streamConvRef.current ?? "", parent_id: null, role: "assistant",
             content: `오류: ${msg}`, reasoning: null, model: null, search_meta: null, attachments: null,
             tokens_in: null, tokens_out: null, created_at: Date.now(),
           }]);
@@ -288,9 +294,9 @@ export default function App() {
       },
       abort.signal,
     ).catch((e) => {
-      if (e.name !== "AbortError") {
+      if (e.name !== "AbortError" && onThisConv()) {
         setMessages((prev) => [...prev, {
-          id: "err" + Date.now(), conversation_id: convId ?? "", parent_id: null, role: "assistant",
+          id: "err" + Date.now(), conversation_id: streamConvRef.current ?? "", parent_id: null, role: "assistant",
           content: `연결 오류: ${e.message}`, reasoning: null, model: null, search_meta: null, attachments: null,
           tokens_in: null, tokens_out: null, created_at: Date.now(),
         }]);
@@ -299,24 +305,29 @@ export default function App() {
     });
   }, [convId, currentConv, effectiveModel, streaming, patchMessage, refreshConversations, refreshAgents, pendingAgent, agents, conversations, personaId, workspaceId]);
 
-  // 스트리밍이 끝나면 대기 중인 명령을 한 건씩 자동 전송 — 다음 건은 다시 스트리밍이 끝날 때 전송
+  // 스트리밍이 끝나면 대기 중인 명령을 한 건씩 자동 전송 — 다음 건은 다시 스트리밍이 끝날 때 전송.
+  // 대기 명령은 입력한 세션에 묶임 — 다른 세션을 보는 중엔 보류, 돌아오면 전송된다
   useEffect(() => {
-    if (!streaming && queued.length) {
+    if (!streaming && queued.length && (queued[0].forConv == null || queued[0].forConv === convId)) {
       const [next, ...rest] = queued;
       setQueued(rest);
       send(next.text, next.mode, next.attachments);
     }
-  }, [streaming, queued, send]);
+  }, [streaming, queued, send, convId]);
 
   const stop = useCallback(() => {
     setQueued([]);
     abortRef.current?.abort();
+    // 로컬 연결만 끊으면 서버 작업은 계속되므로(연결 분리) 명시적 중단 신호를 보낸다
+    const id = streamConvRef.current;
+    if (id) mybotFetch("/api/chat/stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ conversationId: id }) }).catch(() => {});
     setStreaming(false);
   }, []);
 
   const regenerate = useCallback((m: Message) => {
     if (streaming || m.role !== "assistant") return;
     setStreaming(true);
+    streamConvRef.current = m.conversation_id;
     const abort = new AbortController();
     abortRef.current = abort;
     streamChat(
@@ -345,6 +356,7 @@ export default function App() {
     // 편집 = 새 형제 메시지로 전송
     if (streaming) return;
     setStreaming(true);
+    streamConvRef.current = m.conversation_id;
     const abort = new AbortController();
     abortRef.current = abort;
     // 서버에 편집 메시지 생성 요청 후 스트림
@@ -373,6 +385,7 @@ export default function App() {
   const teamConfirm = useCallback((m: Message, tasks: TeamPlanTask[]) => {
     if (streaming) return;
     setStreaming(true);
+    streamConvRef.current = m.conversation_id;
     const abort = new AbortController();
     abortRef.current = abort;
     // 첫 델타에서 안내 문구를 답변으로 교체

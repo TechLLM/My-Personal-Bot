@@ -53,6 +53,10 @@ function leafOf(convId: string): Msg | null {
   return path.length ? path[path.length - 1] : null;
 }
 
+// 대화별 실행 중단 제어기 — 실행은 HTTP 연결과 분리되므로(탭 닫기·화면 이탈로 작업이 죽지 않음)
+// 명시적 중단은 POST /stop이 이 제어기를 abort하는 방식으로만 이뤄진다
+export const activeRuns = new Map<string, AbortController>();
+
 function insertMessage(convId: string, parentId: string | null, role: string, content = "", attachments: string | null = null, model: string | null = null, searchMeta: string | null = null): Msg {
   const id = uid();
   q.msgInsert.run(id, convId, parentId, role, content, null, model, searchMeta, null, null, attachments, now());
@@ -262,7 +266,10 @@ export const chatRoute = new Hono()
   // 스트리밍 전송. body: {conversationId?, content?, model, mode?, parentMessageId?, regenerateMessageId?}
   .post("/stream", async (c) => {
     const body = await c.req.json();
-    const signal = c.req.raw.signal;
+    // 실행은 요청 연결과 분리 — 클라이언트가 끊겨도(탭 닫기·화면 이탈·탭 동결) 작업은 계속되고
+    // 결과는 DB에 기록돼 복귀 시 폴링으로 보인다. 중단은 /stop 경로로만.
+    const runCtl = new AbortController();
+    const signal = runCtl.signal;
     const reqModel = body.model ?? defaultModelId();
     const mode = body.mode ?? "auto";
 
@@ -281,6 +288,13 @@ export const chatRoute = new Hono()
     if (conv?.agent_id) {
       const { getAgent } = await import("../team");
       model = getAgent(conv.agent_id)?.model ?? reqModel;
+    }
+    activeRuns.set(convId, runCtl);
+    // 사이드바에 "작업 중" 표시 — 화면 이탈 후 돌아와도 해당 봇이 일하고 있음이 보인다
+    if (conv?.agent_id) {
+      const { runningAgents, agentActivity } = await import("../team");
+      runningAgents.add(conv.agent_id);
+      agentActivity.set(conv.agent_id, "");
     }
     if (conv) {
       q.convTouch.run(now(), convId);
@@ -794,6 +808,12 @@ export const chatRoute = new Hono()
             } catch {}
           }
         } finally {
+          activeRuns.delete(convId!);
+          if (conv?.agent_id) {
+            const { runningAgents, agentActivity } = await import("../team");
+            runningAgents.delete(conv.agent_id);
+            agentActivity.delete(conv.agent_id);
+          }
           try { controller.close(); } catch {}
         }
       },
@@ -802,6 +822,12 @@ export const chatRoute = new Hono()
     return new Response(stream, {
       headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
     });
+  })
+  // 실행 중단 — 실행은 HTTP 연결과 분리돼 있으므로 명시적 신호로 멈춘다. body: {conversationId}
+  .post("/stop", async (c) => {
+    const { conversationId } = await c.req.json().catch(() => ({} as any));
+    if (conversationId) activeRuns.get(conversationId)?.abort();
+    return c.json({ ok: true });
   })
   // 파일 업로드 (이미지 분석용)
   .post("/upload", async (c) => {

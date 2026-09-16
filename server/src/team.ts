@@ -3,7 +3,7 @@ import { db, uid, now, getSetting } from "./db";
 import type { Endpoint } from "./providers";
 import { resolveModel, modelLabel, listAllModelIds, defaultModelId } from "./providers";
 import { chatOnce, streamChat, type ChatMessage } from "./providers/openaiCompat";
-import { systemPrompt } from "./routes/chat";
+import { systemPrompt, activeRuns } from "./routes/chat";
 import { notifyResult } from "./notify";
 import { webSearch } from "./search";
 import { mcpConfigured, mcpTools, mcpCall } from "./mcp";
@@ -953,7 +953,11 @@ export const teamRoute = new Hono()
     const conv = db.prepare("SELECT * FROM conversations WHERE id = ?").get(convId) as any;
     const msg = db.prepare("SELECT * FROM messages WHERE id = ?").get(msgId) as any;
     if (!conv || !msg || !Array.isArray(tasks) || !tasks.length) return c.json({ error: "conversationId/messageId/tasks 필요" }, 400);
-    const signal = c.req.raw.signal;
+    // 실행은 요청 연결과 분리 — 화면 이탈로 작업이 죽지 않고 /stop으로만 중단된다
+    const runCtl = new AbortController();
+    const signal = runCtl.signal;
+    activeRuns.set(convId, runCtl);
+    if (conv.agent_id) { runningAgents.add(conv.agent_id); agentActivity.set(conv.agent_id, ""); }
     const { endpoint, model: realModel } = resolveModel(body.model ?? conv.model ?? defaultModelId());
 
     const encoder = new TextEncoder();
@@ -1006,6 +1010,8 @@ export const teamRoute = new Hono()
         } catch (e: any) {
           if (e?.name !== "AbortError") send("error", { message: String(e?.message ?? e) });
         } finally {
+          activeRuns.delete(convId);
+          if (conv.agent_id) { runningAgents.delete(conv.agent_id); agentActivity.delete(conv.agent_id); }
           try { controller.close(); } catch {}
         }
       },
