@@ -625,12 +625,12 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
   // ─── 검증 하네스: 내부 엔티티 지시는 서버가 실측해 주입 → 실행 후 DB 상태로 이행 검증 ───
   const calledTools = new Set<string>();
   const gatedTools = new Set<string>();
-  const { parseIntent, snapshot, verifyMutation } = await import("./intent");
-  // 봇 간 비동기 메시지는 보고·알림이라 지시가 아님 — 본문의 "추가/삭제" 등 단어가
-  // 의도로 오독되면 하네스가 없는 작업을 강제해 반대 방향 사고가 난다
+  const { classifyIntent, snapshot, verifyMutation } = await import("./intent");
   // 봇 간 비동기 메시지는 보고·알림이라 지시가 아니고, 도구 미지원 모델(CLI)은
-  // 변이 도구를 쓸 수 없어 이행 검증이 무의미하다 — 둘 다 의도 파싱 생략
-  const intent = (state.verifyIntent === false || !toolsCapable) ? { verb: null, object: null, all: false } : parseIntent(state.task);
+  // 변이 도구를 쓸 수 없어 이행 검증이 무의미하다 — 둘 다 의도 분류 생략.
+  // 의도는 LLM이 문맥을 읽어 분류 — 정규식 키워드 매칭은 명령/서술을 구별 못 해
+  // "삭제를 담당하는 봇"을 "전부 삭제"로 오독해 반대 실행을 강제하는 사고가 났었다
+  const intent = (state.verifyIntent === false || !toolsCapable) ? { verb: null, object: null, all: false } : await classifyIntent(state.task, endpoint, model, signal);
   let beforeCount = 0;
   let beforeIds = new Set<string>();
   if (intent.object) {
@@ -689,7 +689,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
           if (!verdict.ok && Date.now() < deadline) {
             trackEmit({ type: "agent_step", agentId: state.id, tool: "실측 검증 — 미이행 재지시" });
             messages.push({ role: "assistant", content: res.content || "" });
-            messages.push({ role: "user", content: `[시스템] DB 실측 검증 결과 지시가 이행되지 않았습니다 — ${verdict.detail}\n현재 실제 상태:\n${snapshot(intent.object).text}` });
+            messages.push({ role: "user", content: `[시스템] DB 실측 검증 결과 지시가 이행되지 않았습니다 — ${verdict.detail}\n현재 실제 상태:\n${snapshot(intent.object).text}\n이 지적이 실제 지시 내용과 맞지 않으면(지시 해석 오류 가능) 지시문을 다시 읽고 실제 요청만 수행한 뒤 사실대로 보고하세요 — 억지로 이행 상태를 맞추지 마세요.` });
             continue;
           }
           // ─── PGE 평가 단계 — 실측 검증을 통과한 결과물의 품질을 독립 평가 ───

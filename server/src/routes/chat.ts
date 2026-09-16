@@ -497,8 +497,10 @@ export const chatRoute = new Hono()
             const gatedTools = new Set<string>(); // 승인 게이트에 걸려 미실행·승인 대기가 된 도구
             // ─── 검증 하네스: 지시 의도 파싱 → 내부 엔티티는 서버가 실측해 주입 ───
             // 모델이 목록·수량을 지어내지 못하게 DB 실측 상태를 미리 고정
-            const { parseIntent, snapshot, verifyMutation, TOOL_CONTRACT } = await import("../intent");
-            const intent: Intent = toolsCapable ? parseIntent(userMsg?.content ?? "") : { verb: null, object: null, all: false };
+            const { classifyIntent, snapshot, verifyMutation, TOOL_CONTRACT } = await import("../intent");
+            // 의도는 LLM이 문맥을 읽어 분류 — 정규식은 "삭제를 담당하는 봇"을 "전부 삭제"로
+            // 오독해 하네스가 반대 실행을 강제하는 사고를 냈었다. 분류 실패 시 동사는 버려진다.
+            const intent: Intent = toolsCapable ? await classifyIntent(userMsg?.content ?? "", endpoint, realModel, signal) : { verb: null, object: null, all: false };
             let beforeCount = 0;
             let beforeIds = new Set<string>();
             if (intent.object) {
@@ -633,7 +635,7 @@ export const chatRoute = new Hono()
           const mutatingCall = [...calledTools].some((t) => /_delete|_add|_create|_update|_remove|send_|approve/i.test(t));
           const claimsAction = !degenerate && !leakedCalls.length && !mutatingCall && /(삭제|생성|지시|등록|전송|예약|전달|수정|처리|만들|보내|제거)[가-힣]{0,3}\s*(했|함|됐|됨|할게|하겠|진행|완료|대상|요청|전송)/.test(content);
           // 지시 동사와 호출된 도구의 불일치 — "삭제해라"에 add/list만 호출하거나 삭제 주장만 한 경우
-          const wantsDelete = !!lastUser && /(삭제|제거|지워|없애)/.test(lastUser.content as string);
+          const wantsDelete = intent.verb === "delete" && !!intent.object; // LLM 의도 분류 기준 — 키워드 존재가 아니라 실제 삭제 명령일 때만
           const deleteCalled = [...calledTools].some((t) => /_delete|_remove/i.test(t));
           const claimsDeleted = /(삭제|제거|지워|없애)[가-힣]{0,4}\s*(했|함|됐|됨|완료|처리|요청|전송)/.test(content);
           const actionMismatch = !degenerate && !leakedCalls.length && wantsDelete && !deleteCalled && (claimsDeleted || mutatingCall || /(할까요|주시면|선택해 주세요|원하시는|명시해|동작을 선택)/.test(content));
@@ -677,7 +679,7 @@ export const chatRoute = new Hono()
               : claimsPopup
                 ? "[시스템] 방금 응답에서 계정 입력 팝업을 띄우겠다고 했지만 request_credentials 도구가 실제로 호출되지 않았습니다. 지금 즉시 request_credentials를 호출해 팝업을 실제로 띄우세요. site에는 언급된 서비스 이름을 넣으세요."
                 : stateUnmet
-                  ? `[시스템] DB 실측 검증 결과 지시가 이행되지 않았습니다 — ${verdict.detail} 현재 실제 상태:\n${snapshot(intent.object).text}`
+                  ? `[시스템] DB 실측 검증 결과 지시가 이행되지 않았습니다 — ${verdict.detail} 현재 실제 상태:\n${snapshot(intent.object).text}\n이 지적이 실제 지시 내용과 맞지 않으면(지시 해석 오류 가능) 지시문을 다시 읽고 실제 요청만 수행한 뒤 사실대로 보고하세요 — 억지로 이행 상태를 맞추지 마세요.`
                   : pendingMisreport
                     ? "[시스템] 삭제 도구는 호출됐지만 사용자 승인 대기 상태입니다 — '삭제 완료'가 아니라 '사용자 승인 대기 중'임을 명확히 보고하세요. 승인 팝업에서 승인되면 자동 실행됩니다."
                     : actionMismatch
@@ -752,21 +754,9 @@ export const chatRoute = new Hono()
           if (intent.verb && intent.object && intent.verb !== "read") {
             const finalVerdict = verifyMutation(intent, beforeCount, calledTools, gatedTools);
             if (!finalVerdict.ok) {
-              const { resolveTargets } = await import("../intent");
-              const targets = resolveTargets(intent, userMsg?.content ?? "");
-              if (targets?.length) {
-                let queued = 0, ran = 0;
-                for (let i = 0; i < targets.length; i++) {
-                  const t = targets[i];
-                  const out = await execTool({ id: `srv-${i}`, name: t.tool, arguments: JSON.stringify(t.args) }).catch(() => "");
-                  if (out.includes("승인이 필요합니다")) queued++; else ran++;
-                }
-                const after = snapshot(intent.object).count;
-                if (queued) content += `\n\n> ⏸ [서버 검증] 지시된 삭제를 서버가 직접 처리합니다 — ${queued}건의 삭제 요청이 승인 팝업에서 대기 중입니다. 승인하면 실제 삭제됩니다.`;
-                if (ran) content += `\n\n> ✅ [서버 검증] 서버가 직접 실행했습니다 — ${intent.object}: ${beforeCount}건 → ${after}건.`;
-              } else {
-                content += `\n\n> ⚠️ [서버 검증] 지시된 ${intent.object} 변경이 실제로 이뤄지지 않았습니다 — 현재 ${intent.object}: ${snapshot(intent.object).count}건 (지시 전 ${beforeCount}건). 위 보고 중 "완료" 주장은 무시하세요.`;
-              }
+              // 서버는 지시를 추론해 직접 실행하지 않는다 — 의도가 틀리면 반대 동작 강제가 되므로
+              // 미이행은 사실 표기로 끝내고, 실행은 모델의 도구 호출(승인 게이트 통과)로만 이뤄진다
+              content += `\n\n> ⚠️ [서버 검증] 지시된 ${intent.object} 변경이 실제로 이뤄지지 않았습니다 — 현재 ${intent.object}: ${snapshot(intent.object).count}건 (지시 전 ${beforeCount}건). 위 보고 중 "완료" 주장은 무시하세요.`;
             } else if (finalVerdict.pendingApproval) content += "\n\n> ⏸ [서버 검증] 위험 작업이 승인 팝업에서 대기 중입니다 — 승인하면 실제 실행됩니다. 아직 완료된 것이 아닙니다.";
             else if ([...calledTools].some((t) => TOOL_CONTRACT[intent.object!]?.[intent.verb!]?.test(t)))
               content += `\n\n> ✅ [서버 검증] ${intent.object} 변경 확인됨 — 현재 ${snapshot(intent.object).count}건 (지시 전 ${beforeCount}건).`;

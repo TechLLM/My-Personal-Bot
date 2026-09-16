@@ -1,8 +1,11 @@
 import { db } from "./db";
+import type { Endpoint } from "./providers";
 
 // ─── 지시 의도 → 도구 계약 → DB 상태 검증 (검증 하네스) ───
 // 모델이 아니라 서버가 진실의 원천: 내부 엔티티(루틴·봇)에 대한 지시는
 // 실행 전 현재 상태를 실측해 주입하고, 실행 후 DB 상태 변화로 이행 여부를 검증한다.
+// 단, 서버는 추론한 지시를 직접 실행하지 않는다 — 의도가 틀리면 반대 동작을 강제하는
+// 사고가 되므로, 검증·복원(undo)·사실 표기까지만 하고 실행은 모델의 도구 호출로만.
 
 export type IntentVerb = "delete" | "create" | "update" | "read" | null;
 export type IntentObject = "routines" | "agents" | null;
@@ -41,6 +44,59 @@ export function parseIntent(text: string): Intent {
   // 부정 표현이 있으면 어떤 동작 강제도 위험 — 검증 없이 주입만 한다
   if (NEGATED.test(t)) verb = null;
   return { verb, object, all: /모두|모든|전부|전체|다\s|싹/.test(t) };
+}
+
+// ─── LLM 의도 분류 — 자연어 문맥 이해는 정규식이 아니라 모델이 한다 ───
+// 정규식은 "삭제를 담당하는 봇"(역할 서술)과 "삭제해줘"(명령)를 구별하지 못한다.
+// classifyIntent는 문맥을 읽어 '지금 실행하라는 명령'만 의도로 인정한다.
+// 분류 실패 시 보수적으로 동사를 버린다 — 객체 실측 주입만 하고 변경 검증은 생략.
+
+// 프리필터 — 엔티티·동작 단서가 없으면 분류 호출 자체가 무의미 (비용 0)
+const ENTITY_HINT = /봇|에이전트|루틴|예약\s*작업|스케줄/;
+const ACTION_HINT = /삭제|제거|지워|없애|날려|정리|생성|만들|등록|추가|수정|변경|바꿔|바꾸|목록|리스트|조회|확인|알려|보여|몇|있/;
+
+export async function classifyIntent(text: string, endpoint: Endpoint, model: string, signal?: AbortSignal): Promise<Intent> {
+  const t = text.slice(0, 800);
+  if (!ENTITY_HINT.test(t) || !ACTION_HINT.test(t)) return { verb: null, object: null, all: false };
+  try {
+    const { chatOnce } = await import("./providers/openaiCompat");
+    const res = await chatOnce(endpoint, model, [{
+      role: "user",
+      content: `사용자 지시문의 의도를 분류하세요. JSON만 출력하고 다른 텍스트는 쓰지 마세요.
+
+지시문: """${t}"""
+
+분류 기준:
+- object: "agents" = 봇·에이전트를 만들거나 바꾸는 내용, "routines" = 루틴·예약 작업, 둘 다 아니면 null
+- verb: 사용자가 지금 실제로 요청하는 행동 — "create"(생성·등록·만들기), "delete"(삭제·제거·지우기), "update"(수정·변경), "read"(목록·조회·확인 요청), 명령이 없으면 null
+- imperative: 지금 즉시 실행하라는 명령이면 true. "~하는 봇", "~을 담당", 조건문·과거 서술·인용 안의 동사는 명령이 아님 → false
+- negated: "~하지 마", "~말고", "~금지"처럼 해당 동작을 하지 말라는 표현이면 true
+- all: "모든/전부/전체"로 대상 전체를 지시한 명시적 전체 명령일 때만 true. "모든 봇의 생성을 담당" 같은 관리 범위 서술은 false
+- 여러 명령이 섞여 있으면 가장 위험한 것 하나만: delete > update > create > read
+
+예시:
+- "테스트봇 삭제해줘" → {"verb":"delete","object":"agents","all":false,"imperative":true}
+- "모든 봇 생성과 삭제를 담당하는 봇을 만들어줘" → {"verb":"create","object":"agents","all":false,"imperative":true}
+- "봇 목록 보여줘" → {"verb":"read","object":"agents","imperative":true}
+- "루틴은 삭제하지 마" → {"verb":null,"object":"routines","imperative":false,"negated":true}
+
+출력: {"verb":...,"object":...,"all":bool,"imperative":bool,"negated":bool}`,
+    }], { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000) });
+    const m = (res.content ?? "").match(/\{[\s\S]*\}/);
+    if (!m) return { verb: null, object: null, all: false };
+    const j = JSON.parse(m[0]);
+    const object: IntentObject = j.object === "agents" || j.object === "routines" ? j.object : null;
+    if (!object) return { verb: null, object: null, all: false };
+    // 서술·조건·부정 표현은 명령이 아님 — 동사를 버리고 객체 실측 주입만 유지
+    if (j.imperative === false || j.negated === true) return { verb: null, object, all: false };
+    const verb: IntentVerb = ["create", "delete", "update", "read"].includes(j.verb) ? j.verb : null;
+    return { verb, object, all: !!j.all };
+  } catch {
+    // 분류 호출 실패 — 정규식으로 객체만 추정해 실측 상태는 주입하되,
+    // 동사는 버려 변경 검증·미이행 압박이 오독된 지시를 강제하지 않게 한다
+    const rx = parseIntent(t);
+    return { verb: null, object: rx.object, all: false };
+  }
 }
 
 // 의도별 도구 계약 — 이 지시가 이행됐다고 말하려면 해당 계열 도구 호출이 필요
@@ -100,27 +156,6 @@ export async function undoUnrequestedChanges(
     } catch { /* 다음 행 계속 */ }
   }
   return { created: created.length, undone, removed };
-}
-
-// 모델이 이행하지 못한 지시를 서버가 직접 실행할 대상으로 해석 — 삭제는 ID 목록을 서버가 실측하므로 완전히 결정 가능
-// 이름 매칭: 전체 일치·공백 제거 일치·이름의 의미 토큰(2자+)이 지시문에 포함되면 매칭 — 부분 명칭("테스트 루틴")도 해석
-const nameHit = (name: string, text: string) =>
-  text.includes(name) || text.includes(name.replace(/\s+/g, ""))
-  || name.split(/\s+/).some((w) => w.length >= 2 && text.includes(w));
-
-export function resolveTargets(intent: Intent, userText: string): { tool: string; args: Record<string, unknown> }[] | null {
-  if (intent.verb !== "delete") return null;
-  if (intent.object === "routines") {
-    const rows = db.prepare("SELECT id, name FROM routines").all() as { id: string; name: string }[];
-    const targets = intent.all ? rows : rows.filter((r) => userText.includes(r.id) || nameHit(r.name, userText));
-    return targets.length ? targets.map((r) => ({ tool: "routine_delete", args: { id: r.id } })) : null;
-  }
-  if (intent.object === "agents") {
-    const rows = (db.prepare("SELECT id, name, is_boss FROM agents").all() as { id: string; name: string; is_boss: number }[]).filter((a) => !a.is_boss);
-    const targets = intent.all ? rows : rows.filter((a) => nameHit(a.name, userText));
-    return targets.length ? targets.map((a) => ({ tool: "agent_delete", args: { name: a.name } })) : null;
-  }
-  return null;
 }
 
 export interface StateVerdict {
