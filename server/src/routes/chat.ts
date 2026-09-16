@@ -285,6 +285,7 @@ export const chatRoute = new Hono()
           try { controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)); } catch {}
         };
         send("conversation", { id: convId });
+        let asstMsgId: string | null = null; // catch에서도 빈 자리표시를 정리할 수 있게 try 밖에서 추적
         try {
           let userMsg: Msg | null = null;
           let parentId: string | null;
@@ -398,6 +399,7 @@ export const chatRoute = new Hono()
           }
 
           const asstMsg = insertMessage(convId!, userMsg ? userMsg.id : parentId, "assistant", "");
+          asstMsgId = asstMsg.id;
           send("assistant_message", { message: withSiblings(asstMsg) });
 
           // 이미지 생성 모드: 채팅 대신 이미지 API
@@ -599,7 +601,7 @@ export const chatRoute = new Hono()
           const meaningfulLen = (stripped.match(/[가-힣A-Za-z0-9]/g) ?? []).length;
           // 스트리밍된 최종 응답에 텍스트 형식으로 새어나온 도구 호출이 있으면 서버가 대신 실행
           const leakedCalls = parseLeaked(content);
-          const degenerate = meaningfulLen < 8;
+          const degenerate = meaningfulLen === 0; // 의미 문자가 하나도 없을 때만 — "됨" 같은 짧은 정상 답변은 유효
           const claimsPopup = !degenerate && !leakedCalls.length && /팝업|보안.{0,6}입력|입력.{0,4}(창|띄)/.test(content) && /계정|비밀번호|로그인|아이디/.test(content);
           // 명시적 작업 지시를 받고도 도구 없이 되묻거나 보류·제안만 한 회피 응답 감지
           const lastUser = [...history].reverse().find((m) => m.role === "user" && typeof m.content === "string" && !m.content.startsWith("[시스템]"));
@@ -623,7 +625,8 @@ export const chatRoute = new Hono()
           // 승인 대기인데 "삭제 완료"로 보고하는 것도 불일치 — 승인 대기임을 명시해야 함
           const pendingMisreport = approvalPending && !/승인|대기|팝업/.test(content) && /(삭제|제거|완료|처리)[가-힣]{0,3}\s*(했|함|됐|됨|완료)/.test(content);
           const needsFix = (claimsPopup && !calledTools.has("request_credentials")) || claimsAction || actionMismatch || jsonLeak || degenerate || leakedCalls.length > 0 || dodges || stateUnmet || pendingMisreport;
-          if (needsFix && Date.now() < deadline) {
+          const fixDeadline = Date.now() + 2 * 60_000; // 보정은 별도 2분 예산 — 도구 루프가 8분을 다 써도 빈 응답은 반드시 재시도
+          if (needsFix && !signal.aborted && Date.now() < fixDeadline) {
             history.push({ role: "assistant", content });
             for (const tc of leakedCalls) {
               const out = await execTool(tc);
@@ -647,7 +650,7 @@ export const chatRoute = new Hono()
                     ? "[시스템] 사용자가 명시적으로 작업을 지시했는데 되묻거나 보류만 했습니다. 되묻지 말고 지금 도구를 호출해 지시된 작업을 실제로 수행하고 결과를 보고하세요."
                     : "[시스템] 방금 응답에서 작업을 수행했다고 주장했지만 도구 호출이 전혀 없었습니다. 주장한 작업을 지금 실제 도구로 수행하고, 수행할 수 없는 부분은 없다고 정직하게 정정하세요." });
             let fixText = "";
-            for (let fixRound = 0; fixRound < 2 && Date.now() < deadline; fixRound++) {
+            for (let fixRound = 0; fixRound < 2 && Date.now() < fixDeadline; fixRound++) {
               const fix = await chatOnce(endpoint, realModel, history, {
                 signal, tools: openaiTools,
                 ...(claimsPopup && fixRound === 0 ? { toolChoice: { type: "function", function: { name: "request_credentials" } } } : {}), // 팝업 주장은 강제 호출
@@ -663,7 +666,7 @@ export const chatRoute = new Hono()
               }
             }
             // 보정 라운드가 도구만 호출하고 텍스트를 못 만든 경우 — 도구 없이 최종 답변을 한 번 더 요청
-            if (!fixText && Date.now() < deadline) {
+            if (!fixText && Date.now() < fixDeadline) {
               history.push({ role: "user", content: "[시스템] 도구는 충분히 사용됐습니다. 지금까지의 도구 결과를 바탕으로 사용자에게 최종 답변을 문장으로 작성하세요." });
               const fin = await chatOnce(endpoint, realModel, history, { signal }).catch((e) => { console.error("[mybot] 보정 최종 답변 실패:", (e as Error).message); return null; });
               if (fin?.content) fixText = fin.content;
@@ -682,7 +685,7 @@ export const chatRoute = new Hono()
             }
             // 보정 라운드가 만든 정상 답변이 있으면 손상·허위 응답을 교체
             const fixStripped = fixText.replace(/<think>[\s\S]*?(<\/think>|$)/g, "").replace(/\]\([^)]*\)/g, "]").replace(/https?:\/\/\S+/g, "");
-            const fixOk = (fixStripped.match(/[가-힣A-Za-z0-9]/g) ?? []).length >= 8;
+            const fixOk = (fixStripped.match(/[가-힣A-Za-z0-9]/g) ?? []).length > 0;
             if (degenerate || leakedCalls.length) content = fixOk ? fixText : "⚠️ 응답 생성에 실패했습니다 — 같은 지시를 다시 보내주세요.";
             else if (fixOk && (claimsAction || dodges || actionMismatch || jsonLeak || stateUnmet || pendingMisreport)) content = fixText;
             else if (popupShown && claimsPopup) content += "\n\n> ✅ 보안 입력 팝업을 지금 띄웠습니다 — 팝업에 계정을 입력해 주세요.";
@@ -729,6 +732,7 @@ export const chatRoute = new Hono()
               content += `\n\n> ✅ [서버 검증] ${intent.object} 변경 확인됨 — 현재 ${snapshot(intent.object).count}건 (지시 전 ${beforeCount}건).`;
           }
 
+          if (!content.trim()) content = "⚠️ 응답이 생성되지 않았습니다 — 같은 지시를 다시 보내주세요."; // 어떤 경로로든 빈 메시지는 저장하지 않음
           content = cleanOutput(content); // 장식 이모지 제거·마커 치환 — 화면에 정돈된 결과만 저장
           q.msgUpdate.run(content, reasoning || null, usedModel, searchMeta ? JSON.stringify(searchMeta) : null, usage?.prompt_tokens ?? null, usage?.completion_tokens ?? null, asstMsg.id);
           send("done", { message: withSiblings(q.msgGet.get(asstMsg.id) as Msg) });
@@ -748,6 +752,16 @@ export const chatRoute = new Hono()
           }
         } catch (e: any) {
           if (e?.name !== "AbortError") send("error", { message: String(e?.message ?? e) });
+          // 예외로 스트림이 끊겨도 빈 자리표시 메시지가 DB에 남지 않게 사유를 기록하고 done으로 종료
+          if (asstMsgId) {
+            try {
+              const cur = q.msgGet.get(asstMsgId) as Msg | undefined;
+              if (cur && !cur.content.trim()) {
+                q.msgUpdate.run(e?.name === "AbortError" ? "⚠️ 작업이 중단됐습니다." : `⚠️ 응답 처리 중 오류가 발생했습니다 — ${String(e?.message ?? e).slice(0, 160)}`, null, null, null, null, null, asstMsgId);
+                send("done", { message: withSiblings(q.msgGet.get(asstMsgId) as Msg) });
+              }
+            } catch {}
+          }
         } finally {
           try { controller.close(); } catch {}
         }

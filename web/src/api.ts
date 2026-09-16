@@ -195,6 +195,7 @@ async function ssePost(url: string, body: unknown, handlers: StreamHandlers, sig
   const decoder = new TextDecoder();
   let buf = "";
   let event = "";
+  let finished = false; // done/error 종료 이벤트 수신 여부 — 없이 끊기면 호출자에 실패 전달
 
   while (true) {
     const { done, value } = await reader.read();
@@ -207,7 +208,8 @@ async function ssePost(url: string, body: unknown, handlers: StreamHandlers, sig
       if (line.startsWith("event:")) {
         event = line.slice(6).trim();
       } else if (line.startsWith("data:")) {
-        const data = JSON.parse(line.slice(5));
+        let data: any;
+        try { data = JSON.parse(line.slice(5)); } catch { continue; } // 깨진 이벤트 한 줄이 전체 스트림을 죽이지 않게
         switch (event) {
           case "conversation": handlers.onConversation?.(data.id); break;
           case "user_message": handlers.onUserMessage?.(data.message); break;
@@ -216,15 +218,17 @@ async function ssePost(url: string, body: unknown, handlers: StreamHandlers, sig
           case "reasoning": handlers.onReasoning?.(data.id, data.text); break;
           case "search": handlers.onSearch?.(data); break;
           case "team": handlers.onTeam?.(data); break;
-          case "done": handlers.onDone?.(data.message); break;
+          case "done": finished = true; handlers.onDone?.(data.message); break;
           case "title": handlers.onTitle?.(data.conversation); break;
-          case "error": handlers.onError?.(data.message); break;
+          case "error": finished = true; handlers.onError?.(data.message); break;
         }
       } else if (line === "" || line === "\r") {
         event = "";
       }
     }
   }
+  // 서버가 done/error 없이 연결을 끝낸 경우(재시작·프록시 끊김) — 무한 로딩 대신 명확한 실패 표시
+  if (!finished) handlers.onError?.("응답이 완료되기 전에 연결이 종료됐습니다 — 다시 시도해 주세요.");
 }
 
 export function streamChat(
