@@ -93,7 +93,9 @@ async function chatOnceAttempt(
           ...(endpoint.apiKey ? { Authorization: `Bearer ${endpoint.apiKey}` } : {}),
         },
         body: makeBody(),
-        signal: opts.signal ?? AbortSignal.timeout(120000),
+        // 호출별 상한은 외부 signal과 무관하게 항상 적용 — signal만 있으면 프로바이더
+        // 무응답 시 상위 상한(최대 9분)까지 멈춰 보이는 사고가 있었다
+        signal: opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(180_000)]) : AbortSignal.timeout(180_000),
       });
     } catch (e) {
       if ((e as Error).name === "AbortError" || opts.signal?.aborted) throw e;
@@ -194,7 +196,8 @@ async function* streamChatOnce(
       ...(opts.maxTokens ? { max_tokens: opts.maxTokens } : {}),
       stream_options: { include_usage: true },
     }),
-    signal: opts.signal,
+    // 호출별 상한은 외부 signal과 무관하게 항상 적용 — 무응답 프로바이더 hang 방지
+    signal: opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(300_000)]) : AbortSignal.timeout(300_000),
   });
 
   if (!res.ok || !res.body) {

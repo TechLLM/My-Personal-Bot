@@ -5,6 +5,13 @@ import type { Endpoint } from "./index";
 import { CLI_PATH_PREFIX } from "./registry";
 import type { ChatResult, ToolCall, StreamEvent } from "./openaiCompat";
 
+// 호출별 상한 — 외부 signal이 있어도 개별 호출은 이 상한 안에서 끝나야 한다.
+// signal만 넘기면 무응답 프로바이더에 상위 상한(최대 9분)까지 멈춰 보이는 사고가 있었다.
+export function callSignal(signal: AbortSignal | undefined, ms = 180_000): AbortSignal {
+  const cap = AbortSignal.timeout(ms);
+  return signal ? AbortSignal.any([signal, cap]) : cap;
+}
+
 // ─── 메시지 변환 유틸 (MyBot은 OpenAI chat 형식) ───
 type Msg = { role: string; content?: any; tool_calls?: any[]; tool_call_id?: string };
 
@@ -97,7 +104,7 @@ export async function responsesChatOnce(endpoint: Endpoint, model: string, messa
       res = await fetch(`${base}/responses`, {
         method: "POST", headers: responsesHeaders(endpoint),
         body: JSON.stringify(responsesBody(endpoint, model, messages, opts.tools ?? [], true, opts.toolChoice)),
-        signal: opts.signal ?? AbortSignal.timeout(120000),
+        signal: callSignal(opts.signal),
       });
     } catch (e) {
       if ((e as Error).name === "AbortError" || opts.signal?.aborted) throw e;
@@ -131,7 +138,7 @@ export async function* responsesStream(endpoint: Endpoint, model: string, messag
   const res = await fetch(`${base}/responses`, {
     method: "POST", headers: responsesHeaders(endpoint),
     body: JSON.stringify(responsesBody(endpoint, model, messages, opts.tools ?? [], true)),
-    signal: opts.signal,
+    signal: callSignal(opts.signal, 300_000),
   });
   if (!res.ok || !res.body) {
     const body = await res.text().catch(() => "");
@@ -280,7 +287,7 @@ export async function geminiChatOnce(endpoint: Endpoint, model: string, messages
       res = await fetch(geminiUrl(endpoint, model, false), {
         method: "POST", headers: geminiHeaders(endpoint),
         body: JSON.stringify(geminiBody(endpoint, model, messages, opts.tools ?? [])),
-        signal: opts.signal ?? AbortSignal.timeout(120000),
+        signal: callSignal(opts.signal),
       });
     } catch (e) {
       if ((e as Error).name === "AbortError" || opts.signal?.aborted) throw e;
@@ -301,7 +308,7 @@ export async function* geminiStream(endpoint: Endpoint, model: string, messages:
   const res = await fetch(geminiUrl(endpoint, model, true), {
     method: "POST", headers: geminiHeaders(endpoint),
     body: JSON.stringify(geminiBody(endpoint, model, messages, opts.tools ?? [])),
-    signal: opts.signal,
+    signal: callSignal(opts.signal, 300_000),
   });
   if (!res.ok || !res.body) {
     const body = await res.text().catch(() => "");

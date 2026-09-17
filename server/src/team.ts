@@ -671,21 +671,25 @@ export const agentActivity = new Map<string, string>();
 // 봇별 실행 꼬리 — 같은 봇의 run이 동시에 겹쳐 세션 메시지가 뒤섞이지 않게 직렬화
 const runTails = new Map<string, Promise<void>>();
 
-// C6 — 실행별 내부 데드라인을 signal에 연결 — 위임된 하위 봇이 상위 잔여 시간을 상속받는다
-export const runDeadlines = new WeakMap<AbortSignal, number>();
-
 // 설정값 (기본값은 기존 하드코딩과 동일 — 데드라인·라운드·위임 상한)
 const runDeadlineSec = () => Number(getSetting("run_deadline_sec")) || 480;
 const toolRounds = () => Number(getSetting("tool_rounds")) || 12;
 const delegateCapSec = () => Number(getSetting("delegate_cap_sec")) || 540;
-// 하위 위임의 시간 상한 — min(위임 상한, 상위 잔여 - 60초). 잔여 부족 시 null(위임 불가)
-// 상위 signal은 합성해 전파 — 명시적 /stop이나 상위 상한이 하위 작업에도 적용되게 한다
+// 하위 위임의 시간 상한 — 위임 잡은 백그라운드로 분리돼 있으므로 하위는 항상 독립 상한을 받는다.
+// 상위의 "시간 초과"는 전파하지 않는다: 상위가 끝나도 하위는 완주해 결과를 세션·이력에 남긴다
+// (이전엔 AbortSignal.any 합성으로 상위 타임아웃이 하위에 연쇄 전파돼, 위임 시작 수십 초 만에
+//  하위가 강제 종료되는 사고가 있었다). 상위의 명시적 중단(/stop·AbortError)만 전파한다.
 export function delegateTimeout(parent?: AbortSignal): AbortSignal | null {
-  const pd = parent ? runDeadlines.get(parent) : undefined;
-  const capMs = pd === undefined ? delegateCapSec() * 1000 : Math.min(delegateCapSec() * 1000, pd - Date.now() - 60_000);
-  if (capMs <= 0) return null;
-  const cap = AbortSignal.timeout(capMs);
-  return parent ? AbortSignal.any([parent, cap]) : cap;
+  if (parent?.aborted) return null; // 상위가 이미 중단 — 결과를 받을 호출자가 없으므로 위임 무의미
+  const ctl = new AbortController();
+  const cap = AbortSignal.timeout(delegateCapSec() * 1000);
+  cap.addEventListener("abort", () => ctl.abort(cap.reason), { once: true });
+  if (parent) {
+    parent.addEventListener("abort", () => {
+      if ((parent.reason as any)?.name !== "TimeoutError") ctl.abort(parent.reason);
+    }, { once: true });
+  }
+  return ctl.signal;
 }
 
 export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, signal?: AbortSignal): Promise<void> {
@@ -771,7 +775,6 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
   } catch {}
   // 봇당 최대 작업 시간 — 초과 시 수집된 결과로 즉시 보고 마무리
   const deadline = Date.now() + runDeadlineSec() * 1000;
-  if (signal) runDeadlines.set(signal, deadline); // 하위 위임이 잔여 시간을 상속받게 연결 (C6)
   let evalCount = 0; // PGE 평가-재작업 루프 카운터 — 상한으로 무한 반복 차단
   const { shouldEvaluate, evaluateResult, EVAL_MAX_ROUNDS } = await import("./evaluate");
   // A4 — 프로바이더 폴백이 일어나면 도구 로그와 화면에 표기
@@ -880,7 +883,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
     state.result = `에이전트 오류: ${(e as Error).message}`;
     // 시간 초과로 중단된 경우 — 이미 확보한 도구 결과가 있으면 짧은 추가 시간으로 부분 보고서를 만든다.
     // (사용자 중지 AbortError는 제외 — signal.reason이 TimeoutError일 때만. 결과 전송 실패보다 부분 보고가 낫다)
-    const timedOut = (signal?.reason as any)?.name === "TimeoutError" || /시간 초과|중지 요청/.test((e as Error).message);
+    const timedOut = (signal?.reason as any)?.name === "TimeoutError" || /시간 초과|중지 요청|timed out/i.test((e as Error).message);
     if (timedOut && state.toolLog.some((l) => l.ok)) {
       try {
         trackEmit({ type: "agent_step", agentId: state.id, tool: "시간 초과 — 부분 결과 정리" });
@@ -1035,8 +1038,9 @@ export async function runTeamTasks(
   await Promise.all(states.map(async (s) => {
     const agent = db.prepare("SELECT * FROM agents WHERE id = ?").get(s.id) as Agent;
     emit({ type: "agent_start", agentId: s.id });
-    // C6 — 상위 데드라인이 연결된 signal이면 하위 상한을 잔여 시간으로 상속
-    await runAgent(s, agent, emit, delegateTimeout(signal) ?? AbortSignal.timeout(5000));
+    const childSig = delegateTimeout(signal);
+    if (!childSig) { s.status = "error"; s.result = "상위 작업이 이미 중단돼 실행하지 않았습니다"; }
+    else await runAgent(s, agent, emit, childSig);
     db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
       .run(s.status, s.result ?? null, s.steps, JSON.stringify(s.toolLog), now(), s.runId);
     emit({ type: "agent_done", agentId: s.id, status: s.status, result: (s.result ?? "").slice(0, 4000) });
@@ -1075,7 +1079,7 @@ export function runAgentDetached(agent: Agent, o: DetachedRunOpts): { runId: str
     fileRoot: o.fileRoot ?? workspaceRoot(agent.workspace_id),
   };
   const done = (async () => {
-    try { await runAgent(state, agent, () => {}, delegateTimeout() ?? AbortSignal.timeout(540_000)); }
+    try { await runAgent(state, agent, () => {}, delegateTimeout()!); }
     catch (e) { state.status = "error"; state.result = (e as Error).message; }
     db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
       .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
@@ -1122,7 +1126,6 @@ export const teamRoute = new Hono()
     // 실행은 요청 연결과 분리 — 화면 이탈로 작업이 죽지 않고 /stop으로만 중단된다
     const runCtl = new AbortController();
     const signal = AbortSignal.any([runCtl.signal, AbortSignal.timeout((Number(getSetting("run_total_cap_sec")) || 900) * 1000)]); // 무응답 hang 방지 총 상한
-    runDeadlines.set(signal, Date.now() + (Number(getSetting("run_total_cap_sec")) || 900) * 1000); // 하위 봇이 잔여 시간 상속 (C6)
     activeRuns.set(convId, runCtl);
     if (conv.agent_id) { runningAgents.add(conv.agent_id); agentActivity.set(conv.agent_id, ""); }
     const { endpoint, model: realModel } = resolveModel(body.model ?? conv.model ?? defaultModelId());

@@ -431,7 +431,9 @@ export const chatRoute = new Hono()
                 task: `[그룹 대화 메시지 — 다른 봇 멤버들도 같은 대화를 봅니다. 당신의 역할에 맞게 응답·작업하고 보고하세요]\n\n[그룹 최근 대화]\n${recentCtx}\n\n[사용자 메시지]\n${userMsg.content}`,
                 model: bot.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: 0,
               };
-              await runAgent(state, bot, (ev: any) => send("team", ev), delegateTimeout(signal) ?? AbortSignal.timeout(5000));
+              const botSig = delegateTimeout(signal);
+              if (botSig) await runAgent(state, bot, (ev: any) => send("team", ev), botSig);
+              else { state.status = "error"; state.result = "상위 작업이 이미 중단돼 실행하지 않았습니다"; }
               db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
                 .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
               const meta = JSON.stringify({ type: "tools", events: state.toolLog.map((l: any) => ({ type: "read", title: l.tool, url: "" })) });
@@ -521,8 +523,6 @@ export const chatRoute = new Hono()
             const browserKey = `${convId}:${asstMsg.id}`;
             runKey = browserKey;
             const deadline = Date.now() + (Number(getSetting("run_deadline_sec")) || 480) * 1000; // 대화 도구 루프 최대 시간 — 브라우저 열람 같은 실제 업무가 3분을 넘김
-            const { runDeadlines } = await import("../team");
-            runDeadlines.set(signal, deadline); // 위임된 하위 봇이 잔여 시간을 상속받게 연결 (C6)
             let browserUsed = false;
             const toolEvents: any[] = []; // search_meta에 누적 — 새로고침 후에도 도구 사용 내역 표시
             const emitTool = (title: string) => {
