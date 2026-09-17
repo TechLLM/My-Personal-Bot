@@ -5,7 +5,8 @@ import { join } from "node:path";
 const DATA_DIR = join(import.meta.dir, "..", "data");
 mkdirSync(DATA_DIR, { recursive: true });
 
-export const db = new Database(join(DATA_DIR, "mybot.db"), { create: true });
+// bun test는 NODE_ENV=test로 실행된다 — 테스트가 운영 DB를 건드리지 않도록 메모리 DB 사용
+export const db = new Database(process.env.NODE_ENV === "test" ? ":memory:" : join(DATA_DIR, "mybot.db"), { create: true });
 db.exec("PRAGMA journal_mode = WAL");
 db.exec("PRAGMA foreign_keys = ON");
 

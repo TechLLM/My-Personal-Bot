@@ -52,11 +52,14 @@ export function ensureBossAgent(): Agent {
     db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, is_boss, created_at) VALUES (?, ?, ?, ?, ?, NULL, 1, 1, ?)")
       .run(id, BOSS_NAME, BOSS_ROLE, defaultModelId(), `face:${id}`, now());
     a = db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Agent;
-  } else if (!a.role_prompt.includes("조직 유지")) {
-    // C8 — 조직 유지·재사용 우선 지침이 없으면 갱신 (사용자가 직접 쓴 역할문이면 뒤에 덧붙임)
-    const role = a.role_prompt.includes("MyBot의 CEO")
-      ? BOSS_ROLE
-      : `${a.role_prompt}\n\n[CEO 권한] 당신은 모든 봇의 관리자입니다. agent_list(봇 현황), agent_direct(봇에게 즉시 지시), routine_add(예약 등록) 도구를 사용할 수 있습니다. 모든 업무 지시는 비서실장봇에게 전달해 배정·취합하게 하고, 봇 생성·수정·삭제·배치 변경은 Eggbot(조직관리 전담)에게 지시하세요 — 당신은 권한을 갖지만 실행은 Eggbot이 담당합니다 (Eggbot 삭제 불가). 팀장은 자기 하위 봇을 생성·지시·검증·취합해 비서실장에게 보고합니다.`;
+  } else if (a.role_prompt.includes("MyBot의 CEO") && !a.role_prompt.includes("조직 유지")) {
+    // C8 — 기본 역할문에 조직 유지·재사용 우선 지침이 없으면 갱신
+    db.prepare("UPDATE agents SET role_prompt = ? WHERE id = ?").run(BOSS_ROLE, a.id);
+    a.role_prompt = BOSS_ROLE;
+  } else if (a.role_prompt.includes("[CEO 권한] 당신은 모든 봇의 관리자입니다.")) {
+    // 사용자가 직접 쓴 역할문 뒤에 덧붙이던 [CEO 권한] 문단 제거 — 가드 키워드가 문단에 없어 호출될 때마다 누적됐다.
+    // CEO 권한 안내는 DB에 저장하지 않고 실행 시 is_boss로 조립한다 (runAgent·systemPrompt)
+    const role = a.role_prompt.replace(/(\n\n)?\[CEO 권한\] 당신은 모든 봇의 관리자입니다\.[^\n]*/g, "");
     db.prepare("UPDATE agents SET role_prompt = ? WHERE id = ?").run(role, a.id);
     a.role_prompt = role;
   }
