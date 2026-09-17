@@ -123,35 +123,22 @@ export function dispatchAgentMessage(msgId: string) {
     // 원자적 클레임 — pending→processing 전이가 성공한 디스패치만 진행 (동시 디스패치 중복 실행 방지)
     const claimed = db.prepare("UPDATE agent_messages SET status = 'processing' WHERE id = ? AND status = 'pending'").run(msgId);
     if (!claimed.changes) return;
-    const { getAgent, runAgent, agentSessionConvId, defaultModel } = await import("./team");
+    const { getAgent, runAgentDetached } = await import("./team");
     const target = getAgent(msg.to_agent_id);
     if (!target) { db.prepare("UPDATE agent_messages SET status = 'failed', reply = '봇을 찾을 수 없음', done_at = ? WHERE id = ?").run(now(), msgId); return; }
     const sender = msg.from_agent_id ? getAgent(msg.from_agent_id) : null;
-    const runId = uid();
-    db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, NULL, ?, 'running', ?)")
-      .run(runId, target.id, `[${sender?.name ?? "사용자"} 메시지] ${msg.content.slice(0, 150)}`, now());
-    const state: any = {
-      id: target.id, runId, name: target.name, avatar: target.avatar ?? "🤖", role: target.role_prompt,
+    runAgentDetached(target, {
+      label: `[${sender?.name ?? "사용자"} 메시지] ${msg.content.slice(0, 150)}`,
       task: `[${sender?.name ?? "사용자"} 봇의 비동기 메시지입니다. 처리하고 회신할 내용을 보고하세요 — 회신은 보낸 봇의 세션에 전달됩니다]\n\n${msg.content}`,
-      model: target.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: 0,
+      sessionTitle: `[${sender?.name ?? "사용자"} 메시지] ${msg.content}`,
+      sessionTask: msg.content,
+      replyTo: sender,
       verifyIntent: false, // 메시지 본문은 보고·알림 — 지시-실측 검증 대상이 아님 (보고 속 단어를 지시로 오독해 반대 실행을 강제하는 사고 방지)
-    };
-    try {
-      await runAgent(state, target, () => {}, AbortSignal.timeout(540_000));
-      db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
-        .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
-      db.prepare("UPDATE agent_messages SET status = ?, reply = ?, done_at = ? WHERE id = ?")
-        .run(state.status === "done" ? "done" : "failed", (state.result?.trim() || "(결과 없음)").slice(0, 4000), now(), msgId);
-      // 양쪽 봇 세션에 기록 — 받는 봇은 처리 내역, 보낸 봇은 회신
-      const { appendToAgentSession } = await import("./routes/chat");
-      const { normalizeReport } = await import("./report");
-      const meta = JSON.stringify({ type: "tools", events: state.toolLog.map((l: any) => ({ type: "read", title: l.tool, url: "" })) });
-      const report = await normalizeReport(target.name, msg.content, state.result?.trim() || "(결과 없음)", state.toolLog.map((l: any) => l.tool));
-      appendToAgentSession(agentSessionConvId(target.id), `[${sender?.name ?? "사용자"} 메시지] ${msg.content}`, report, target.model, meta);
-      if (sender) appendToAgentSession(agentSessionConvId(sender.id), `[${target.name} 회신 도착] ${msg.content.slice(0, 100)}`, report, target.model, meta);
-    } catch (e) {
-      db.prepare("UPDATE agent_messages SET status = 'failed', reply = ?, done_at = ? WHERE id = ?").run((e as Error).message, now(), msgId);
-    }
+      onDone: (state) => {
+        db.prepare("UPDATE agent_messages SET status = ?, reply = ?, done_at = ? WHERE id = ?")
+          .run(state.status === "done" ? "done" : "failed", (state.result?.trim() || "(결과 없음)").slice(0, 4000), now(), msgId);
+      },
+    });
   })().catch(() => {});
 }
 
@@ -256,7 +243,7 @@ async function notifyDenied(req: any) {
 
 async function resumeAgent(req: any, task: string) {
   if (!req.agent_id) return;
-  const { getAgent, runAgent, agentSessionConvId, defaultModel } = await import("./team");
+  const { getAgent, runAgentDetached, agentSessionConvId } = await import("./team");
   const agent = getAgent(req.agent_id);
   if (!agent) return;
   // 재개 폭주 방지 — 승인이 한꺼번에 처리되면 "원래 작업 재개" run이 봇당 수십 개 쌓인다.
@@ -269,15 +256,10 @@ async function resumeAgent(req: any, task: string) {
     appendToAgentSession(agentSessionConvId(agent.id), `[승인 처리 — 결과 기록] ${req.tool}`, await normalizeReport(agent.name, req.resume || req.tool, task), agent.model, null);
     return;
   }
-  const runId = uid();
-  db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, NULL, ?, 'running', ?)")
-    .run(runId, agent.id, `[승인 처리됨] ${req.tool} — 작업 재개`, now());
-  const state: any = { id: agent.id, runId, name: agent.name, avatar: agent.avatar ?? "🤖", role: agent.role_prompt, task, model: agent.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: 0 };
-  await runAgent(state, agent, () => {}, AbortSignal.timeout(540_000));
-  db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
-    .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
-  const { appendToAgentSession } = await import("./routes/chat");
-  const { normalizeReport } = await import("./report");
-  const meta = JSON.stringify({ type: "tools", events: state.toolLog.map((l: any) => ({ type: "read", title: l.tool, url: "" })) });
-  appendToAgentSession(agentSessionConvId(agent.id), `[승인 처리 — 작업 재개] ${req.tool}`, await normalizeReport(agent.name, req.resume || req.tool, state.result?.trim() || "(결과 없음)", state.toolLog.map((l: any) => l.tool)), agent.model, meta);
+  runAgentDetached(agent, {
+    label: `[승인 처리됨] ${req.tool} — 작업 재개`,
+    task,
+    sessionTitle: `[승인 처리 — 작업 재개] ${req.tool}`,
+    sessionTask: req.resume || req.tool,
+  });
 }

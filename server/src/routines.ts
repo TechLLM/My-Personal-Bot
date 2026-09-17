@@ -24,40 +24,20 @@ export async function runRoutine(r: any): Promise<string> {
 }
 async function runRoutineInner(r: any): Promise<string> {
   // 모든 루틴은 봇 세션으로 실행 — 담당 봇, 없으면 대장 봇. 봇의 도구(검색/브라우저/파일/MCP) 사용 가능
-  const { ensureBossAgent, getAgent, runAgent } = await import("./team");
-  type TeamAgentState = import("./team").TeamAgentState;
+  const { ensureBossAgent, getAgent, runAgentDetached } = await import("./team");
   const agent = (r.agent_id ? getAgent(r.agent_id) : null) ?? ensureBossAgent();
-  const useModel = agent.model ?? r.model ?? defaultModelId();
 
-  const runId = uid();
-  db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, routine_id, created_at) VALUES (?, ?, NULL, ?, 'running', ?, ?)")
-    .run(runId, agent.id, `[루틴] ${r.name}: ${r.prompt}`, r.id ?? null, now());
-  const state: TeamAgentState = {
-    id: agent.id, runId,
-    name: agent.name, avatar: agent.avatar ?? "🤖",
-    role: agent.role_prompt, task: `예약된 정기 업무입니다. 수행하고 결과를 보고하세요.\n\n${r.prompt}`,
-    model: useModel, status: "running", steps: 0, toolLog: [], depth: 0,
-  };
-  await runAgent(state, agent, () => {}, (await import("./team")).delegateTimeout()!);
-  db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
-    .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
-  const out = state.result ?? "(결과 없음)";
-
-  // 결과를 담당 봇의 메인 세션에 기록 — 봇 세션을 열면 루틴 수행 내역(도구 칩 포함)이 보임
-  const title = `루틴 · ${agent.name} · ${r.name}`;
-  {
-    const { appendToAgentSession } = await import("./routes/chat");
-    const { agentSessionConvId } = await import("./team");
-    const runMeta = JSON.stringify({ type: "tools", events: state.toolLog.map((l) => ({ type: "read", title: l.tool, url: "" })) });
-    const { normalizeReport } = await import("./report");
-    appendToAgentSession(agentSessionConvId(agent.id), `[루틴] ${r.name}\n${r.prompt}`, await normalizeReport(agent.name, r.prompt, out), useModel, runMeta);
-  }
-  // 루틴 결과도 설정된 알림 채널로 발송
-  if (out) {
-    const { notifyResult } = await import("./notify");
-    notifyResult(title, out);
-  }
-  return out;
+  const { done } = runAgentDetached(agent, {
+    model: agent.model ?? r.model ?? undefined, // 원래 로직 유지 — 봇 모델 우선, 없으면 루틴 지정 모델
+    label: `[루틴] ${r.name}: ${r.prompt}`,
+    task: `예약된 정기 업무입니다. 수행하고 결과를 보고하세요.\n\n${r.prompt}`,
+    routineId: r.id ?? null,
+    sessionTitle: `[루틴] ${r.name}\n${r.prompt}`,
+    sessionTask: r.prompt,
+    notifyTitle: `루틴 · ${agent.name} · ${r.name}`,
+  });
+  const state = await done;
+  return state.result ?? "(결과 없음)";
 }
 
 // 이메일 트리거 — IMAP으로 새 메일을 폴링해 필터(from/subject) 매칭 시 루틴 발화 (그록 이벤트 트리거 대응)

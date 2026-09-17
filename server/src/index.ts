@@ -76,6 +76,8 @@ for (const r of orphanRuns) {
 db.prepare("UPDATE messages SET content = '⚠️ 서버 재시작으로 중단된 작업입니다.' WHERE role = 'assistant' AND trim(content) = ''").run();
 // 같은 이유로 처리 중이던 봇 간 메시지도 정리 — 'processing' 상태로 영원히 멈추지 않게
 db.prepare("UPDATE agent_messages SET status = 'failed', reply = '서버 재시작으로 처리 중단', done_at = ? WHERE status = 'processing'").run(now());
+// 인계 대기 중이던 테이크오버도 재시작으로 headed 창이 닫혔으므로 정리 — 프론트에 영원히 뜨지 않게
+db.prepare("UPDATE handoff_requests SET status = 'timeout', resolved_at = ? WHERE status = 'pending'").run(now());
 // 재시작 사이에 디스패치가 끊긴 pending 메시지 재배달 — pending은 아직 시작 안 한 큐이므로 전달해야 함
 for (const m of db.prepare("SELECT id FROM agent_messages WHERE status = 'pending'").all() as { id: string }[]) {
   import("./approvals").then(({ dispatchAgentMessage }) => dispatchAgentMessage(m.id)).catch(() => {});

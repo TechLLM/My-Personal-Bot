@@ -123,6 +123,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   const [sites, setSites] = useState<SiteLogin[]>([]);
   const [siteName, setSiteName] = useState(""); const [siteUrl, setSiteUrl] = useState("");
   const [siteUser, setSiteUser] = useState(""); const [sitePass, setSitePass] = useState("");
+  const [siteCheck, setSiteCheck] = useState(""); // 로그인 성공 기준 — CSS 선택자 또는 url:정규식 (C20)
   const [testMsg, setTestMsg] = useState("");
   const [dirty, setDirty] = useState(false);
   const [savedMsg, setSavedMsg] = useState("");
@@ -556,9 +557,10 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                       <input className={`${Input} flex-1`} type="password" placeholder="비밀번호" value={sitePass} onChange={(e) => setSitePass(e.target.value)} />
                       <button className={Btn} onClick={() => {
                         if (!siteName.trim() || !siteUrl.trim() || !siteUser.trim() || !sitePass) return;
-                        api.addSite({ name: siteName, url: siteUrl, username: siteUser, password: sitePass }).then(() => { setSiteName(""); setSiteUrl(""); setSiteUser(""); setSitePass(""); load(); });
+                        api.addSite({ name: siteName, url: siteUrl, username: siteUser, password: sitePass, success_check: siteCheck.trim() || undefined }).then(() => { setSiteName(""); setSiteUrl(""); setSiteUser(""); setSitePass(""); setSiteCheck(""); load(); });
                       }}>등록</button>
                     </div>
+                    <input className={`${Input} w-full`} placeholder="로그인 성공 기준 (선택) — CSS 선택자 또는 url:정규식. 비우면 비밀번호 칸 소멸로 판정" value={siteCheck} onChange={(e) => setSiteCheck(e.target.value)} />
                   </div>
                 </div>
               </div>

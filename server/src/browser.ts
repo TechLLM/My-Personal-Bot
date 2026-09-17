@@ -3,8 +3,7 @@ import { chromium, type BrowserContext, type Frame, type Page } from "playwright
 import type { Endpoint } from "./providers";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
-import { db } from "./db";
-import type { TeamAgentState } from "./team";
+import { db, uid, now } from "./db";
 
 // ego(lite) 방식 증류: 별도 브라우저가 아니라 MyBot이 직접 구동하는 영속 Chromium.
 // - headed(실제 창)로 실행해 headless 탐지 신호 제거
@@ -55,9 +54,13 @@ function launchContext(headless: boolean): Promise<BrowserContext> {
     });
 }
 
+// 테이크오버 진행 중 표시 — 인계 중엔 headless 재기동 요청이 headed 창을 닫지 못하게 보류한다 (C5)
+let activeHandoff: Promise<void> | null = null;
+
 // 봇 작업은 headless(창 없음, Chrome for Testing의 new headless = 실제 Chrome 지문에 근접),
 // 수동 로그인만 headed로 잠시 전환. 프로필 잠금 때문에 동시 실행은 불가 — 모드 전환 시 재기동.
 export async function getBrowser(headless = true): Promise<BrowserContext> {
+  if (headless && activeHandoff) await activeHandoff; // 인계 대기 중 headless 전환 보류 — 사용자 창이 닫히지 않게
   if (ctx && ctxHeadless === headless) return ctx;
   if (ctx) {
     try { await ctx.close(); } catch {}
@@ -116,6 +119,89 @@ export async function closeAgentPage(key: string) {
   const stack = pages.get(key) ?? [];
   pages.delete(key);
   for (const x of stack) { try { await x.close(); } catch {} }
+}
+
+// ─── 컴퓨터 뷰 (A3) — 보는 사람이 있을 때만 2.5초 간격으로 viewport 프레임을 밀어낸다 ───
+const lastAction = new Map<string, string>(); // run별 최근 브라우저 액션 — 뷰 패널 하단에 표시
+const viewSubs = new Map<string, Set<(f: { image: string; url: string; title: string; action: string }) => void>>();
+const viewTimers = new Map<string, ReturnType<typeof setInterval>>();
+
+export function subscribeBrowserView(key: string, cb: (f: { image: string; url: string; title: string; action: string }) => void): () => void {
+  let set = viewSubs.get(key);
+  if (!set) { set = new Set(); viewSubs.set(key, set); startViewPump(key); }
+  set.add(cb);
+  return () => {
+    set.delete(cb);
+    if (!set.size) {
+      viewSubs.delete(key);
+      const t = viewTimers.get(key);
+      if (t) clearInterval(t);
+      viewTimers.delete(key);
+    }
+  };
+}
+
+function startViewPump(key: string) {
+  const tick = async () => {
+    const subs = viewSubs.get(key);
+    if (!subs?.size) return;
+    const page = (pages.get(key) ?? []).filter((x) => !x.isClosed()).at(-1);
+    if (!page) return;
+    try {
+      const shot = await page.screenshot({ type: "jpeg", quality: 60 });
+      const frame = {
+        image: shot.toString("base64"),
+        url: page.url(),
+        title: await page.title().catch(() => ""),
+        action: lastAction.get(key) ?? "",
+      };
+      for (const cb of subs) { try { cb(frame); } catch {} }
+    } catch {}
+  };
+  viewTimers.set(key, setInterval(tick, 2500));
+  void tick();
+}
+
+// ─── 테이크오버 (A2) — 봇이 2FA·CAPTCHA·결제처럼 사람만 풀 수 있는 화면을 만나면
+// 같은 프로필의 headed 창으로 제어를 넘긴다. 세션(쿠키·로그인)은 디스크 프로필에 남아
+// 전환 후에도 유지되고, 사용자가 "반환"을 누르면 봇이 headless로 이어간다.
+async function doHandoff(agentKey: string, reason: string): Promise<string> {
+  const cur = (pages.get(agentKey) ?? []).filter((x) => !x.isClosed()).at(-1);
+  const url = cur?.url() ?? "about:blank";
+  const agentId = (db.prepare("SELECT agent_id FROM agent_runs WHERE id = ?").get(agentKey) as any)?.agent_id ?? null;
+  const id = uid();
+  db.prepare("INSERT INTO handoff_requests (id, agent_id, run_id, reason, url, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)")
+    .run(id, agentId, agentKey, reason.slice(0, 300) || "사람 확인이 필요합니다", url, now());
+  const wait = (async () => {
+    try {
+      const b = await getBrowser(false); // headed — 사용자가 보고 직접 조작한다
+      const pg = await b.newPage();
+      await pg.goto(/^https?:/.test(url) ? url : "about:blank", { waitUntil: "domcontentloaded" }).catch(() => {});
+      const deadline = Date.now() + 5 * 60_000; // 5분 무응답 시 부분 보고로 마무리
+      while (Date.now() < deadline) {
+        const r = db.prepare("SELECT status FROM handoff_requests WHERE id = ?").get(id) as any;
+        if (r?.status === "done") return "done";
+        if (r && r.status !== "pending") return "timeout"; // cancelled 등 — 사용자가 창을 닫은 경우
+        await new Promise((res) => setTimeout(res, 1500));
+      }
+      return "timeout";
+    } finally {
+      try { await ctx?.close(); } catch {}
+      ctx = null;
+      pages.clear(); // headed 창 닫기 — 다음 브라우저 호출이 headless로 재기동
+    }
+  })();
+  activeHandoff = wait.then(() => {});
+  try {
+    const outcome = await wait;
+    if (outcome !== "done")
+      db.prepare("UPDATE handoff_requests SET status = 'timeout', resolved_at = ? WHERE id = ? AND status = 'pending'").run(now(), id);
+    return outcome === "done"
+      ? "사용자가 인계 작업을 완료했습니다 — 로그인·인증 상태는 브라우저 프로필에 유지됩니다. browser_open으로 목표 페이지를 다시 열어 작업을 이어가세요."
+      : "인계 대기 시간(5분) 초과 — 사용자가 완료하지 않았습니다. 지금까지 확보한 결과로 부분 보고하세요.";
+  } finally {
+    activeHandoff = null;
+  }
 }
 
 // 이 프로세스가 ego lite에 연 Task Space (key = browserTool의 agentKey) — 종료 시 정리 대상
@@ -348,6 +434,9 @@ async function resolveVisionModel(): Promise<{ endpoint: Endpoint; model: string
 // 봇이 쓰는 브라우저 도구
 export async function browserTool(agentKey: string, name: string, args: Record<string, unknown>): Promise<string> {
   try {
+    lastAction.set(agentKey, `${name} ${String(args.url ?? args.site ?? args.selector ?? args.ref ?? args.text ?? "").slice(0, 80)}`.trim());
+    // 테이크오버 — pageFor 전에 처리: 인계가 브라우저 컨텍스트를 headed로 전환해 기존 페이지가 무효화된다
+    if (name === "browser_handoff") return await doHandoff(agentKey, String(args.reason ?? ""));
     // ego lite 경유 — 사용자의 실제 로그인된 브라우저, 내장 브라우저를 띄우지 않음
     if (name === "ego_run") {
       const { egoAvailable, egoRun } = await import("./ego");
@@ -473,8 +562,22 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
         if (await btn.count().catch(() => 0)) await btn.click().catch(() => {});
         else await pass.press("Enter").catch(() => {});
         await settle(page, 12000);
-        const stillForm = await page.locator('input[type="password"]').count().catch(() => 0);
-        return `${stillForm ? "로그인 폼이 아직 남아 있습니다 — 실패했거나 추가 인증이 필요할 수 있습니다." : "로그인 완료."}\n\n${await snapshot(page)}`;
+        // C20 — 사이트별 성공 기준이 저장돼 있으면 그걸로 판정 (CSS 선택자 또는 "url:정규식").
+        // 없으면 비밀번호 필드 소멸을 근사치로 쓴다 — 사라지는 것만으로는 2FA·CAPTCHA를 못 걸러낸다.
+        let ok = !(await page.locator('input[type="password"]').count().catch(() => 0));
+        if (site.success_check) {
+          const chk = String(site.success_check);
+          try {
+            ok = chk.startsWith("url:")
+              ? new RegExp(chk.slice(4), "i").test(page.url())
+              : (await page.locator(chk).first().count().catch(() => 0)) > 0;
+          } catch {}
+        }
+        if (!ok) {
+          // A2 승격 — 2FA·CAPTCHA·추가 인증이 필요한 화면은 사용자에게 넘긴다
+          return await doHandoff(agentKey, `${site.name} 로그인 미완료 — 2FA·CAPTCHA 등 추가 인증이 필요할 수 있습니다`);
+        }
+        return `로그인 완료.\n\n${await snapshot(page)}`;
       }
       case "browser_eval": {
         // 셀렉터 기반 도구로 안 되는 작업용 — 페이지 컨텍스트에서 임의 JS 실행
@@ -536,12 +639,13 @@ export const BROWSER_TOOLS = [
   { type: "function", function: { name: "browser_login", description: "설정에 등록된 사이트 계정으로 자동 로그인합니다 (회사 그룹웨어·사내 시스템 등). 로그인 후 browser_read로 화면과 요소 번호를 확인하세요.", parameters: { type: "object", properties: { site: { type: "string", description: "설정에 등록한 사이트 이름" } }, required: ["site"] } } },
   { type: "function", function: { name: "browser_eval", description: "현재 페이지에서 임의 JavaScript를 실행합니다. @번호 기반 클릭·입력으로 안 되는 경우에만 쓰세요 — 먼저 browser_read로 요소 번호를 확인하고 browser_click을 시도하는 것이 원칙입니다. 대량 데이터 추출처럼 클릭으로 불가능한 작업에 적합합니다.", parameters: { type: "object", properties: { script: { type: "string", description: "페이지에서 실행할 JS 본문 (반환값이 결과로 옴)" } }, required: ["script"] } } },
   { type: "function", function: { name: "browser_look", description: "현재 화면을 캡처해 비전 모델이 설명합니다 — 차트·캔버스·이미지 기반 UI처럼 텍스트로 안 읽히는 화면에만 쓰세요. 텍스트가 읽히는 화면은 browser_read가 훨씬 빠르고 정확합니다.", parameters: { type: "object", properties: { question: { type: "string", description: "화면에서 알고 싶은 것" } } } } },
+  { type: "function", function: { name: "browser_handoff", description: "2FA·CAPTCHA·결제 비밀번호처럼 사람만 통과할 수 있는 화면을 만나면 호출합니다. 실제 브라우저 창이 열리고 사용자에게 인계 팝업이 뜹니다 — 사용자가 완료하면 세션 그대로 작업을 이어갑니다. 반복 시도로 막힌 화면을 억지로 돌파하지 마세요.", parameters: { type: "object", properties: { reason: { type: "string", description: "사용자에게 보여줄 인계 사유 — 무엇을 해야 하는지 구체적으로" } }, required: ["reason"] } } },
   { type: "function", function: { name: "ego_run", description: "ego lite — 사용자의 실제 로그인된 브라우저에서 JavaScript를 실행합니다 (컴퓨트 유즈). 내장 browser_* 도구로 접근이 안 되는 사이트에 쓰세요. script 안에서 쓸 수 있는 헬퍼: openOrReuseTab(url,{wait:true}), snapshotText()(요소를 [ref=N]으로 표시), click('@N' 또는 CSS), typeText(sel,text), fillInput(sel,text), pressKey('Enter'), scrollBy(픽셀), js('JS표현식'), captureScreenshot(), listTabs(), waitForElement(sel). 결과는 반드시 cliLog(...)로 출력하세요. 작업 공간은 자동으로 'mybot-{작업ID}' Space에서 실행됩니다.", parameters: { type: "object", properties: { script: { type: "string", description: "실행할 JS (top-level await 가능). 예: await openOrReuseTab('https://...', {wait:true}); cliLog(await snapshotText());" } }, required: ["script"] } } },
 ];
 
 // 등록된 사이트 계정 CRUD — 비밀번호는 암호화 저장, 목록/조회에서 절대 반환하지 않음 (write-only)
 export const sitesRoute = new Hono()
-  .get("/", (c) => c.json({ sites: db.prepare("SELECT id, name, url, username, created_at FROM site_logins ORDER BY created_at").all() }))
+  .get("/", (c) => c.json({ sites: db.prepare("SELECT id, name, url, username, success_check, created_at FROM site_logins ORDER BY created_at").all() }))
   // 봇이 요청한 계정 입력 (팝업 대기 목록)
   .get("/requests", (c) => c.json({ requests: db.prepare("SELECT id, name, url, reason, created_at FROM credential_requests WHERE status = 'pending' ORDER BY created_at").all() }))
   .post("/requests/:id/dismiss", (c) => {
@@ -557,40 +661,30 @@ export const sitesRoute = new Hono()
     const siteName = String(b.name).slice(0, 50);
     const existing = db.prepare("SELECT id FROM site_logins WHERE name = ?").get(siteName) as any;
     const id = existing?.id ?? uid();
+    // success_check: 사이트별 로그인 성공 기준 — CSS 선택자(요소 존재) 또는 "url:정규식" (C20)
+    const successCheck = typeof b.success_check === "string" && b.success_check.trim() ? b.success_check.trim().slice(0, 300) : null;
     if (existing)
-      db.prepare("UPDATE site_logins SET url = ?, username = ?, password = ? WHERE id = ?")
-        .run(String(b.url), String(b.username), encryptSecret(String(b.password)), id);
+      db.prepare("UPDATE site_logins SET url = ?, username = ?, password = ?, success_check = COALESCE(?, success_check) WHERE id = ?")
+        .run(String(b.url), String(b.username), encryptSecret(String(b.password)), successCheck, id);
     else
-      db.prepare("INSERT INTO site_logins (id, name, url, username, password, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(id, siteName, String(b.url), String(b.username), encryptSecret(String(b.password)), now());
+      db.prepare("INSERT INTO site_logins (id, name, url, username, password, success_check, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .run(id, siteName, String(b.url), String(b.username), encryptSecret(String(b.password)), successCheck, now());
     // 봇 요청으로 온 입력이면 요청을 완료 처리하고 요청한 봇의 작업을 자동 재개
     // status='pending' 조건으로 원자 전이 — 이미 처리된 요청의 중복 제출이 재개를 다시 발화하지 않게
     if (b.request_id) {
       const flipped = db.prepare("UPDATE credential_requests SET status = 'done' WHERE id = ? AND status = 'pending'").run(String(b.request_id));
       const req = flipped.changes > 0 ? db.prepare("SELECT * FROM credential_requests WHERE id = ?").get(String(b.request_id)) as any : null;
       if (req?.agent_id) {
-        const { getAgent, runAgent, agentSessionConvId, defaultModel } = await import("./team");
+        const { getAgent, runAgentDetached } = await import("./team");
         const agent = getAgent(req.agent_id);
         if (agent) {
-          const runId = uid();
-          db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, NULL, ?, 'running', ?)")
-            .run(runId, agent.id, `[계정 입력됨] ${req.name} — 작업 자동 재개`, now());
-          const state: TeamAgentState = {
-            id: agent.id, runId, name: agent.name, avatar: agent.avatar ?? "🤖", role: agent.role_prompt,
+          runAgentDetached(agent, {
+            label: `[계정 입력됨] ${req.name} — 작업 자동 재개`,
             task: `사용자가 "${req.name}" 계정을 보안 팝업에 입력했습니다. 계정은 암호화되어 저장됐고 browser_login(site: "${req.name}")으로 로그인할 수 있습니다. 이어서 원래 업무를 진행하고 결과를 보고하세요.\n\n원래 작업: ${req.resume || req.reason || "(없음)"}`,
-            model: agent.model ?? defaultModel(), status: "running", steps: 0, toolLog: [] as any[], depth: 0,
-          };
-          (async () => {
-            await runAgent(state as any, agent, () => {}, AbortSignal.timeout(540_000));
-            db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
-              .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
-            const { appendToAgentSession } = await import("./routes/chat");
-            const meta = JSON.stringify({ type: "tools", events: state.toolLog.map((l) => ({ type: "read", title: l.tool, url: "" })) });
-            const { normalizeReport } = await import("./report");
-            appendToAgentSession(agentSessionConvId(agent.id), `[계정 입력 완료 — 작업 자동 재개] ${req.name}`, await normalizeReport(agent.name, req.resume || req.name, state.result ?? "(결과 없음)"), agent.model, meta);
-            const { notifyResult } = await import("./notify");
-            notifyResult(`계정 입력됨 — ${agent.name} 작업 재개`, state.result ?? "(결과 없음)");
-          })().catch((e) => console.error("[mybot] 계정 입력 후 재개 실패:", (e as Error).message));
+            sessionTitle: `[계정 입력 완료 — 작업 자동 재개] ${req.name}`,
+            sessionTask: req.resume || req.name,
+            notifyTitle: `계정 입력됨 — ${agent.name} 작업 재개`,
+          });
         }
       }
     }
@@ -608,8 +702,37 @@ export function browserRunning(): boolean {
 // 수동 로그인용: 브라우저 창을 열어 사용자가 직접 로그인 (세션이 프로필에 저장됨)
 export const browserRoute = new Hono()
   .get("/status", (c) => c.json({ running: browserRunning() }))
+  // 테이크오버 대기열 — 프론트가 폴링해 인계 모달을 띄운다 (A2)
+  .get("/handoffs", (c) =>
+    c.json({ requests: db.prepare("SELECT h.id, h.agent_id, h.run_id, h.reason, h.url, h.created_at, a.name agent_name, a.avatar FROM handoff_requests h LEFT JOIN agents a ON a.id = h.agent_id WHERE h.status = 'pending' ORDER BY h.created_at").all() }))
+  .post("/handoffs/:id/done", (c) => {
+    // 사용자가 "반환"을 눌렀다 — doHandoff의 폴링이 이걸 보고 봇 작업을 재개시킨다
+    db.prepare("UPDATE handoff_requests SET status = 'done', resolved_at = ? WHERE id = ?").run(now(), c.req.param("id"));
+    return c.json({ ok: true });
+  })
+  // 컴퓨터 뷰 — run 키별 최신 브라우저 화면을 SSE로 밀어낸다 (A3). 구독자가 없으면 캡처 자체를 안 돌린다
+  .get("/view/:key", (c) => {
+    const key = c.req.param("key");
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        const unsub = subscribeBrowserView(key, (f) => {
+          try { controller.enqueue(encoder.encode(`event: frame\ndata: ${JSON.stringify(f)}\n\n`)); } catch {}
+        });
+        // 연결 유지용 핑 + 클라이언트가 끊으면 구독 해제
+        const ping = setInterval(() => { try { controller.enqueue(encoder.encode(": ping\n\n")); } catch {} }, 15000);
+        const origCancel = controller.close.bind(controller);
+        (c.req.raw.signal as AbortSignal).addEventListener("abort", () => { clearInterval(ping); unsub(); try { origCancel(); } catch {} });
+      },
+    });
+    return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" } });
+  })
   .post("/open", async (c) => {
     const b = await c.req.json().catch(() => ({}));
+    // C5 — 봇이 진행 중인 headless 페이지가 있으면 전환하면 그 페이지들이 닫힌다. 명시 force 없이는 차단.
+    const busyKeys = [...pages.keys()].filter((k) => (pages.get(k) ?? []).some((x) => !x.isClosed()));
+    if (!b.force && ctx && ctxHeadless && busyKeys.length)
+      return c.json({ error: "봇이 브라우저로 작업 중입니다 — 지금 열면 진행 중인 페이지가 닫힙니다. 봇이 인계를 요청할 때까지 기다리거나 force: true로 강제 전환하세요.", busy: busyKeys }, 409);
     try {
       const browser = await getBrowser(false); // 수동 로그인은 창이 보여야 하므로 headed
       const page = await browser.newPage();
@@ -620,6 +743,10 @@ export const browserRoute = new Hono()
     }
   })
   .post("/close", async (c) => {
+    // 인계 대기 중인 창을 닫으면 봇의 폴링이 'cancelled'를 보고 즉시 타임아웃 경로로 빠진다
+    db.prepare("UPDATE handoff_requests SET status = 'cancelled', resolved_at = ? WHERE status = 'pending'").run(now());
     try { await ctx?.close(); } catch {}
+    ctx = null;
+    pages.clear();
     return c.json({ ok: true });
   });

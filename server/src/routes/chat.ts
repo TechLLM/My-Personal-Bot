@@ -562,8 +562,9 @@ export const chatRoute = new Hono()
                     : await withToolTimeout(callBuiltin(tc.name, args, conv?.agent_id, signal, 0, teamEmit));
                   if (tc.name === "request_credentials" && !out.includes("이미 저장")) popupShown = true;
                 } else if (tc.name.startsWith("browser_") || tc.name === "ego_run") {
+                  if (!browserUsed) send("team", { type: "browser_view", key: browserKey }); // A3 — 프론트가 컴퓨터 뷰를 열 수 있게 run 키를 알림
                   browserUsed = true;
-                  out = await withToolTimeout(browserTool(browserKey, tc.name, args));
+                  out = await withToolTimeout(browserTool(browserKey, tc.name, args), tc.name === "browser_handoff" || tc.name === "browser_login" ? 400_000 : undefined); // 테이크오버는 사용자 완료까지 최대 5분 블로킹이 정상
                 } else {
                   out = await withToolTimeout(mcpCall(tc.name, args));
                 }

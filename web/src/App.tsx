@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, streamChat, runTeam, mybotFetch, type Agent, type Conversation, type Message, type Model, type TeamPlanTask, type SiteRequest, type Group, type ApprovalRequest } from "./api";
+import { api, streamChat, runTeam, mybotFetch, type Agent, type Conversation, type Message, type Model, type TeamPlanTask, type SiteRequest, type Group, type ApprovalRequest, type HandoffRequest } from "./api";
 import { Sidebar } from "./components/Sidebar";
 import { Composer, type Mode, type Persona } from "./components/Composer";
 import { MessageItem } from "./components/MessageItem";
@@ -7,6 +7,8 @@ import { SearchTrace, type SearchEvent } from "./components/SearchTrace";
 import { TeamTrace, type TeamEvent } from "./components/TeamTrace";
 import { SettingsModal } from "./components/SettingsModal";
 import { CredentialModal } from "./components/CredentialModal";
+import { HandoffModal } from "./components/HandoffModal";
+import { BrowserView } from "./components/BrowserView";
 import { ApprovalModal } from "./components/ApprovalModal";
 import { BotLobby } from "./components/BotLobby";
 import { Menu, Crown } from "lucide-react";
@@ -37,6 +39,9 @@ export default function App() {
   const [defaultModel, setDefaultModel] = useState(""); // 설정의 기본 AI 모델 — 새 봇의 기본값
   const [createSignal, setCreateSignal] = useState(0); // 로비의 생성 마법사를 여는 신호 ("+ 새 봇")
   const [credRequests, setCredRequests] = useState<SiteRequest[]>([]); // 봇이 요청한 계정 입력 대기열
+  const [handoffs, setHandoffs] = useState<HandoffRequest[]>([]); // 테이크오버 인계 대기열 (A2)
+  const [liveViewKey, setLiveViewKey] = useState<string | null>(null); // 직접 대화 봇의 브라우저 run 키 (A3)
+  const [viewKey, setViewKey] = useState<string | null>(null); // 열려 있는 컴퓨터 뷰 패널의 run 키
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]); // 봇의 위험 액션 승인 대기열
   const [groups, setGroups] = useState<Group[]>([]); // 그룹채팅 목록
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null); // 현재 열린 그룹 대화
@@ -121,6 +126,14 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
+  // 테이크오버 — 봇이 2FA·CAPTCHA 등 사람 단계를 만나면 인계 대기열에 올라온다
+  useEffect(() => {
+    const poll = () => api.handoffs().then((d) => setHandoffs(d.requests)).catch(() => {});
+    poll();
+    const t = setInterval(poll, 5000);
+    return () => clearInterval(t);
+  }, []);
+
   // 실행 중인 봇 폴링 — 위임·루틴 등 백그라운드 작업도 사이드바에 표시
   useEffect(() => {
     const poll = () => api.agentsRunning().then((d) => setRunningInfo(Object.fromEntries(d.running.map((r) => [r.id, r.tool])))).catch(() => {});
@@ -147,6 +160,7 @@ export default function App() {
   const loadConversation = useCallback((id: string) => {
     setConvId(id);
     setPendingAgent(null);
+    setLiveViewKey(null); setViewKey(null); // 다른 대화의 컴퓨터 뷰가 남지 않게
     refreshConversations(); // 목록이 오래돼 현재 대화가 없으면 담당 봇 칩이 안 뜸 — 열 때마다 갱신
     api.conversation(id).then((d) => {
       setMessages(d.messages);
@@ -166,6 +180,7 @@ export default function App() {
     setMessages([]);
     setSearchEvents([]);
     setTeamEvents([]);
+    setLiveViewKey(null); setViewKey(null);
   }, []);
 
   // 봇 선택 = 그 봇의 메인 세션으로 진입 — 루틴 단발 대화가 아닌 메인 세션(위임·루틴 작업 내역이 쌓이는 곳)
@@ -265,7 +280,7 @@ export default function App() {
         onDelta: (id, t) => { if (onThisConv()) setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, content: m.content + t } : m))); },
         onReasoning: (id, t) => { if (onThisConv()) setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, reasoning: (m.reasoning ?? "") + t } : m))); },
         onSearch: (ev) => { if (onThisConv()) setSearchEvents((prev) => [...prev, ev]); },
-        onTeam: (ev) => { if (onThisConv()) setTeamEvents((prev) => [...prev, ev]); },
+        onTeam: (ev) => { if (onThisConv()) { setTeamEvents((prev) => [...prev, ev]); if (ev.type === "browser_view" && ev.key) setLiveViewKey(ev.key); } },
         onDone: (m) => {
           patchMessage(m.id, m);
           setStreaming(false);
@@ -393,7 +408,7 @@ export default function App() {
     runTeam(
       { conversationId: m.conversation_id, messageId: m.id, tasks, model: effectiveModel },
       {
-        onTeam: (ev) => setTeamEvents((prev) => [...prev, ev]),
+        onTeam: (ev) => { setTeamEvents((prev) => [...prev, ev]); if (ev.type === "browser_view" && ev.key) setLiveViewKey(ev.key); },
         onDelta: (id, t) => {
           const first = !started;
           started = true;
@@ -517,7 +532,7 @@ export default function App() {
                 <SearchTrace events={searchEvents} done={!streaming} />
               )}
               {teamEvents.length > 0 && (
-                <TeamTrace events={teamEvents} done={!streaming} />
+                <TeamTrace events={teamEvents} done={!streaming} onView={(key) => setViewKey(key)} />
               )}
             </div>
           </div>
@@ -541,13 +556,28 @@ export default function App() {
         )}
       </main>
       {settingsOpen && <SettingsModal models={models} onClose={() => { setSettingsOpen(false); reloadAll(); }} />}
-      {credRequests[0] && (
+      {liveViewKey && !viewKey && (
+        <button
+          onClick={() => setViewKey(liveViewKey)}
+          className="fixed bottom-4 right-4 z-40 rounded-full border border-stone-200 bg-white px-3.5 py-2 text-xs font-medium text-stone-600 shadow-[0_4px_16px_rgba(0,0,0,0.08)] hover:bg-stone-50"
+        >
+          🖥 봇 화면 보기
+        </button>
+      )}
+      {viewKey && <BrowserView viewKey={viewKey} onClose={() => setViewKey(null)} />}
+      {handoffs[0] && (
+        <HandoffModal
+          request={handoffs[0]}
+          onDone={() => setHandoffs((prev) => prev.filter((r) => r.id !== handoffs[0].id))}
+        />
+      )}
+      {!handoffs[0] && credRequests[0] && (
         <CredentialModal
           request={credRequests[0]}
           onDone={() => setCredRequests((prev) => prev.filter((r) => r.id !== credRequests[0].id))}
         />
       )}
-      {!credRequests[0] && approvals[0] && (
+      {!handoffs[0] && !credRequests[0] && approvals[0] && (
         <ApprovalModal
           request={approvals[0]}
           onDone={() => setApprovals((prev) => prev.filter((r) => r.id !== approvals[0].id))}

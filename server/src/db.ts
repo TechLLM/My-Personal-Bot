@@ -209,6 +209,17 @@ try { db.exec("ALTER TABLE agent_runs ADD COLUMN tool_log TEXT"); } catch {}
 try { db.exec("ALTER TABLE agent_runs ADD COLUMN routine_id TEXT"); } catch {} // 루틴별 실행이력 보존·조회 키
 try { db.exec("ALTER TABLE agent_runs ADD COLUMN resume_count INTEGER"); } catch {} // 재시작 후 재개 횟수 — 3회 초과 시 error 확정
 try { db.exec("ALTER TABLE approval_rules ADD COLUMN cond TEXT"); } catch {} // A12 — 인자 조건 규칙 {"field","op","value"}
+try { db.exec("ALTER TABLE site_logins ADD COLUMN success_check TEXT"); } catch {} // C20 — 사이트별 로그인 성공 기준 (CSS 선택자 또는 url:정규식)
+try { db.exec(`CREATE TABLE IF NOT EXISTS handoff_requests (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT,
+  run_id TEXT,
+  reason TEXT,
+  url TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at INTEGER,
+  resolved_at INTEGER
+)`); } catch {} // A2 — 테이크오버 인계 대기열
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_agent_runs_routine ON agent_runs(routine_id, created_at)"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN parent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN is_lead INTEGER NOT NULL DEFAULT 0"); } catch {}

@@ -108,11 +108,14 @@ export const api = {
   deleteAgent: (id: string) => mybotFetch(`/api/agents/${id}`, { method: "DELETE" }).then(j),
   setAgentBoss: (id: string) => mybotFetch(`/api/agents/${id}/boss`, { method: "POST" }).then(j),
   sites: () => mybotFetch("/api/sites").then(j) as Promise<{ sites: SiteLogin[] }>,
-  addSite: (s: { name: string; url: string; username: string; password: string; request_id?: string }) =>
+  addSite: (s: { name: string; url: string; username: string; password: string; success_check?: string; request_id?: string }) =>
     mybotFetch("/api/sites", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(s) }).then(j),
   deleteSite: (id: string) => mybotFetch(`/api/sites/${id}`, { method: "DELETE" }).then(j),
   siteRequests: () => mybotFetch("/api/sites/requests").then(j) as Promise<{ requests: SiteRequest[] }>,
   dismissSiteRequest: (id: string) => mybotFetch(`/api/sites/requests/${id}/dismiss`, { method: "POST" }).then(j),
+  // 테이크오버 — 봇이 사람에게 넘긴 브라우저 인계 대기열
+  handoffs: () => mybotFetch("/api/browser/handoffs").then(j) as Promise<{ requests: HandoffRequest[] }>,
+  handoffDone: (id: string) => mybotFetch(`/api/browser/handoffs/${id}/done`, { method: "POST" }).then(j),
   // 승인 경계 — 위험 액션 승인 큐
   approvals: () => mybotFetch("/api/approvals").then(j) as Promise<{ requests: ApprovalRequest[]; rules: ApprovalRule[] }>,
   approveRequest: (id: string, always = false) =>
@@ -159,6 +162,17 @@ export interface SiteRequest {
   created_at: number;
 }
 
+export interface HandoffRequest {
+  id: string;
+  agent_id: string | null;
+  run_id: string;
+  reason: string;
+  url: string;
+  created_at: number;
+  agent_name?: string;
+  avatar?: string;
+}
+
 export interface Agent {
   id: string;
   name: string;
@@ -180,6 +194,7 @@ export interface SiteLogin {
   name: string;
   url: string;
   username: string;
+  success_check?: string | null;
   created_at: number;
 }
 

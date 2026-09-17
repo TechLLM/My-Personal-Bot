@@ -341,7 +341,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
         model: target.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: depth + 1,
       };
       // 화면에 하위 봇 작업이 실시간으로 보이도록 이벤트 전파 (봇 카드 + 작업 애니메이션)
-      emit?.({ type: "agent_join", agent: { id: target.id, name: target.name, avatar: target.avatar, role: target.role_prompt, task: inst.slice(0, 200), model: target.model, model_label: modelLabel(target.model ?? defaultModel()) } });
+      emit?.({ type: "agent_join", agent: { id: target.id, name: target.name, avatar: target.avatar, role: target.role_prompt, task: inst.slice(0, 200), model: target.model, model_label: modelLabel(target.model ?? defaultModel()), runId } });
       emit?.({ type: "agent_start", agentId: target.id });
       // 위임 실행은 독립 시간 상한으로 분리 — 호출 측 signal(HTTP 요청 생명주기)을 전파하면
       // 스트림 종료·연결 끊김 시 진행 중인 하위 작업이 "chatOnce 실패"로 죽는다.
@@ -806,7 +806,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
       const outs: (string | undefined)[] = new Array(tcs.length);
       const execOne = async (tc: { id: string; name: string; arguments: string }, i: number) => {
         calledTools.add(tc.name);
-        trackEmit({ type: "agent_step", agentId: state.id, tool: tc.name });
+        trackEmit({ type: "agent_step", agentId: state.id, runId: state.runId, tool: tc.name });
         const t0 = Date.now();
         let out: string;
         let ok = true;
@@ -836,6 +836,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
                   : tc.name.startsWith("browser_") || tc.name === "ego_run"
                     ? browserTool(state.runId, tc.name, args)
                     : mcpCall(tc.name, args),
+                tc.name === "browser_handoff" || tc.name === "browser_login" ? 400_000 : undefined, // 테이크오버는 사용자 완료까지 최대 5분 블로킹이 정상
               ));
           if (/^(도구 오류|알 수 없는 도구|브라우저 오류):/.test(out)) { ok = false; errMsg = out.slice(0, 120); }
         } catch (e) {
@@ -1031,27 +1032,65 @@ export async function runTeamTasks(
 }
 
 // A5 — 재시작으로 끊긴 실행 재개: 같은 run id에 이어 쓰고, 이전 도구 로그를 작업에 넣어 중복 조회를 막는다
+// C12 — 승인 재개·계정 입력·봇 메시지·루틴이 각자 복붙하던 "run 생성 → 실행 → 이력 갱신 → 세션 기록 → 알림"
+// 패턴의 단일 헬퍼. 호출자는 done을 await하거나(루틴처럼 결과가 필요할 때) 버리면 된다.
+export interface DetachedRunOpts {
+  label: string;                       // agent_runs.task 라벨
+  task: string;                        // 봇에게 실제로 전달되는 지시문
+  routineId?: string | null;
+  sessionTitle?: string;               // 봇 세션 제목 (기본 label)
+  sessionTask?: string;                // normalizeReport의 원작업 요약 (기본 label)
+  replyTo?: { id: string; model: string | null } | null; // 회신을 기록할 발신 봇 (봇 메시지 재개용)
+  model?: string;                      // 봇 기본 모델 대신 쓸 모델 (루틴 지정 모델 등)
+  notifyTitle?: string;                // 설정하면 notifyResult로 결과 발송
+  verifyIntent?: boolean;              // false면 지시-실측 검증 생략 (보고 메시지 등)
+  runId?: string;                      // 기존 run 이어달리기 (resumeAgentRun)
+  onDone?: (state: TeamAgentState) => void | Promise<void>; // agent_messages 갱신 같은 후처리
+}
+
+export function runAgentDetached(agent: Agent, o: DetachedRunOpts): { runId: string; done: Promise<TeamAgentState> } {
+  const runId = o.runId ?? uid();
+  if (o.runId) db.prepare("UPDATE agent_runs SET status = 'running' WHERE id = ?").run(runId);
+  else db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, routine_id, created_at) VALUES (?, ?, NULL, ?, 'running', ?, ?)")
+    .run(runId, agent.id, o.label.slice(0, 300), o.routineId ?? null, now());
+  const state: TeamAgentState = {
+    id: agent.id, runId, name: agent.name, avatar: agent.avatar ?? "🤖", role: agent.role_prompt,
+    task: o.task, model: o.model ?? agent.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: 0,
+    verifyIntent: o.verifyIntent,
+  };
+  const done = (async () => {
+    try { await runAgent(state, agent, () => {}, delegateTimeout() ?? AbortSignal.timeout(540_000)); }
+    catch (e) { state.status = "error"; state.result = (e as Error).message; }
+    db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
+      .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
+    const { appendToAgentSession } = await import("./routes/chat");
+    const { normalizeReport } = await import("./report");
+    const meta = JSON.stringify({ type: "tools", events: state.toolLog.map((l) => ({ type: "read", title: l.tool, url: "" })) });
+    const report = await normalizeReport(agent.name, o.sessionTask ?? o.label, state.result?.trim() || "(결과 없음)", state.toolLog.map((l) => l.tool));
+    appendToAgentSession(agentSessionConvId(agent.id), o.sessionTitle ?? o.label, report, agent.model, meta);
+    if (o.replyTo)
+      appendToAgentSession(agentSessionConvId(o.replyTo.id), `[${agent.name} 회신 도착] ${(o.sessionTask ?? o.label).slice(0, 100)}`, report, o.replyTo.model, meta);
+    await o.onDone?.(state);
+    if (o.notifyTitle) { const { notifyResult } = await import("./notify"); notifyResult(o.notifyTitle, state.result ?? "(결과 없음)"); }
+    return state;
+  })();
+  done.catch((e) => console.error(`[mybot] 분리 실행 실패 (${o.label.slice(0, 60)}):`, (e as Error).message));
+  return { runId, done };
+}
+
 export async function resumeAgentRun(run: any): Promise<void> {
   const agent = getAgent(run.agent_id);
   if (!agent) { db.prepare("UPDATE agent_runs SET status = 'error', result = '재개 실패 — 봇이 삭제됨', finished_at = ? WHERE id = ?").run(now(), run.id); return; }
   const prevTools = ((JSON.parse(run.tool_log || "[]") as any[]) ?? []).map((t) => t.tool).filter(Boolean).join(", ");
   const n = (run.resume_count ?? 0) + 1;
-  const state: TeamAgentState = {
-    id: agent.id, runId: run.id, name: agent.name, avatar: agent.avatar ?? "🤖",
-    role: agent.role_prompt,
+  db.prepare("UPDATE agent_runs SET resume_count = ? WHERE id = ?").run(n, run.id);
+  await runAgentDetached(agent, {
+    runId: run.id,
+    label: run.task,
     task: `${run.task}\n\n[자동 재개 ${n}회차 — 서버 재시작으로 이전 실행이 중단됐습니다. 중단 전 사용한 도구: ${prevTools || "없음"}. 이미 확보한 결과를 반복 조회하지 말고 이어서 완료하세요.]`,
-    model: agent.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: 0,
-  };
-  db.prepare("UPDATE agent_runs SET status = 'running', resume_count = ? WHERE id = ?").run(n, run.id);
-  await runAgent(state, agent, () => {}, delegateTimeout()!);
-  db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
-    .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), run.id);
-  // 봇 자기 세션에 재개 결과 기록 — 사용자가 봇 화면에서 완료 여부를 볼 수 있게
-  const { appendToAgentSession } = await import("./routes/chat");
-  const { normalizeReport } = await import("./report");
-  const runMeta = JSON.stringify({ type: "tools", events: state.toolLog.map((l) => ({ type: "read", title: l.tool, url: "" })) });
-  const report = await normalizeReport(agent.name, run.task, state.result?.trim() || "(결과 없음)", state.toolLog.map((l) => l.tool));
-  appendToAgentSession(agentSessionConvId(agent.id), `[재개된 작업 ${n}회차] ${run.task}`, report, agent.model, runMeta);
+    sessionTitle: `[재개된 작업 ${n}회차] ${run.task}`,
+    sessionTask: run.task,
+  }).done;
 }
 
 // 승인된 팀 계획 실행 SSE: 봇 실행 → 대장 종합 답변을 기존 assistant 메시지에 스트리밍
