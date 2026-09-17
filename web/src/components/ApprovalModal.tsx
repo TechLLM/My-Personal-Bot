@@ -25,7 +25,7 @@ export function ApprovalModal({ request, onDone }: { request: ApprovalRequest; o
           </div>
         </div>
         <div className="rounded-lg bg-stone-200/70 px-3 py-2.5">
-          <div className="font-mono text-[11px] text-amber-700">{request.tool}</div>
+          <div className="font-mono text-caption text-amber-700">{request.tool}</div>
           <div className="mt-1 break-all text-xs leading-relaxed text-stone-600">{request.summary}</div>
         </div>
         <div className="mt-4 grid grid-cols-2 gap-2">
@@ -38,15 +38,15 @@ export function ApprovalModal({ request, onDone }: { request: ApprovalRequest; o
             <X size={13} /> 거부
           </button>
           <button onClick={() => act(() => api.approveRequest(request.id, true))} disabled={busy}
-            className="flex items-center justify-center gap-1.5 rounded-lg bg-stone-200 py-2 text-[11px] text-stone-600 hover:text-stone-800 disabled:opacity-40">
+            className="flex items-center justify-center gap-1.5 rounded-lg bg-stone-200 py-2 text-caption text-stone-600 hover:text-stone-800 disabled:opacity-40">
             <Check size={12} /> 이 도구 항상 허용
           </button>
           <button onClick={() => act(() => api.denyRequest(request.id, true))} disabled={busy}
-            className="flex items-center justify-center gap-1.5 rounded-lg bg-stone-200 py-2 text-[11px] text-stone-500 hover:text-stone-700 disabled:opacity-40">
+            className="flex items-center justify-center gap-1.5 rounded-lg bg-stone-200 py-2 text-caption text-stone-500 hover:text-stone-700 disabled:opacity-40">
             <Ban size={12} /> 이 도구 항상 승인 필요
           </button>
         </div>
-        <p className="mt-3 text-[10px] leading-relaxed text-stone-400">
+        <p className="mt-3 text-2xs leading-relaxed text-stone-400">
           승인하면 서버가 이 작업을 실제로 실행하고 봇의 원래 업무를 자동으로 이어갑니다.
         </p>
       </div>

@@ -31,7 +31,7 @@ export function HandoffModal({ request, onDone }: { request: HandoffRequest; onD
           </div>
         </div>
         {request.url && request.url !== "about:blank" && (
-          <div className="mb-3 truncate rounded-lg bg-stone-100 px-3 py-1.5 font-mono text-[11px] text-stone-500">{request.url}</div>
+          <div className="mb-3 truncate rounded-lg bg-stone-100 px-3 py-1.5 font-mono text-caption text-stone-500">{request.url}</div>
         )}
         <button
           onClick={done}

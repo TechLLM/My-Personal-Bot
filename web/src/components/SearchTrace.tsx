@@ -55,7 +55,7 @@ export function SearchTrace({ events, done }: { events: SearchEvent[]; done: boo
             return (
               <div key={s.key} className="flex items-center gap-1.5">
                 {i > 0 && <span className="text-stone-300">→</span>}
-                <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                <span className={`rounded-full px-2 py-0.5 text-2xs font-medium ${
                   current ? "bg-sky-100 text-sky-600 mb-shimmer"
                   : passed ? "bg-emerald-50 text-emerald-600"
                   : "bg-stone-200/60 text-stone-400"

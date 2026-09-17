@@ -67,31 +67,31 @@ export function ModelPicker({ models, value, onChange }: { models: Model[]; valu
   return (
     <div ref={ref} className="relative shrink-0">
       <button
-        className="rounded-full bg-stone-200 px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-300 max-w-[200px] truncate whitespace-nowrap"
+        className="h-10 max-w-[132px] truncate whitespace-nowrap rounded-full bg-stone-100 px-3.5 text-sm font-medium text-stone-700 hover:bg-stone-200 md:h-8 md:max-w-[220px] md:px-3 md:text-xs"
         onClick={() => setOpen(!open)}
         title={value}
       >
         {current?.label ?? value ?? "모델 선택"} ▾
       </button>
       {open && (
-        <div className="absolute bottom-full mb-2 left-0 z-50 w-96 max-w-[85vw] rounded-xl border border-stone-200 bg-white shadow-[0_8px_30px_rgba(0,0,0,0.06)]">
-          <div className="flex gap-1 overflow-x-auto border-b border-stone-200 p-2">
+        <div className="absolute bottom-full left-0 z-50 mb-2 w-[min(24rem,calc(100vw-5.25rem))] overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-[0_16px_40px_-12px_rgba(28,25,23,0.25)]">
+          <div className="no-scrollbar flex gap-1 overflow-x-auto border-b border-stone-200 p-2">
             <button
               onClick={() => setProvider("all")}
-              className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium ${provider === "all" ? "bg-sky-600 text-white" : "bg-stone-200 text-stone-600"}`}
+              className={`h-8 shrink-0 rounded-full px-3 text-caption font-medium md:h-7 ${provider === "all" ? "bg-sky-600 text-white" : "bg-stone-100 text-stone-600"}`}
             >전체</button>
             {providers.map((p) => (
               <button
                 key={p}
                 onClick={() => setProvider(p)}
-                className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium ${provider === p ? "bg-sky-600 text-white" : "bg-stone-200 text-stone-600"}`}
+                className={`h-8 shrink-0 rounded-full px-3 text-caption font-medium md:h-7 ${provider === p ? "bg-sky-600 text-white" : "bg-stone-100 text-stone-600"}`}
               >{p}</button>
             ))}
           </div>
           <div className="border-b border-stone-200 p-2">
             <input
-              autoFocus
-              className="w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none placeholder:text-stone-400"
+              autoFocus={window.matchMedia("(hover: hover)").matches} // 터치 기기에선 키보드가 목록을 가리므로 자동 포커스 안 함
+              className="h-10 w-full rounded-lg bg-stone-100 px-3 text-xs outline-none placeholder:text-stone-400 md:h-9"
               placeholder="모델 검색…"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
@@ -101,7 +101,7 @@ export function ModelPicker({ models, value, onChange }: { models: Model[]; valu
             {groups.map(([ns, ms]) => (
               <div key={ns}>
                 <button
-                  className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-[10px] font-semibold uppercase text-stone-500 hover:text-stone-700"
+                  className="flex min-h-9 w-full items-center gap-1.5 rounded-lg px-2 py-1 text-2xs font-semibold uppercase text-stone-500 hover:text-stone-700 md:min-h-0"
                   onClick={() => toggleGroup(ns)}
                 >
                   <span>{expanded(ns) ? "▾" : "▸"}</span>
@@ -123,15 +123,15 @@ function Row({ m, value, pick }: { m: Model; value: string; pick: (id: string) =
   const name = m.id.includes("/") ? m.id.slice(m.id.indexOf("/") + 1) : m.id;
   return (
     <button
-      className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 pl-6 text-left text-xs hover:bg-stone-200 ${m.id === value ? "bg-stone-200 text-sky-600" : "text-stone-700"}`}
+      className={`flex min-h-11 w-full items-center gap-2 rounded-lg px-2 py-1.5 pl-6 text-left text-xs hover:bg-stone-100 md:min-h-0 ${m.id === value ? "bg-stone-100 text-sky-600" : "text-stone-700"}`}
       onClick={() => pick(m.id)}
     >
       <span className="truncate">{name}</span>
       <span className="ml-auto flex shrink-0 gap-1">
-        {m.reasoning && <span className="rounded bg-violet-100 px-1 text-[9px] text-violet-700">THINK</span>}
-        {m.vision && <span className="rounded bg-emerald-100 px-1 text-[9px] text-emerald-700">EYE</span>}
-        {m.tools === false && <span className="rounded bg-stone-200 px-1 text-[9px] text-stone-500">TXT</span>}
-        <span className="rounded bg-stone-200 px-1 text-[9px] text-stone-600">{m.providerName || m.provider}</span>
+        {m.reasoning && <span className="rounded bg-violet-100 px-1 text-micro text-violet-700">THINK</span>}
+        {m.vision && <span className="rounded bg-emerald-100 px-1 text-micro text-emerald-700">EYE</span>}
+        {m.tools === false && <span className="rounded bg-stone-200 px-1 text-micro text-stone-500">TXT</span>}
+        <span className="rounded bg-stone-200 px-1 text-micro text-stone-600">{m.providerName || m.provider}</span>
       </span>
     </button>
   );

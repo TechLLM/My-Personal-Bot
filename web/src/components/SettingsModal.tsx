@@ -60,14 +60,14 @@ function ProviderRow({ p, onChanged }: { p: ProviderCard; onChanged: () => void 
           <span className={`absolute top-[2px] h-[14px] w-[14px] rounded-full bg-white transition-all ${p.enabled ? "left-[16px]" : "left-[2px]"}`} />
         </button>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="text-xs font-medium">{p.name}</span>
-            <span className="rounded bg-stone-200 px-1.5 py-0.5 text-[9px] text-stone-600">{p.authLabel}</span>
+            <span className="shrink-0 whitespace-nowrap rounded bg-stone-200 px-1.5 py-0.5 text-micro text-stone-600">{p.authLabel}</span>
           </div>
           <div className="mt-0.5 flex items-center gap-1.5">
             <span className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
-            <span className={`text-[10px] ${status.c}`}>{status.t}</span>
-            {p.staticModels.length > 0 && <span className="text-[10px] text-stone-400">· 모델 {p.staticModels.length}개</span>}
+            <span className={`text-2xs ${status.c}`}>{status.t}</span>
+            {p.staticModels.length > 0 && <span className="text-2xs text-stone-400">· 모델 {p.staticModels.length}개</span>}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -86,14 +86,14 @@ function ProviderRow({ p, onChanged }: { p: ProviderCard; onChanged: () => void 
           )}
         </div>
       </div>
-      {p.doc && p.enabled && !p.authed && <p className="mt-1.5 text-[10px] text-stone-400">{p.doc}</p>}
+      {p.doc && p.enabled && !p.authed && <p className="mt-1.5 text-2xs text-stone-400">{p.doc}</p>}
       {keyOpen && (
         <div className="mt-2 flex gap-1.5">
           <input type="password" className="flex-1 rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none" placeholder="API 키 입력" value={key} onChange={(e) => setKey(e.target.value)} onKeyDown={(e) => e.key === "Enter" && saveKey()} autoFocus />
           <button onClick={saveKey} className="rounded-lg bg-stone-900 px-2.5 text-xs font-medium text-white">저장</button>
         </div>
       )}
-      {result && <p className={`mt-1.5 text-[10px] ${result.startsWith("✓") ? "text-emerald-600" : "text-red-600"}`}>{result}</p>}
+      {result && <p className={`mt-1.5 text-2xs ${result.startsWith("✓") ? "text-emerald-600" : "text-red-600"}`}>{result}</p>}
     </div>
   );
 }
@@ -198,43 +198,43 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
     </label>
   );
   const Input = "w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none";
-  const Btn = "rounded-lg bg-stone-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-stone-700";
-  const Sub = "rounded-lg bg-stone-200 px-2.5 py-1 text-xs text-stone-700 hover:bg-stone-300";
+  const Btn = "rounded-lg bg-stone-900 px-3 py-2 text-xs font-medium text-white hover:bg-stone-700 md:px-2.5 md:py-1";
+  const Sub = "rounded-lg bg-stone-200 px-3 py-2 text-xs text-stone-700 hover:bg-stone-300 md:px-2.5 md:py-1";
   const H = ({ children }: { children: React.ReactNode }) => <h3 className="mb-3 font-display text-[15px] font-semibold text-stone-900">{children}</h3>;
 
   const authed = providers.filter((p) => p.enabled && p.authed);
   const shownMemories = memOpen ? memories : memories.slice(0, 5);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/30 p-4" onClick={onClose}>
-      <div className="flex h-[80vh] w-full max-w-3xl overflow-hidden rounded-2xl border border-stone-200 bg-white" onClick={(e) => e.stopPropagation()}>
-        {/* ─── 좌측 섹션 사이드바 ─── */}
-        <nav className="flex w-44 shrink-0 flex-col border-r border-stone-200/80 bg-white p-2">
-          <div className="mb-2 flex items-center justify-between px-2 pt-1">
+    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-stone-950/30 md:items-center md:p-4" onClick={onClose}>
+      <div className="flex h-full w-full max-w-3xl flex-col overflow-hidden bg-white md:h-[80vh] md:flex-row md:rounded-2xl md:border md:border-stone-200" onClick={(e) => e.stopPropagation()}>
+        {/* ─── 섹션 내비 — 데스크톱은 좌측 사이드바, 모바일은 전체 화면 상단의 가로 탭 ─── */}
+        <nav className="no-scrollbar flex shrink-0 items-center gap-1 overflow-x-auto border-b border-stone-200/80 bg-white px-2 pb-2 pt-[max(0.5rem,env(safe-area-inset-top))] md:w-44 md:flex-col md:items-stretch md:gap-0 md:overflow-visible md:border-b-0 md:border-r md:p-2">
+          <div className="mr-1 flex shrink-0 items-center px-2 md:mb-2 md:mr-0 md:justify-between md:pt-1">
             <h2 className="font-display text-base font-semibold text-stone-900">설정</h2>
           </div>
           {SECTIONS.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               onClick={() => setSection(id)}
-              className={`mb-0.5 flex items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs transition-colors ${section === id ? "bg-stone-200 text-stone-900" : "text-stone-500 hover:bg-white hover:text-stone-700"}`}
+              className={`flex h-10 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-3 text-left text-xs transition-colors md:mb-0.5 md:h-auto md:shrink md:px-2.5 md:py-2 ${section === id ? "bg-stone-200 text-stone-900" : "text-stone-500 hover:bg-stone-100 hover:text-stone-700"}`}
             >
-              <Icon size={13} className="shrink-0" />
+              <Icon size={14} className="shrink-0" />
               <span className="truncate">{label}</span>
-              {id === "providers" && authed.length > 0 && <span className="ml-auto rounded bg-emerald-50 px-1 text-[9px] text-emerald-600">{authed.length}</span>}
+              {id === "providers" && authed.length > 0 && <span className="ml-auto rounded bg-emerald-50 px-1 text-micro text-emerald-600">{authed.length}</span>}
             </button>
           ))}
-          <div className="mt-auto px-2 pb-1 text-[10px] text-stone-300">MyBot 로컬 설정</div>
+          <div className="mt-auto hidden px-2 pb-1 text-2xs text-stone-300 md:block">MyBot 로컬 설정</div>
         </nav>
 
         {/* ─── 우측 콘텐츠 ─── */}
-        <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex-1 overflow-y-auto p-5">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="flex-1 overflow-y-auto p-4 md:p-5">
 
             {section === "providers" && (
               <div>
                 <H>모델 · 프로바이더</H>
-                <p className="mb-3 text-[11px] leading-relaxed text-stone-500">
+                <p className="mb-3 text-caption leading-relaxed text-stone-500">
                   각 AI 서비스에 프록시 없이 직접 연결합니다. OAuth 프로바이더는 해당 CLI의 로그인 상태를 자동으로 재사용하고,
                   API 키는 설정에 직접 입력하거나 로컬 자격증명 저장소에서 자동 인식됩니다.
                 </p>
@@ -259,9 +259,9 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                       if (r?.error) setCpMsg(`실패: ${r.error}`);
                       else { setCpMsg(""); setCpId(""); setCpName(""); setCpUrl(""); setCpKey(""); setCpModels(""); refreshProviders(); }
                     }}>등록</button>
-                    {cpMsg && <span className="text-[10px] text-red-600">{cpMsg}</span>}
+                    {cpMsg && <span className="text-2xs text-red-600">{cpMsg}</span>}
                   </div>
-                  <p className="mt-1.5 text-[10px] text-stone-400">Ollama: http://127.0.0.1:11434/v1 · LM Studio: http://127.0.0.1:1234/v1</p>
+                  <p className="mt-1.5 text-2xs text-stone-400">Ollama: http://127.0.0.1:11434/v1 · LM Studio: http://127.0.0.1:1234/v1</p>
                 </div>
 
                 <label className="mt-4 block">
@@ -270,13 +270,13 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     <option value="">자동 (인증된 첫 프로바이더)</option>
                     {models.map((m) => <option key={m.id} value={m.id}>{m.providerName} · {m.label}</option>)}
                   </select>
-                  <span className="mt-0.5 block text-[10px] text-stone-400">인증된 프로바이더의 모델만 표시됩니다 — 목록에 없으면 위에서 프로바이더를 연결하세요</span>
+                  <span className="mt-0.5 block text-2xs text-stone-400">인증된 프로바이더의 모델만 표시됩니다 — 목록에 없으면 위에서 프로바이더를 연결하세요</span>
                 </label>
 
                 <label className="mt-3 block">
                   <span className="text-xs text-stone-600">폴백 체인 — 모델 장애(429·5xx·잔액부족) 시 자동 전환 순서</span>
                   <input className="mt-1 w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none" value={s.fallback_chain ?? ""} placeholder="예: minimax/MiniMax-M3 → zai/glm-5.3 → opencode-zen" onChange={(e) => update({ fallback_chain: e.target.value })} />
-                  <span className="mt-0.5 block text-[10px] text-stone-400">쉼표나 → 로 구분. 프로바이더만 적으면 첫 모델 사용. 비워두면 폴백 없음</span>
+                  <span className="mt-0.5 block text-2xs text-stone-400">쉼표나 → 로 구분. 프로바이더만 적으면 첫 모델 사용. 비워두면 폴백 없음</span>
                 </label>
 
                 <div className="mt-3 grid grid-cols-2 gap-2">
@@ -291,7 +291,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
             {section === "agents" && (
               <div>
                 <H>에이전트 봇</H>
-                <p className="mb-3 text-[11px] leading-relaxed text-stone-500">
+                <p className="mb-3 text-caption leading-relaxed text-stone-500">
                   CEO 봇이 모든 봇의 관리자입니다 — 지시를 받아 직접 수행하거나 팀장·전문 봇에게 분배합니다.
                   모든 봇은 해당 분야 20년 경력의 시니어 전문가로 동작합니다.
                 </p>
@@ -299,20 +299,20 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   {agents.map((a) => (
                     <div key={a.id} className="rounded-lg bg-white px-2.5 py-2 text-xs">
                       <div className="flex items-center gap-2">
-                        <AgentIcon name={a.name} seed={a.avatar} size={14} className="shrink-0" />
+                        <AgentIcon name={a.name} seed={a.avatar} size={16} className="shrink-0" />
                         <span className="font-medium">{a.name}</span>
                         {a.is_boss ? (
-                          <span className="flex items-center gap-0.5 rounded bg-amber-100 px-1 text-[9px] text-amber-700"><Crown size={9} /> CEO</span>
+                          <span className="flex items-center gap-0.5 rounded bg-amber-100 px-1 text-micro text-amber-700"><Crown size={9} /> CEO</span>
                         ) : (
-                          <button className="rounded bg-stone-200 px-1 text-[9px] text-stone-500 hover:text-amber-700" title="이 봇을 CEO로 지정" onClick={() => api.setAgentBoss(a.id).then(load)}>CEO 지정</button>
+                          <button className="rounded bg-stone-200 px-1 text-micro text-stone-500 hover:text-amber-700" title="이 봇을 CEO로 지정" onClick={() => api.setAgentBoss(a.id).then(load)}>CEO 지정</button>
                         )}
-                        {a.is_lead ? <span className="rounded bg-sky-100 px-1 text-[9px] text-sky-600">팀장</span> : null}
-                        <select className="max-w-[160px] truncate rounded bg-stone-200 px-1 py-0.5 text-[10px] text-stone-600 outline-none" value={a.model ?? ""} title={a.model_label ?? a.model ?? ""} onChange={(e) => api.updateAgent(a.id, { model: e.target.value }).then(load)}>
+                        {a.is_lead ? <span className="rounded bg-sky-100 px-1 text-micro text-sky-600">팀장</span> : null}
+                        <select className="max-w-[160px] truncate rounded bg-stone-200 px-1 py-0.5 text-2xs text-stone-600 outline-none" value={a.model ?? ""} title={a.model_label ?? a.model ?? ""} onChange={(e) => api.updateAgent(a.id, { model: e.target.value }).then(load)}>
                           {models.map((m) => <option key={m.id} value={m.id}>{m.providerName} · {m.label}</option>)}
                           {a.model && !models.find((m) => m.id === a.model) && <option value={a.model}>{a.model}</option>}
                         </select>
                         {routines.some((r) => r.agent_id === a.id && r.enabled) && (
-                          <span className="flex items-center gap-0.5 rounded bg-amber-100 px-1 text-[9px] text-amber-700"><AlarmClock size={9} /> 루틴</span>
+                          <span className="flex items-center gap-0.5 rounded bg-amber-100 px-1 text-micro text-amber-700"><AlarmClock size={9} /> 루틴</span>
                         )}
                         <button className="ml-auto text-stone-400 hover:text-stone-700" title="봇 구성을 JSON으로보내기" onClick={() => {
                           mybotFetch(`/api/agents/${a.id}/export`).then((r) => r.json()).then((d) => {
@@ -376,31 +376,31 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     <option value="90">90일</option>
                   </select>
                 </div>
-                <p className="mb-1 text-[10px] font-medium text-stone-500">실행 이력 ({audit?.runs.length ?? 0})</p>
+                <p className="mb-1 text-2xs font-medium text-stone-500">실행 이력 ({audit?.runs.length ?? 0})</p>
                 <div className="max-h-52 space-y-1 overflow-y-auto">
                   {(audit?.runs ?? []).map((r) => (
-                    <div key={r.id} className="rounded-lg bg-white px-2.5 py-1.5 text-[11px]">
+                    <div key={r.id} className="rounded-lg bg-white px-2.5 py-1.5 text-caption">
                       <div className="flex items-center gap-1.5">
-                        <AgentIcon name={r.agent_name ?? "?"} seed={r.avatar} size={12} className="shrink-0" />
+                        <AgentIcon name={r.agent_name ?? "?"} seed={r.avatar} size={16} className="shrink-0" />
                         <span className="font-medium">{r.agent_name ?? "(삭제된 봇)"}</span>
-                        <span className={`rounded px-1 text-[9px] ${r.status === "done" ? "bg-emerald-100 text-emerald-700" : r.status === "error" ? "bg-red-100 text-red-600" : "bg-stone-200 text-stone-500"}`}>{r.status}</span>
-                        {r.routine_id && <span className="rounded bg-amber-100 px-1 text-[9px] text-amber-700">루틴</span>}
-                        {r.resume_count > 0 && <span className="rounded bg-sky-100 px-1 text-[9px] text-sky-600">재개{r.resume_count}회</span>}
-                        <span className="ml-auto text-[9px] text-stone-400">{new Date(r.created_at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                        <span className={`rounded px-1 text-micro ${r.status === "done" ? "bg-emerald-100 text-emerald-700" : r.status === "error" ? "bg-red-100 text-red-600" : "bg-stone-200 text-stone-500"}`}>{r.status}</span>
+                        {r.routine_id && <span className="rounded bg-amber-100 px-1 text-micro text-amber-700">루틴</span>}
+                        {r.resume_count > 0 && <span className="rounded bg-sky-100 px-1 text-micro text-sky-600">재개{r.resume_count}회</span>}
+                        <span className="ml-auto text-micro text-stone-400">{new Date(r.created_at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
                       </div>
                       <div className="mt-0.5 truncate text-stone-500">{r.task}</div>
                     </div>
                   ))}
                   {audit && !audit.runs.length && <p className="text-xs text-stone-400">기록 없음</p>}
                 </div>
-                <p className="mb-1 mt-3 text-[10px] font-medium text-stone-500">승인 요청 ({audit?.approvals.length ?? 0})</p>
+                <p className="mb-1 mt-3 text-2xs font-medium text-stone-500">승인 요청 ({audit?.approvals.length ?? 0})</p>
                 <div className="max-h-40 space-y-1 overflow-y-auto">
                   {(audit?.approvals ?? []).map((r) => (
-                    <div key={r.id} className="rounded-lg bg-white px-2.5 py-1.5 text-[11px]">
+                    <div key={r.id} className="rounded-lg bg-white px-2.5 py-1.5 text-caption">
                       <div className="flex items-center gap-1.5">
                         <span className="font-medium">{r.tool}</span>
-                        <span className={`rounded px-1 text-[9px] ${r.status === "approved" ? "bg-emerald-100 text-emerald-700" : r.status === "denied" ? "bg-red-100 text-red-600" : "bg-amber-100 text-amber-700"}`}>{r.status}</span>
-                        <span className="ml-auto text-[9px] text-stone-400">{r.agent_name ?? "—"} · {new Date(r.created_at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                        <span className={`rounded px-1 text-micro ${r.status === "approved" ? "bg-emerald-100 text-emerald-700" : r.status === "denied" ? "bg-red-100 text-red-600" : "bg-amber-100 text-amber-700"}`}>{r.status}</span>
+                        <span className="ml-auto text-micro text-stone-400">{r.agent_name ?? "—"} · {new Date(r.created_at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
                       </div>
                       <div className="mt-0.5 truncate text-stone-500">{r.summary}</div>
                     </div>
@@ -422,7 +422,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                         <span className="text-stone-500">{r.trigger_type === "webhook" ? "웹훅" : r.trigger_type === "email" ? "이메일" : r.schedule}</span>
                         {r.agent_id && (
                           <span className="flex items-center gap-1 text-stone-400">
-                            <AgentIcon name={agents.find((a) => a.id === r.agent_id)?.name} seed={agents.find((a) => a.id === r.agent_id)?.avatar} size={12} />
+                            <AgentIcon name={agents.find((a) => a.id === r.agent_id)?.name} seed={agents.find((a) => a.id === r.agent_id)?.avatar} size={16} />
                             {agents.find((a) => a.id === r.agent_id)?.name ?? "봇"}
                           </span>
                         )}
@@ -435,15 +435,15 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                       </div>
                       <div className="mt-0.5 truncate text-stone-500">{r.prompt}</div>
                       {r.webhook_token && (
-                        <div className="mt-1 truncate text-[10px] text-stone-400">
+                        <div className="mt-1 truncate text-2xs text-stone-400">
                           웹훅 URL: <code className="rounded bg-stone-100 px-1">POST /api/hooks/{r.webhook_token}</code>
                         </div>
                       )}
                       {rRuns[r.id] && (
                         <div className="mt-1.5 max-h-40 space-y-1 overflow-y-auto rounded bg-stone-50 p-1.5">
-                          {rRuns[r.id]!.length === 0 && <div className="text-[10px] text-stone-400">실행 이력 없음</div>}
+                          {rRuns[r.id]!.length === 0 && <div className="text-2xs text-stone-400">실행 이력 없음</div>}
                           {rRuns[r.id]!.map((run: any) => (
-                            <div key={run.id} className="text-[10px] text-stone-600">
+                            <div key={run.id} className="text-2xs text-stone-600">
                               <span className={run.status === "done" ? "text-emerald-600" : run.status === "error" ? "text-red-500" : "text-amber-600"}>{run.status === "done" ? "성공" : run.status === "error" ? "실패" : run.status}</span>
                               {" "}{new Date(run.created_at).toLocaleString("ko-KR", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                               {run.finished_at && <span className="text-stone-400"> · {Math.round((run.finished_at - run.created_at) / 1000)}s · {run.steps}단계</span>}
@@ -486,9 +486,9 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   {rTrig === "webhook" && (
                     <div className="space-y-1.5">
                       <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] text-stone-500">매칭 규칙:</span>
-                        <button className="rounded bg-stone-200 px-1.5 py-0.5 text-[10px] hover:bg-stone-300" onClick={() => { setRMatchField("user_name"); setRMatchSender(""); setRMatchKw(""); }}>Slack 프리셋</button>
-                        <button className="rounded bg-stone-200 px-1.5 py-0.5 text-[10px] hover:bg-stone-300" onClick={() => { setRMatchField("sender.login"); setRMatchSender(""); setRMatchKw(""); }}>GitHub 프리셋</button>
+                        <span className="text-2xs text-stone-500">매칭 규칙:</span>
+                        <button className="rounded bg-stone-200 px-1.5 py-0.5 text-2xs hover:bg-stone-300" onClick={() => { setRMatchField("user_name"); setRMatchSender(""); setRMatchKw(""); }}>Slack 프리셋</button>
+                        <button className="rounded bg-stone-200 px-1.5 py-0.5 text-2xs hover:bg-stone-300" onClick={() => { setRMatchField("sender.login"); setRMatchSender(""); setRMatchKw(""); }}>GitHub 프리셋</button>
                       </div>
                       <div className="flex gap-1.5">
                         <input className={`${Input} flex-1`} placeholder="발신자 필드 (점 경로 — Slack: user_name, GitHub: sender.login)" value={rMatchField} onChange={(e) => setRMatchField(e.target.value)} />
@@ -510,9 +510,9 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                       });
                   }}>루틴 추가</button>
                   {hookUrl && (
-                    <div className="rounded-lg bg-sky-50 px-2.5 py-2 text-[11px] text-sky-800">
+                    <div className="rounded-lg bg-sky-50 px-2.5 py-2 text-caption text-sky-800">
                       웹훅 URL이 발급됐습니다 — 이 주소로 POST하면 루틴이 발화됩니다:
-                      <code className="mt-1 block select-all break-all rounded bg-white px-2 py-1 font-mono text-[10px]">{hookUrl}</code>
+                      <code className="mt-1 block select-all break-all rounded bg-white px-2 py-1 font-mono text-2xs">{hookUrl}</code>
                     </div>
                   )}
                 </div>
@@ -572,10 +572,10 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                         {/* C19 — 프로젝트 배정 봇: 이 프로젝트 대화는 봇들의 공유 메모리·전용 파일 폴더를 쓴다 */}
                         <div className="mt-1 flex flex-wrap gap-1">
                           {agents.filter((a) => a.workspace_id === w.id).map((a) => (
-                            <span key={a.id} className="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] text-sky-700">{a.name}</span>
+                            <span key={a.id} className="rounded bg-sky-100 px-1.5 py-0.5 text-2xs text-sky-700">{a.name}</span>
                           ))}
                           {wsAgentsOpen === w.id && agents.map((a) => (
-                            <label key={a.id} className="flex items-center gap-1 rounded bg-stone-100 px-1.5 py-0.5 text-[10px]">
+                            <label key={a.id} className="flex items-center gap-1 rounded bg-stone-100 px-1.5 py-0.5 text-2xs">
                               <input type="checkbox" checked={a.workspace_id === w.id} onChange={() => {
                                 const cur = new Set(agents.filter((x) => x.workspace_id === w.id).map((x) => x.id));
                                 if (cur.has(a.id)) cur.delete(a.id); else cur.add(a.id);
@@ -605,12 +605,12 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                         <span className="font-mono text-sky-600">/{sk.name}</span>
                         <span className="flex-1 truncate text-stone-500" title={sk.last_fail ? `최근 실패: ${sk.last_fail}` : sk.prompt}>{sk.prompt}</span>
                         {sk.run_count > 0 && (
-                          <span className={`shrink-0 text-[10px] ${sk.run_count && sk.ok_count / sk.run_count < 0.5 ? "text-red-500" : "text-stone-400"}`}>
+                          <span className={`shrink-0 text-2xs ${sk.run_count && sk.ok_count / sk.run_count < 0.5 ? "text-red-500" : "text-stone-400"}`}>
                             성공 {sk.ok_count}/{sk.run_count}
                           </span>
                         )}
                         {sk.disabled ? (
-                          <button className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 hover:bg-amber-200" title="성공률 미달로 자동 비활성됨 — 재학습 후 다시 켜세요"
+                          <button className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-2xs text-amber-700 hover:bg-amber-200" title="성공률 미달로 자동 비활성됨 — 재학습 후 다시 켜세요"
                             onClick={() => mybotFetch(`/api/skills/${sk.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ disabled: false }) }).then(load)}>비활성 — 켜기</button>
                         ) : null}
                         <button className="text-stone-400 hover:text-red-600" onClick={() => mybotFetch(`/api/skills/${sk.id}`, { method: "DELETE" }).then(load)}>삭제</button>
@@ -628,7 +628,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                 </div>
                 <div>
                   <H>MCP 서버 (stdio · remote HTTP)</H>
-                  <p className="mb-2 text-[11px] leading-relaxed text-stone-400">
+                  <p className="mb-2 text-caption leading-relaxed text-stone-400">
                     외부 MCP 서버의 도구를 봇이 사용합니다. stdio는 로컬 명령 실행, remote는 HTTP 엔드포인트 URL입니다.
                   </p>
                   <div className="space-y-1.5">
@@ -681,7 +681,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   <div className="space-y-1.5">
                     {personas.map((p) => (
                       <div key={p.id} className="flex items-center gap-2 rounded-lg bg-white px-2.5 py-1.5 text-xs">
-                        <AgentIcon name={p.name} size={13} className="text-stone-500" />
+                        <AgentIcon name={p.name} size={16} className="text-stone-500" />
                         <span>{p.name}</span>
                         <span className="flex-1 truncate text-stone-500">{p.prompt || "(기본)"}</span>
                         {!p.builtin && <button className="text-stone-400 hover:text-red-600" onClick={() => mybotFetch(`/api/personas/${p.id}`, { method: "DELETE" }).then(load)}>삭제</button>}
@@ -704,7 +704,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
               <div className="space-y-6">
                 <div>
                   <H>브라우저 (봇이 사용)</H>
-                  <p className="mb-2 text-[11px] leading-relaxed text-stone-400">
+                  <p className="mb-2 text-caption leading-relaxed text-stone-400">
                     봇이 쓰는 내장 Chromium입니다. "열기"를 누르면 맥미니 화면에 창이 뜨니, 거기서 한 번 로그인해 두면 봇이 그 세션을 그대로 사용합니다.
                   </p>
                   <div className="flex gap-1.5">
@@ -715,7 +715,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                 </div>
                 <div>
                   <H>사이트 계정 (봇 자동 로그인)</H>
-                  <p className="mb-2 text-[11px] leading-relaxed text-stone-400">
+                  <p className="mb-2 text-caption leading-relaxed text-stone-400">
                     로그인이 필요한 사이트의 계정을 등록하면 봇이 브라우저로 자동 로그인합니다. 비밀번호는 로컬 DB에만 저장되고 모델에는 노출되지 않습니다.
                   </p>
                   <div className="space-y-1.5">
@@ -746,7 +746,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                 </div>
                 <div>
                   <H>시연 녹화 → 스킬</H>
-                  <p className="mb-2 text-[11px] leading-relaxed text-stone-400">
+                  <p className="mb-2 text-caption leading-relaxed text-stone-400">
                     녹화를 시작하면 브라우저 창이 열립니다. 그 안에서 업무를 직접 한 번 수행하면 조작이 기록돼, 봇이 재사용할 절차(스킬) 초안으로 변환됩니다. 최대 10분 — 비밀번호 입력은 자동으로 마스킹됩니다.
                   </p>
                   {recDraft ? (
@@ -787,7 +787,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
             {section === "notify" && (
               <div>
                 <H>결과 알림</H>
-                <p className="mb-3 text-[11px] text-stone-400">기본은 채팅창에만 표시됩니다. 체크한 채널로 답변·루틴 결과를 함께 받습니다.</p>
+                <p className="mb-3 text-caption text-stone-400">기본은 채팅창에만 표시됩니다. 체크한 채널로 답변·루틴 결과를 함께 받습니다.</p>
                 <div className="space-y-2.5">
                   <label className="flex items-center gap-2 text-xs text-stone-600">
                     <input type="checkbox" checked={s.notify_telegram === "1"} onChange={(e) => update({ notify_telegram: e.target.checked ? "1" : "0" })} />
@@ -814,7 +814,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   <div className="flex items-center gap-2 pt-1">
                     <button className={Sub} onClick={() => testNotify("telegram")}>텔레그램 테스트</button>
                     <button className={Sub} onClick={() => testNotify("email")}>메일 테스트</button>
-                    {testMsg && <span className="text-[11px] text-stone-500">{testMsg}</span>}
+                    {testMsg && <span className="text-caption text-stone-500">{testMsg}</span>}
                   </div>
                 </div>
               </div>
@@ -839,7 +839,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   {!memories.length && <p className="text-xs text-stone-400">아직 기억된 정보가 없습니다</p>}
                 </div>
                 {memories.length > 5 && (
-                  <button onClick={() => setMemOpen(!memOpen)} className="mt-2 flex items-center gap-1 text-[11px] text-stone-500 hover:text-stone-700">
+                  <button onClick={() => setMemOpen(!memOpen)} className="mt-2 flex items-center gap-1 text-caption text-stone-500 hover:text-stone-700">
                     {memOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                     {memOpen ? "접기" : `${memories.length - 5}개 더 보기`}
                   </button>
@@ -862,11 +862,11 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
           </div>
 
           {/* 하단 저장 바 */}
-          <div className="flex items-center gap-3 border-t border-stone-200 px-5 py-3">
-            <button onClick={saveAll} className="rounded-lg bg-stone-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-stone-700">저장</button>
-            {dirty && <span className="text-[11px] text-amber-600">저장되지 않은 변경 사항 있음</span>}
-            {savedMsg && <span className="text-[11px] text-emerald-600">{savedMsg}</span>}
-            <button onClick={onClose} className="ml-auto text-xs text-stone-500 hover:text-stone-800">닫기</button>
+          <div className="flex items-center gap-3 border-t border-stone-200 px-4 pb-[max(0.625rem,env(safe-area-inset-bottom))] pt-2.5 md:px-5 md:py-3">
+            <button onClick={saveAll} className="h-10 rounded-lg bg-stone-900 px-5 text-xs font-semibold text-white hover:bg-stone-700 md:h-8 md:px-4">저장</button>
+            {dirty && <span className="text-caption text-amber-600">저장되지 않은 변경 사항 있음</span>}
+            {savedMsg && <span className="text-caption text-emerald-600">{savedMsg}</span>}
+            <button onClick={onClose} className="ml-auto h-10 rounded-lg px-3 text-xs text-stone-500 hover:bg-stone-100 hover:text-stone-800 md:h-8">닫기</button>
           </div>
         </div>
       </div>
