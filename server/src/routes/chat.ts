@@ -6,7 +6,8 @@ import { streamChat, type ChatMessage } from "../providers/openaiCompat";
 import { runDeepSearch } from "../deepsearch";
 import { cleanOutput } from "../report";
 import { WORK_DIR } from "../team";
-import { parseLeaked } from "../toolloop";
+import { parseLeaked, execToolCall, execToolBatch, type ToolCtx } from "../toolloop";
+import { selfcheck } from "../selfcheck";
 import { join } from "node:path";
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 
@@ -481,10 +482,10 @@ export const chatRoute = new Hono()
             // 계획 없음 → 일반 답변으로 계속 진행
           }
 
-          // 도구 루프: 봇이 모든 메시지를 처리 — 내장 도구(검색·파일) + 브라우저 + MCP 도구(설정 시)
-          const { mcpConfigured, mcpTools, mcpCall } = await import("../mcp");
-            const { BROWSER_TOOLS, browserTool, closeAgentPage, closeAgentEgoSpace } = await import("../browser");
-            const { BUILTIN_TOOLS, MANAGE_TOOLS, callBuiltin, getAgent, withToolTimeout } = await import("../team");
+            // 도구 루프: 봇이 모든 메시지를 처리 — 내장 도구(검색·파일) + 브라우저 + MCP 도구(설정 시)
+            const { mcpConfigured, mcpTools } = await import("../mcp");
+            const { BROWSER_TOOLS, closeAgentPage, closeAgentEgoSpace } = await import("../browser");
+            const { BUILTIN_TOOLS, MANAGE_TOOLS, callBuiltin, getAgent } = await import("../team");
             const convAgent = getAgent(conv?.agent_id);
             // CLI 어댑터 모델은 네이티브 도구 호출이 없음 — 도구 목록·검증 루프를 건너뛰고 단발 응답으로
             const toolsCapable = endpoint.caps?.tools !== false;
@@ -493,7 +494,6 @@ export const chatRoute = new Hono()
               const tools = await mcpTools();
               openaiTools.push(...tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } })));
             }
-            const builtinNames = new Set([...BUILTIN_TOOLS, ...MANAGE_TOOLS].map((t) => t.function.name));
             const { chatOnce } = await import("../providers/openaiCompat");
             const browserKey = `${convId}:${asstMsg.id}`;
             const deadline = Date.now() + (Number(getSetting("run_deadline_sec")) || 480) * 1000; // 대화 도구 루프 최대 시간 — 브라우저 열람 같은 실제 업무가 3분을 넘김
@@ -540,44 +540,21 @@ export const chatRoute = new Hono()
               }
               send("team", ev);
             };
+            const toolCtx: ToolCtx = {
+              agentId: conv?.agent_id ?? null, context: userMsg?.content ?? "", browserKey, signal, emit: teamEmit,
+              onStart: (n) => { calledTools.add(n); emitTool(n); },
+              onGate: (n) => gatedTools.add(n),
+              onDispatch: (n) => {
+                if (n === "request_credentials") return; // popupShown은 결과 확인 후
+                if ((n.startsWith("browser_") || n === "ego_run") && !browserUsed) send("team", { type: "browser_view", key: browserKey }); // A3 — 컴퓨터 뷰 키 통지
+                if (n.startsWith("browser_") || n === "ego_run") browserUsed = true;
+              },
+            };
             const execTool = async (tc: { id: string; name: string; arguments: string }): Promise<string> => {
-              let out = "";
-              let args: Record<string, unknown>;
-              try {
-                args = JSON.parse(tc.arguments || "{}");
-              } catch {
-                return `도구 오류: ${tc.name}의 인자 JSON이 깨져 있습니다(길이 ${tc.arguments.length}자). content가 크면 짧게 나눠 쓰고, 따옴표·줄바꿈을 올바르게 이스케이프한 유효한 JSON으로 다시 호출하세요.`;
-              }
-              calledTools.add(tc.name);
-              emitTool(tc.name);
-              // 승인 경계 — 위험 액션은 실행하지 않고 사용자 승인 큐에 올림
-              const { gateApproval } = await import("../approvals");
-              const gate = gateApproval(tc.name, args, conv?.agent_id ?? null, userMsg?.content ?? "");
-              if (gate) { gatedTools.add(tc.name); return gate; }
-              try {
-                if (builtinNames.has(tc.name)) {
-                  // agent_direct·agent_message는 중첩 실행이라 자체 상한으로 관리 — 나머지는 120초 호출 타임아웃
-                  out = tc.name === "agent_direct" || tc.name === "agent_message"
-                    ? await callBuiltin(tc.name, args, conv?.agent_id, signal, 0, teamEmit)
-                    : await withToolTimeout(callBuiltin(tc.name, args, conv?.agent_id, signal, 0, teamEmit));
-                  if (tc.name === "request_credentials" && !out.includes("이미 저장")) popupShown = true;
-                } else if (tc.name.startsWith("browser_") || tc.name === "ego_run") {
-                  if (!browserUsed) send("team", { type: "browser_view", key: browserKey }); // A3 — 프론트가 컴퓨터 뷰를 열 수 있게 run 키를 알림
-                  browserUsed = true;
-                  out = await withToolTimeout(browserTool(browserKey, tc.name, args), tc.name === "browser_handoff" || tc.name === "browser_login" ? 400_000 : undefined); // 테이크오버는 사용자 완료까지 최대 5분 블로킹이 정상
-                } else {
-                  out = await withToolTimeout(mcpCall(tc.name, args));
-                }
-                if (/^(도구 오류|알 수 없는 도구|브라우저 오류):/.test(out)) {
-                  console.error(`[mybot] 도구 실패 — 도구:${tc.name} ${out.slice(0, 120)}`);
-                  emitTool(`⚠ ${tc.name} 실패`);
-                }
-              } catch (e) {
-                out = `도구 오류: ${(e as Error).message}`;
-                console.error(`[mybot] 도구 예외 — 도구:${tc.name} ${(e as Error).message}`);
-                emitTool(`⚠ ${tc.name} 오류`);
-              }
-              return out;
+              const r = await execToolCall(tc, toolCtx);
+              if (tc.name === "request_credentials" && !r.out.includes("이미 저장")) popupShown = true;
+              if (!r.ok) emitTool(`⚠ ${tc.name} 실패`);
+              return r.out;
             };
             emitPhase("exec", "작업 실행");
             // 도구 라운드 상한 — 위임 실행(team.ts)과 같은 12로 맞춘다.
@@ -599,13 +576,13 @@ export const chatRoute = new Hono()
               }
               history.push({ role: "assistant", content: res.content || "", tool_calls: res.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })) } as any);
               // 위임 호출이 한 배치에 여러 개면 병렬 실행 — 나머지 도구는 순차 유지 (페이지·경로 공유 충돌 방지)
-              const DELEGATION = new Set(["agent_direct", "agent_message"]);
               const tcs = res.toolCalls;
-              const outs: (string | undefined)[] = new Array(tcs.length);
-              const parIdx = tcs.map((tc, i) => (DELEGATION.has(tc.name) ? i : -1)).filter((i) => i >= 0);
-              if (parIdx.length > 1) await Promise.all(parIdx.map((i) => execTool(tcs[i]).then((o) => { outs[i] = o; })));
-              for (let i = 0; i < tcs.length; i++) if (outs[i] === undefined) outs[i] = await execTool(tcs[i]);
-              for (let i = 0; i < tcs.length; i++) history.push({ role: "tool", tool_call_id: tcs[i].id, content: String(outs[i]).slice(0, 8000) } as any);
+              const outs = await execToolBatch(tcs, toolCtx);
+              for (let i = 0; i < tcs.length; i++) {
+                if (tcs[i].name === "request_credentials" && !outs[i].out.includes("이미 저장")) popupShown = true;
+                if (!outs[i].ok) emitTool(`⚠ ${tcs[i].name} 실패`);
+                history.push({ role: "tool", tool_call_id: tcs[i].id, content: String(outs[i].out).slice(0, 8000) } as any);
+              }
             }
             if (toolEvents.length) searchMeta = { ...(searchMeta ?? {}), type: searchMeta?.type ?? "tools", events: toolEvents };
             if (browserUsed) { closeAgentPage(browserKey).catch(() => {}); closeAgentEgoSpace(browserKey).catch(() => {}); }
@@ -632,37 +609,11 @@ export const chatRoute = new Hono()
           const thinkParts = [...content.matchAll(/<think>([\s\S]*?)(?:<\/think>|$)/g)].map((m) => m[1].trim()).filter(Boolean);
           if (thinkParts.length) reasoning = [reasoning, ...thinkParts].filter(Boolean).join("\n\n").trim();
 
-          // 자가교정 — 도구 호출 없이 작업 완료·팝업 표시를 주장한 환각 응답을 실제 도구 호출로 보정
-          // + 빈/손상된 최종 응답(모델이 깨진 문자열만 출력)도 재시도
-          // URL·링크 문법을 제거하고 의미 문자를 셈 — '](http://…)' 같은 링크 조각 응답도 손상으로 잡음
-          const stripped = content.replace(/<think>[\s\S]*?(<\/think>|$)/g, "").replace(/\]\([^)]*\)/g, "]").replace(/https?:\/\/\S+/g, "");
-          const meaningfulLen = (stripped.match(/[가-힣A-Za-z0-9]/g) ?? []).length;
-          // 스트리밍된 최종 응답에 텍스트 형식으로 새어나온 도구 호출이 있으면 서버가 대신 실행
-          const leakedCalls = parseLeaked(content);
-          const degenerate = meaningfulLen === 0; // 의미 문자가 하나도 없을 때만 — "됨" 같은 짧은 정상 답변은 유효
-          const claimsPopup = !degenerate && !leakedCalls.length && /팝업|보안.{0,6}입력|입력.{0,4}(창|띄)/.test(content) && /계정|비밀번호|로그인|아이디/.test(content);
-          // 명시적 작업 지시를 받고도 도구 없이 되묻거나 보류·제안만 한 회피 응답 감지
+          // 자가교정 — 조건 검사는 selfcheck.ts의 규칙 테이블이 담당 (C11)
           const lastUser = [...history].reverse().find((m) => m.role === "user" && typeof m.content === "string" && !m.content.startsWith("[시스템]"));
-          const imperatives = lastUser ? /(알려|확인|처리|조회|정리|보내|만들|검색|읽어|살펴|보고|답변|해라|해줘|시켜)/.test(lastUser.content as string) : false;
-          // 변경 계열 도구가 실제로 호출됐는지 — 조회 도구만 호출하고 "삭제/등록했다"고 주장하는 것을 잡음
-          const mutatingCall = [...calledTools].some((t) => /_delete|_add|_create|_update|_remove|send_|approve/i.test(t));
-          const claimsAction = !degenerate && !leakedCalls.length && !mutatingCall && /(삭제|생성|지시|등록|전송|예약|전달|수정|처리|만들|보내|제거)[가-힣]{0,3}\s*(했|함|됐|됨|할게|하겠|진행|완료|대상|요청|전송)/.test(content);
-          // 지시 동사와 호출된 도구의 불일치 — "삭제해라"에 add/list만 호출하거나 삭제 주장만 한 경우
-          const wantsDelete = intent.verb === "delete" && !!intent.object; // LLM 의도 분류 기준 — 키워드 존재가 아니라 실제 삭제 명령일 때만
-          const deleteCalled = [...calledTools].some((t) => /_delete|_remove/i.test(t));
-          const claimsDeleted = /(삭제|제거|지워|없애)[가-힣]{0,4}\s*(했|함|됐|됨|완료|처리|요청|전송)/.test(content);
-          const actionMismatch = !degenerate && !leakedCalls.length && wantsDelete && !deleteCalled && (claimsDeleted || mutatingCall || /(할까요|주시면|선택해 주세요|원하시는|명시해|동작을 선택)/.test(content));
-          // 도구 호출 JSON이 텍스트로 새어나온 응답 — 요청 데이터에 {...,"action":"add"} 같은 조각
-          const jsonLeak = !degenerate && !leakedCalls.length && /"(action|arguments|assigned_bot)"\s*:\s*"|\{\s*"name"\s*:\s*"[^"]{2,}"\s*,\s*"trigger"/.test(content);
-          const dodges = !degenerate && !leakedCalls.length && calledTools.size === 0 && imperatives && /(있나요|할까|드릴까|보낼까|처리할까|진행할까|마무리할게|종료할까|어떻게 할까|주시면|해 주시면)/.test(content);
-          // ─── 하네스 사후 검증: 내부 엔티티 변경 지시는 DB 상태 변화로 이행 여부 확인 ───
-          // 반대 결과(삭제 지시인데 수가 늘음)·미실행·승인 대기를 완료로 보고하는 것을 차단
-          const verdict = verifyMutation(intent, beforeCount, calledTools, gatedTools);
-          const stateUnmet = !degenerate && !leakedCalls.length && !verdict.ok;
-          const approvalPending = !degenerate && !leakedCalls.length && !!verdict.pendingApproval;
-          // 승인 대기인데 "삭제 완료"로 보고하는 것도 불일치 — 승인 대기임을 명시해야 함
-          const pendingMisreport = approvalPending && !/승인|대기|팝업/.test(content) && /(삭제|제거|완료|처리)[가-힣]{0,3}\s*(했|함|됐|됨|완료)/.test(content);
-          let needsFix = (claimsPopup && !calledTools.has("request_credentials")) || claimsAction || actionMismatch || jsonLeak || degenerate || leakedCalls.length > 0 || dodges || stateUnmet || pendingMisreport;
+          const sc = selfcheck({ content, calledTools, gatedTools, intent, beforeCount, lastUserText: (lastUser?.content as string) ?? "" });
+          const { degenerate, leakedCalls, claimsPopup, claimsAction, actionMismatch, jsonLeak, dodges, stateUnmet, pendingMisreport } = sc;
+          let needsFix = sc.needsFix;
           // ─── PGE 평가 단계 — 형식·실측 검증을 통과한 응답도 결과물 품질을 독립 채점 ───
           // 미달이면 지적사항과 함께 보정 루프로 재생성 (shouldEvaluate로 저렴한 선별 후 호출)
           let evalIssues: string[] = [];
@@ -687,23 +638,7 @@ export const chatRoute = new Hono()
             }
             history.push({ role: "user", content: evalIssues.length
               ? `[시스템] 품질 평가 미달 — 다음 지적사항을 실제로 보완해 답변을 다시 작성하세요: ${evalIssues.join(" / ")}. 필요하면 도구를 더 사용해도 됩니다.`
-              : leakedCalls.length
-              ? "[시스템] 방금 도구 호출이 텍스트 형식으로 출력되어 서버가 대신 실행했습니다. 위 도구 결과를 확인하고 작업을 계속하세요 — 추가 도구는 반드시 정식 도구 호출(function call)로 사용하고, 완료되면 정상 문장으로 답변하세요."
-              : claimsPopup
-                ? "[시스템] 방금 응답에서 계정 입력 팝업을 띄우겠다고 했지만 request_credentials 도구가 실제로 호출되지 않았습니다. 지금 즉시 request_credentials를 호출해 팝업을 실제로 띄우세요. site에는 언급된 서비스 이름을 넣으세요."
-                : stateUnmet
-                  ? `[시스템] DB 실측 검증 결과 지시가 이행되지 않았습니다 — ${verdict.detail} 현재 실제 상태:\n${snapshot(intent.object).text}\n이 지적이 실제 지시 내용과 맞지 않으면(지시 해석 오류 가능) 지시문을 다시 읽고 실제 요청만 수행한 뒤 사실대로 보고하세요 — 억지로 이행 상태를 맞추지 마세요.`
-                  : pendingMisreport
-                    ? "[시스템] 삭제 도구는 호출됐지만 사용자 승인 대기 상태입니다 — '삭제 완료'가 아니라 '사용자 승인 대기 중'임을 명확히 보고하세요. 승인 팝업에서 승인되면 자동 실행됩니다."
-                    : actionMismatch
-                  ? `[시스템] 사용자는 삭제/제거를 지시했지만 삭제 계열 도구(*_delete)가 호출되지 않았습니다 — 실제 호출된 도구: ${[...calledTools].join(", ") || "없음"}. routine_list로 삭제 대상 ID를 확인한 뒤 지금 즉시 *_delete 도구를 호출해 실제로 삭제하고, 삭제 후 목록을 다시 조회해 결과를 보고하세요. 호출 없이 "삭제했다"고 주장하면 안 됩니다.`
-                  : jsonLeak
-                    ? "[시스템] 방금 응답에 도구 호출 JSON이 텍스트로 출력됐습니다. JSON 조각을 출력하지 말고, 필요한 작업은 정식 도구 호출(function call)로 수행한 뒤 정상적인 문장으로 답변하세요."
-                    : degenerate
-                  ? "[시스템] 방금 응답이 비어 있거나 손상된 문자열이었습니다. 사용자의 요청을 다시 처리하세요 — 작업이 필요하면 도구를 실제로 호출해 수행하고 결과를 확인한 뒤, 정상적인 문장으로 답변하세요."
-                  : dodges
-                    ? "[시스템] 사용자가 명시적으로 작업을 지시했는데 되묻거나 보류만 했습니다. 되묻지 말고 지금 도구를 호출해 지시된 작업을 실제로 수행하고 결과를 보고하세요."
-                    : "[시스템] 방금 응답에서 작업을 수행했다고 주장했지만 도구 호출이 전혀 없었습니다. 주장한 작업을 지금 실제 도구로 수행하고, 수행할 수 없는 부분은 없다고 정직하게 정정하세요." });
+              : sc.fixPrompt ?? "[시스템] 응답이 하네스 규칙을 위반했습니다 — 지시를 다시 처리하고 정상 문장으로 답변하세요." });
             let fixText = "";
             for (let fixRound = 0; fixRound < 2 && Date.now() < fixDeadline; fixRound++) {
               const fix = await chatOnce(endpoint, realModel, history, {

@@ -6,7 +6,7 @@ import { db, uid, now, getSetting } from "./db";
 // 규칙 우선순위: require > allow > 기본 위험 패턴. Require가 항상 이김 (그록과 동일)
 
 // 기본 위험 패턴 — 규칙이 없어도 이름만으로 승인 요구 (파괴적·외부 영향 액션)
-const DEFAULT_RISKY = /send_email|send_telegram|delete|publish|purchase|payment|pay_|_pay|submit_form|drop|execute_sql/i;
+const DEFAULT_RISKY = /send_email|send_telegram|delete|publish|purchase|payment|pay_|_pay|submit_form|drop|execute_sql|shell_run/i;
 // 승인 면제 — 이름에 위험 단어가 있어도 실제로는 안전한 도구
 const DEFAULT_SAFE = /routine_list|agent_list|read_|list_|_list|search|lookup/i;
 

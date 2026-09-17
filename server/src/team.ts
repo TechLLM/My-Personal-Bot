@@ -10,7 +10,7 @@ import { mcpConfigured, mcpTools, mcpCall } from "./mcp";
 import { BROWSER_TOOLS, browserTool, closeAgentPage, closeAgentEgoSpace } from "./browser";
 import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { parseLeaked } from "./toolloop";
+import { parseLeaked, execToolBatch } from "./toolloop";
 
 // 에이전트 공용 작업 디렉터리 — 파일 도구는 여기로 샌드박스
 export const WORK_DIR = join(import.meta.dir, "..", "data", "workspace");
@@ -191,7 +191,8 @@ function safePath(p: string): string {
 export const BUILTIN_TOOLS = [
   { type: "function", function: { name: "web_search", description: "웹에서 정보를 검색합니다. '오늘/최근' 정보를 찾을 때는 검색어에 오늘 날짜와 연도를 포함하세요 — 그렇지 않으면 과거 결과가 나올 수 있습니다", parameters: { type: "object", properties: { query: { type: "string", description: "검색어" } }, required: ["query"] } } },
   { type: "function", function: { name: "read_file", description: "팀 작업 디렉터리의 파일을 읽습니다", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } } },
-  { type: "function", function: { name: "write_file", description: "팀 작업 디렉터리에 파일을 저장합니다", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } } },
+  { type: "function", function: { name: "write_file", description: "팀 작업 디렉터리에 파일을 저장합니다 — 스크립트를 만들면 shell_run으로 실행할 수 있습니다", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } } },
+  { type: "function", function: { name: "shell_run", description: "작업 디렉터리 안에서 셸 명령을 실행합니다 — CSV 가공·데이터 변환·스크립트 실행에 사용. 샌드박스로 실행됩니다: 네트워크 차단, 작업 디렉터리 외 쓰기 금지, 30초 상한, 출력 8,000자 상한. 첫 명령은 bun·python3·기본 유닉스 유틸만 허용됩니다", parameters: { type: "object", properties: { command: { type: "string", description: "실행할 명령 — 작업 디렉터리가 cwd" } }, required: ["command"] } } },
   { type: "function", function: { name: "list_files", description: "팀 작업 디렉터리의 파일 목록 — path를 주면 하위 디렉터리 안을 봅니다 (디렉터리인지 모를 때 read_file 대신 이걸 먼저 쓰세요)", parameters: { type: "object", properties: { path: { type: "string", description: "하위 디렉터리 경로 (비우면 작업 디렉터리 루트)" } } } } },
   { type: "function", function: { name: "routine_add", description: "예약 작업(루틴)을 등록합니다. 사용자가 반복·정기 작업을 요청할 때 사용하세요. 이 봇의 담당 업무로 등록됩니다. trigger: schedule(시간 기반) 또는 email(메일 도착 기반 — IMAP 설정 필요, email_from/email_subject 필터)", parameters: { type: "object", properties: { name: { type: "string", description: "루틴 이름" }, prompt: { type: "string", description: "매번 실행할 작업 지시" }, schedule: { type: "string", description: "every:30m | every:Nh | daily:HH:MM (trigger=schedule일 때)" }, trigger: { type: "string", description: "schedule | email" }, email_from: { type: "string", description: "트리거할 발신자 이메일 (trigger=email)" }, email_subject: { type: "string", description: "트리거할 제목 키워드 (trigger=email)" } }, required: ["name", "prompt"] } } },
   { type: "function", function: { name: "routine_list", description: "등록된 예약 작업 목록", parameters: { type: "object", properties: {} } } },
@@ -590,6 +591,25 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     const entries = readdirSync(p).map((e) => statSync(join(p, e)).isDirectory() ? `${e}/` : e);
     return entries.join("\n") || "(비어 있음)";
   }
+  if (name === "shell_run") {
+    const cmd = pickStr(args, "command", "cmd", "script");
+    if (!cmd) return "오류: command 필요";
+    // 인터프리터 화이트리스트 — 첫 토큰 기준. 우회 명령은 샌드박스(네트워크 차단·WORK_DIR 외 쓰기 금지)가 막는다
+    const first = cmd.trim().split(/\s+/)[0];
+    if (!/^(bun|python3|cat|ls|grep|head|tail|sort|uniq|wc|find|awk|sed|jq|tr|cut|date|echo|printf|pwd|basename|dirname|xargs|tee|mkdir|cp|mv|rm|touch|chmod|diff|tar|cd|test|true|false|column|paste|comm|nl|strings|file|which|env)$/.test(first))
+      return `허용되지 않은 명령입니다 — 첫 명령은 화이트리스트(bun·python3·유닉스 유틸) 안이어야 합니다: ${first}`;
+    if (!existsSync("/usr/bin/sandbox-exec")) return "도구 오류: sandbox-exec 없음 — shell_run을 사용할 수 없습니다";
+    // macOS 샌드박스: 네트워크 전면 차단 + 작업 디렉터리·tmp 외 파일 쓰기 금지
+    const profile = `(version 1)(allow default)(deny network*)(deny file-write*)(allow file-write* (subpath "${WORK_DIR}") (subpath "/tmp") (subpath "/private/tmp") (subpath "/dev"))`;
+    const proc = Bun.spawn(["/usr/bin/sandbox-exec", "-p", profile, "/bin/sh", "-c", cmd], { cwd: WORK_DIR, stdout: "pipe", stderr: "pipe" });
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; try { proc.kill(); } catch {} }, 30_000);
+    const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+    const code = await proc.exited;
+    clearTimeout(timer);
+    const raw = (stdout + (stderr.trim() ? `\n[stderr] ${stderr.trim()}` : "")).trim();
+    return `${timedOut ? "⏱ 30초 상한으로 중단됐습니다.\n" : ""}${raw.slice(0, 8000) || "(출력 없음)"}${raw.length > 8000 ? "\n… (8,000자 상한으로 잘림)" : ""}\n(exit ${code})`;
+  }
   return `알 수 없는 도구: ${name}`;
 }
 
@@ -798,60 +818,19 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
         }
       }
       messages.push({ role: "assistant", content: res.content || "", tool_calls: res.toolCalls.map((tc) => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })) });
-      // 같은 응답의 도구 호출 배치 — 위임(agent_direct/agent_message) 호출이 여러 개면 병렬로 실행한다.
-      // (모델이 names 배열 대신 호출을 여러 개 내도 순차 직렬화되지 않게 — 하위 봇 작업이 동시에 돌아간다)
-      // 브라우저·파일 등 나머지 도구는 같은 페이지/경로를 공유할 수 있어 순차 유지.
-      const DELEGATION = new Set(["agent_direct", "agent_message"]);
+      // 같은 응답의 도구 호출 배치 — 디스패치는 toolloop.ts의 단일 엔진(C10)이 담당.
+      // 위임 호출이 여러 개면 병렬로 실행하고 나머지는 순차 유지 (페이지·경로 공유 충돌 방지).
       const tcs = res.toolCalls;
-      const outs: (string | undefined)[] = new Array(tcs.length);
-      const execOne = async (tc: { id: string; name: string; arguments: string }, i: number) => {
-        calledTools.add(tc.name);
-        trackEmit({ type: "agent_step", agentId: state.id, runId: state.runId, tool: tc.name });
-        const t0 = Date.now();
-        let out: string;
-        let ok = true;
-        let errMsg: string | undefined;
-        try {
-          let args: Record<string, unknown>;
-          try {
-            args = JSON.parse(tc.arguments || "{}");
-          } catch {
-            // 인자 JSON이 깨진 경우(잘림·이스케이프 오류) — 모델이 고칠 수 있게 구체적 힌트 반환
-            ok = false;
-            errMsg = "arguments JSON 파싱 실패";
-            out = `도구 오류: ${tc.name}의 인자 JSON이 깨져 있습니다(길이 ${tc.arguments.length}자). content가 크면 짧게 나눠 쓰고, 따옴표·줄바꿈을 올바르게 이스케이프한 유효한 JSON으로 다시 호출하세요.`;
-            state.toolLog.push({ tool: tc.name, ok, ms: Date.now() - t0, err: errMsg });
-            outs[i] = out;
-            return;
-          }
-          // 승인 경계 — 위험 액션은 실행하지 않고 사용자 승인 큐에 올림
-          const { gateApproval } = await import("./approvals");
-          const gate = gateApproval(tc.name, args, agent.id, state.task);
-          if (gate) gatedTools.add(tc.name);
-          out = gate ?? (DELEGATION.has(tc.name)
-            ? await callBuiltin(tc.name, args, agent.id, signal, state.depth, trackEmit) // 위임은 자체 시간 상한으로 관리
-            : await withToolTimeout(
-                builtinNames.has(tc.name)
-                  ? callBuiltin(tc.name, args, agent.id, signal, state.depth, trackEmit)
-                  : tc.name.startsWith("browser_") || tc.name === "ego_run"
-                    ? browserTool(state.runId, tc.name, args)
-                    : mcpCall(tc.name, args),
-                tc.name === "browser_handoff" || tc.name === "browser_login" ? 400_000 : undefined, // 테이크오버는 사용자 완료까지 최대 5분 블로킹이 정상
-              ));
-          if (/^(도구 오류|알 수 없는 도구|브라우저 오류):/.test(out)) { ok = false; errMsg = out.slice(0, 120); }
-        } catch (e) {
-          ok = false;
-          errMsg = (e as Error).message;
-          out = `도구 오류: ${errMsg}`;
-        }
-        state.toolLog.push({ tool: tc.name, ok, ms: Date.now() - t0, err: errMsg });
-        if (!ok) console.error(`[mybot] 도구 실패 — 봇:${agent.name} 도구:${tc.name} ${errMsg ?? ""}`);
-        outs[i] = out;
-      };
-      const parIdx = tcs.map((tc, i) => (DELEGATION.has(tc.name) ? i : -1)).filter((i) => i >= 0);
-      if (parIdx.length > 1) await Promise.all(parIdx.map((i) => execOne(tcs[i], i)));
-      for (let i = 0; i < tcs.length; i++) if (outs[i] === undefined) await execOne(tcs[i], i);
-      for (let i = 0; i < tcs.length; i++) messages.push({ role: "tool", tool_call_id: tcs[i].id, content: String(outs[i]).slice(0, 8000) });
+      const outs = await execToolBatch(tcs, {
+        agentId: agent.id, context: state.task, browserKey: state.runId, signal, depth: state.depth, emit: trackEmit,
+        onStart: (n) => { calledTools.add(n); trackEmit({ type: "agent_step", agentId: state.id, runId: state.runId, tool: n }); },
+        onGate: (n) => gatedTools.add(n),
+        onEnd: (n, out, ok, ms) => {
+          state.toolLog.push({ tool: n, ok, ms, err: ok ? undefined : out.slice(0, 120) });
+          if (!ok) console.error(`[mybot] 도구 실패 — 봇:${agent.name} 도구:${n} ${out.slice(0, 120)}`);
+        },
+      });
+      for (let i = 0; i < tcs.length; i++) messages.push({ role: "tool", tool_call_id: tcs[i].id, content: String(outs[i].out).slice(0, 8000) });
     }
     // 단계 상한 도달 — 수집한 내용을 버리지 않고 도구 없이 최종 보고서 생성
     trackEmit({ type: "agent_step", agentId: state.id, tool: "단계 상한 — 결과 정리" });
