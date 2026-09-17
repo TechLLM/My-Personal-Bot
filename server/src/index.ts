@@ -15,6 +15,7 @@ import { browserRoute, sitesRoute } from "./browser";
 import { notifyRoute, startTelegramBot } from "./notify";
 import { approvalsRoute } from "./approvals";
 import { groupsRoute } from "./routes/groups";
+import { startMaintenance } from "./maintenance";
 
 const PORT = Number(process.env.MYBOT_PORT ?? 5274);
 
@@ -70,6 +71,7 @@ for (const m of db.prepare("SELECT id FROM agent_messages WHERE status = 'pendin
 }
 startScheduler();
 startTelegramBot();
+startMaintenance(); // 보존 정리 — 실행이력·승인·브라우저 캐시 (업무지침서 C16)
 
 app.route("/api", api);
 
@@ -84,7 +86,7 @@ app.get("/*", async (c) => {
   return c.html(html, 200, { "Cache-Control": "no-cache" });
 });
 
-console.log(`[mybot] listening on http://127.0.0.1:${PORT}`);
+console.log(`[mybot] 시작 중 — http://127.0.0.1:${PORT}`); // 실제 바인딩은 아래 default export 이후
 
 // HTTPS 리스너 — server/.certs에 mkcert 인증서가 있으면 함께 연다 (HTTP도 그대로 유지)
 // 인증서 생성: bun scripts/gen-cert.ts / 브라우저 신뢰: 각 기기에 mkcert 루트 CA 설치
@@ -92,13 +94,20 @@ const certDir = join(import.meta.dir, "..", ".certs");
 const [certFile, keyFile] = [join(certDir, "cert.pem"), join(certDir, "key.pem")];
 if (await Bun.file(certFile).exists() && await Bun.file(keyFile).exists()) {
   const httpsPort = Number(process.env.MYBOT_HTTPS_PORT ?? 5443);
-  Bun.serve({
-    port: httpsPort,
-    fetch: app.fetch,
-    idleTimeout: 255,
-    tls: { cert: Bun.file(certFile), key: Bun.file(keyFile) },
-  });
-  console.log(`[mybot] listening on https://0.0.0.0:${httpsPort}`);
+  // HTTPS는 부가 기능이다 — 포트 충돌로 본체 HTTP 서버까지 죽으면 안 된다.
+  // 실측 사고(2026-09-16): 이미 다른 인스턴스가 5443을 잡고 있어 EADDRINUSE가 나자
+  // 프로세스 전체가 exit 1로 종료됐고, 재시작이 조용히 실패해 구버전이 계속 떠 있었다.
+  try {
+    Bun.serve({
+      port: httpsPort,
+      fetch: app.fetch,
+      idleTimeout: 255,
+      tls: { cert: Bun.file(certFile), key: Bun.file(keyFile) },
+    });
+    console.log(`[mybot] listening on https://0.0.0.0:${httpsPort}`);
+  } catch (e) {
+    console.error(`[mybot] HTTPS(${httpsPort}) 시작 실패 — HTTP만 계속합니다. 이미 다른 MyBot 인스턴스가 떠 있는지 확인하세요: ${(e as Error).message}`);
+  }
 } else {
   console.log("[mybot] HTTPS 비활성 — 인증서가 없습니다 (생성: bun scripts/gen-cert.ts)");
 }

@@ -25,11 +25,7 @@ export const workspacesRoute = new Hono()
   });
 
 // 스킬 테이블 (없으면 생성)
-db.exec(`CREATE TABLE IF NOT EXISTS skills (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, prompt TEXT NOT NULL, created_at INTEGER NOT NULL
-)`);
-// db.ts의 ALTER는 이 파일보다 먼저 실행돼 신규 DB에서는 스킵됨 — 생성 직후 여기서도 적용
-try { db.exec("ALTER TABLE skills ADD COLUMN agent_id TEXT"); } catch {}
+// 스킬 테이블 정의는 db.ts로 이관됨 (스키마 단일 소스) — 이 파일은 기본 스킬 시드만 담당
 db.exec(`INSERT OR IGNORE INTO skills (id, name, prompt, created_at) VALUES
   ('sk_summary', '요약', '다음 내용을 핵심만 간결하게 요약해줘:\n\n', ${now()}),
   ('sk_translate', '번역', '다음 내용을 자연스러운 한국어로 번역해줘 (이미 한국어면 영어로):\n\n', ${now()}),

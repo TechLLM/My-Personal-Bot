@@ -6,6 +6,7 @@ import { streamChat, type ChatMessage } from "../providers/openaiCompat";
 import { runDeepSearch } from "../deepsearch";
 import { cleanOutput } from "../report";
 import { WORK_DIR } from "../team";
+import { parseLeaked } from "../toolloop";
 import { join } from "node:path";
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 
@@ -110,7 +111,7 @@ export function systemPrompt(mode: string, personaId?: string | null, workspaceI
       const memPath = join(WORK_DIR, "agents", agent.name, "MEMORY.md");
       if (existsSync(memPath)) {
         const note = readFileSync(memPath, "utf8").trim();
-        if (note) p += `\n\n[이 봇의 장기 업무 노트 — agents/${agent.name}/MEMORY.md, 필요하면 read_file/write_file로 직접 갱신]\n${note.slice(0, 1500)}`;
+        if (note) p += `\n\n[이 봇의 장기 업무 노트 — agents/${agent.name}/MEMORY.md의 최신 내용이 아래에 이미 주입돼 있습니다. read_file로 다시 읽지 마세요 — 도구 라운드만 낭비됩니다. 갱신이 필요할 때만 write_file을 쓰세요]\n${note.slice(0, 1500)}`;
       }
       const amems = recallMemories(agentId, queryText);
       if (amems.length) p += "\n\n[이 봇이 기억하는 업무 맥락]\n" + amems.map((m) => `- ${m}`).join("\n");
@@ -525,19 +526,6 @@ export const chatRoute = new Hono()
             }
             emitPhase("plan", "지시 분석");
             let popupShown = false; // request_credentials가 실제로 팝업을 생성했는지 (저장 계정 재사용 시 false)
-            // 모델이 도구 호출을 텍스트 형식(]<]minimax[><invoke name=…>)으로 새어내면 파싱해 실제 호출로 전환
-            const parseLeaked = (text: string): { id: string; name: string; arguments: string }[] => {
-              const calls: { id: string; name: string; arguments: string }[] = [];
-              const invRe = /<invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/invoke>/g;
-              let inv; let i = 0;
-              while ((inv = invRe.exec(text ?? ""))) {
-                const args: Record<string, string> = {};
-                const pRe = /<(\w+)>([\s\S]*?)<\/\1>/g;
-                let pm; while ((pm = pRe.exec(inv[2]))) args[pm[1]] = pm[2];
-                calls.push({ id: `leaked-${i++}`, name: inv[1], arguments: JSON.stringify(args) });
-              }
-              return calls;
-            };
             // 위임된 하위 봇들을 누적해 team_plan으로 보냄 — 화면에 봇 카드·작업 애니메이션이 실시간으로 표시됨
             const delegated = new Map<string, any>();
             const teamEmit = (ev: any) => {
@@ -587,7 +575,11 @@ export const chatRoute = new Hono()
               return out;
             };
             emitPhase("exec", "작업 실행");
-            for (let round = 0; round < 4; round++) {
+            // 도구 라운드 상한 — 위임 실행(team.ts)과 같은 12로 맞춘다.
+            // 4였을 때는 봇이 자기 노트를 읽는 데만 예산을 다 쓰고 브라우저를 열어보지도 못했다
+            // (실측: 메일 조회 지시 3회 모두 list_files/skill_list/read_file로 소진 후 종료).
+            // 시간은 아래 deadline(8분)이 별도로 막으므로 라운드 확대가 무한 실행이 되지는 않는다.
+            for (let round = 0; round < 12; round++) {
               if (Date.now() > deadline) break;
               const res = await chatOnce(endpoint, realModel, history, { signal, tools: openaiTools });
               if (!res.toolCalls?.length) {

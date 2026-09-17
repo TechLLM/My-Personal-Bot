@@ -30,8 +30,8 @@ async function runRoutineInner(r: any): Promise<string> {
   const useModel = agent.model ?? r.model ?? defaultModelId();
 
   const runId = uid();
-  db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, NULL, ?, 'running', ?)")
-    .run(runId, agent.id, `[루틴] ${r.name}: ${r.prompt}`, now());
+  db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, routine_id, created_at) VALUES (?, ?, NULL, ?, 'running', ?, ?)")
+    .run(runId, agent.id, `[루틴] ${r.name}: ${r.prompt}`, r.id ?? null, now());
   const state: TeamAgentState = {
     id: agent.id, runId,
     name: agent.name, avatar: agent.avatar ?? "🤖",

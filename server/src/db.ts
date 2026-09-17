@@ -181,11 +181,24 @@ CREATE TABLE IF NOT EXISTS groups (
 );
 `);
 
+// 스킬 — `/요약` 같은 슬래시 명령과 봇이 학습한 업무 절차(skill_save)를 함께 담는다.
+// 이전에는 routes/workspaces.ts에서 생성돼 스키마가 두 파일로 갈라져 있었고,
+// 신규 설치에서는 아래 ALTER가 조용히 실패한 뒤 뒤늦게 다시 ALTER되는 구조였다.
+db.exec(`
+CREATE TABLE IF NOT EXISTS skills (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  prompt TEXT NOT NULL,
+  agent_id TEXT,
+  created_at INTEGER NOT NULL
+);
+`);
+
 try { db.exec("ALTER TABLE messages ADD COLUMN attachments TEXT"); } catch {}
 try { db.exec("ALTER TABLE routines ADD COLUMN agent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE routines ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'schedule'"); } catch {}
 try { db.exec("ALTER TABLE routines ADD COLUMN email_filter TEXT"); } catch {}
-try { db.exec("ALTER TABLE skills ADD COLUMN agent_id TEXT"); } catch {}
+try { db.exec("ALTER TABLE skills ADD COLUMN agent_id TEXT"); } catch {} // 구 스키마 호환 (신규 DB는 위 CREATE에 포함)
 try { db.exec("ALTER TABLE agents ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE conversations ADD COLUMN group_id TEXT"); } catch {}
@@ -193,6 +206,8 @@ try { db.exec("ALTER TABLE conversations ADD COLUMN agent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE memories ADD COLUMN agent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN is_boss INTEGER NOT NULL DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE agent_runs ADD COLUMN tool_log TEXT"); } catch {}
+try { db.exec("ALTER TABLE agent_runs ADD COLUMN routine_id TEXT"); } catch {} // 루틴별 실행이력 보존·조회 키
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_agent_runs_routine ON agent_runs(routine_id, created_at)"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN parent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN is_lead INTEGER NOT NULL DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN max_children INTEGER"); } catch {}
