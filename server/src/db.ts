@@ -262,6 +262,10 @@ try { db.exec("ALTER TABLE agents ADD COLUMN parent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN is_lead INTEGER NOT NULL DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN max_children INTEGER"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN sort_order REAL"); } catch {}
+try { db.exec("ALTER TABLE agents ADD COLUMN special_role TEXT"); } catch {} // 'org_admin'(Eggbot, 봇 관리 전담) / 'secretary'(비서실장, 업무 라우팅)
+// 조직 역할 자동 배정 — 이름 기준 1회 백필 (Eggbot=조직관리, 비서실장=라우팅)
+db.exec("UPDATE agents SET special_role = 'org_admin' WHERE name = 'Eggbot' AND special_role IS NULL");
+db.exec("UPDATE agents SET special_role = 'secretary' WHERE name = '비서실장봇' AND special_role IS NULL");
 { // 정렬값 백필 — 기존 표시 순서(CEO→핀→생성순)를 유지한 채 순번 부여
   let i = (db.prepare("SELECT COALESCE(MAX(sort_order), 0) m FROM agents").get() as any).m;
   for (const r of db.prepare("SELECT id FROM agents WHERE sort_order IS NULL ORDER BY is_boss DESC, pinned DESC, created_at").all() as any[])
