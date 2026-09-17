@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { db, uid, now } from "./db";
+import { db, uid, now, getSetting } from "./db";
 
 // ─── 승인 경계 (그록 Auto Review 대응) ───
 // 위험한 액션(외부 발신·삭제·결제 류)은 실행 전 사용자 승인을 받는다.
@@ -10,15 +10,16 @@ const DEFAULT_RISKY = /send_email|send_telegram|delete|publish|purchase|payment|
 // 승인 면제 — 이름에 위험 단어가 있어도 실제로는 안전한 도구
 const DEFAULT_SAFE = /routine_list|agent_list|read_|list_|_list|search|lookup/i;
 
-export function approvalDecision(tool: string): "require" | "allow" {
-  const rules = db.prepare("SELECT pattern, action FROM approval_rules").all() as { pattern: string; action: string }[];
+export function approvalDecision(tool: string, args?: Record<string, unknown>): "require" | "allow" {
+  const rules = db.prepare("SELECT pattern, action, cond FROM approval_rules").all() as { pattern: string; action: string; cond: string | null }[];
   let hasAllow = false;
   for (const r of rules) {
     try {
-      if (new RegExp(r.pattern, "i").test(tool)) {
-        if (r.action === "require") return "require"; // require는 항상 우선
-        hasAllow = true;
-      }
+      if (!new RegExp(r.pattern, "i").test(tool)) continue;
+      // A12 — 인자 조건 규칙: cond가 있으면 args가 조건을 만족할 때만 규칙 적용
+      if (r.cond && !evalCond(r.cond, args ?? {})) continue;
+      if (r.action === "require") return "require"; // require는 항상 우선
+      hasAllow = true;
     } catch {}
   }
   if (hasAllow) return "allow";
@@ -26,13 +27,40 @@ export function approvalDecision(tool: string): "require" | "allow" {
   return DEFAULT_RISKY.test(tool) ? "require" : "allow";
 }
 
+// A12 — 인자 조건 평가: cond = {"field":"to","op":"matches","value":"@외부\\.com$"}
+// 지원 op: eq | ne | contains | matches(regex) | gt | lt | exists
+function evalCond(condJson: string, args: Record<string, unknown>): boolean {
+  const c = JSON.parse(condJson);
+  const v = args?.[String(c.field)];
+  switch (c.op) {
+    case "eq": return v === c.value;
+    case "ne": return v !== c.value;
+    case "contains": return String(v ?? "").includes(String(c.value));
+    case "matches": return new RegExp(String(c.value), "i").test(String(v ?? ""));
+    case "gt": return Number(v) > Number(c.value);
+    case "lt": return Number(v) < Number(c.value);
+    case "exists": return v !== undefined && v !== null && v !== "";
+    default: return false;
+  }
+}
+
+// agent_create 인자에서 생성 예정 수 — bots/names 배열 또는 단일 name
+function prospectiveCreateCount(args: Record<string, unknown>): number {
+  if (Array.isArray(args.bots)) return args.bots.length;
+  if (Array.isArray(args.agents)) return args.agents.length;
+  if (Array.isArray(args.names)) return args.names.length;
+  return (args.name ?? args.bot_name ?? args.agent) ? 1 : 0;
+}
+
 // 도구 실행 전 호출 — 승인 필요면 요청을 만들고 안내 문자열 반환, 아니면 null
 export function gateApproval(tool: string, args: Record<string, unknown>, agentId: string | null, resumeTask: string): string | null {
-  let required = approvalDecision(tool) === "require";
-  // 팀장의 봇 생성은 승인 필요 — 팝업 없이 봇이 폭증하는 것을 차단. 관리자(CEO)는 면제
-  if (!required && tool === "agent_create" && agentId) {
-    const a = db.prepare("SELECT is_boss FROM agents WHERE id = ?").get(agentId) as any;
-    if (a && !a.is_boss) required = true;
+  let required = approvalDecision(tool, args) === "require";
+  // A6/C7 — 봇 생성은 정원 내면 승인 면제(팀장 포함). 전체 정원(agent_cap_total, 기본 20)
+  // 초과분만 승인 대상. 팀장의 max_children 한도는 도구 내부에서 거부하므로 여기선 보지 않는다.
+  if (!required && tool === "agent_create") {
+    const want = prospectiveCreateCount(args);
+    const total = (db.prepare("SELECT COUNT(*) c FROM agents").get() as any).c;
+    if (want > 0 && total + want > (Number(getSetting("agent_cap_total")) || 20)) required = true;
   }
   if (!required) return null;
   const argsJson = canonicalArgs(args);
@@ -162,13 +190,45 @@ export const approvalsRoute = new Hono()
     const b = await c.req.json();
     if (!b.pattern || !["require", "allow"].includes(b.action)) return c.json({ error: "pattern, action(require|allow) 필요" }, 400);
     try { new RegExp(String(b.pattern)); } catch { return c.json({ error: "정규식 오류" }, 400); }
+    // A12 — 선택적 인자 조건 {"field","op","value"} — JSON 형식과 op만 검증
+    let cond: string | null = null;
+    if (b.cond) {
+      try {
+        const cc = typeof b.cond === "string" ? JSON.parse(b.cond) : b.cond;
+        if (!cc.field || !cc.op) return c.json({ error: "cond에는 field와 op가 필요합니다" }, 400);
+        cond = JSON.stringify({ field: String(cc.field), op: String(cc.op), value: cc.value });
+      } catch { return c.json({ error: "cond JSON 오류" }, 400); }
+    }
     const id = uid();
-    db.prepare("INSERT INTO approval_rules (id, pattern, action, created_at) VALUES (?, ?, ?, ?)").run(id, String(b.pattern), String(b.action), now());
+    db.prepare("INSERT INTO approval_rules (id, pattern, action, cond, created_at) VALUES (?, ?, ?, ?, ?)").run(id, String(b.pattern), String(b.action), cond, now());
     return c.json({ rule: db.prepare("SELECT * FROM approval_rules WHERE id = ?").get(id) });
   })
   .delete("/rules/:id", (c) => {
     db.prepare("DELETE FROM approval_rules WHERE id = ?").run(c.req.param("id"));
     return c.json({ ok: true });
+  })
+  // 감사 뷰 — 봇 활동 이력: 실행 이력(agent_runs) + 승인 요청(approval_requests) 통합 조회
+  // 필터: agent_id, tool(tool_log LIKE), days(기본 7일)
+  .get("/activity", (c) => {
+    const agentId = c.req.query("agent_id") || null;
+    const tool = c.req.query("tool") || null;
+    const days = Math.min(Math.max(Number(c.req.query("days")) || 7, 1), 90);
+    const since = now() - days * 86400_000;
+    const runArgs: unknown[] = [since];
+    let runSql = `SELECT r.id, r.agent_id, a.name agent_name, a.avatar, r.task, r.status, r.steps, r.routine_id, r.resume_count, r.created_at, r.finished_at
+      FROM agent_runs r LEFT JOIN agents a ON a.id = r.agent_id WHERE r.created_at > ?`;
+    if (agentId) { runSql += " AND r.agent_id = ?"; runArgs.push(agentId); }
+    if (tool) { runSql += " AND r.tool_log LIKE ?"; runArgs.push(`%"tool":"${tool.replace(/"/g, "")}"%`); }
+    runSql += " ORDER BY r.created_at DESC LIMIT 200";
+    const runs = db.prepare(runSql).all(...(runArgs as any[]));
+    const apArgs: unknown[] = [since];
+    let apSql = `SELECT r.id, r.agent_id, a.name agent_name, r.tool, r.summary, r.status, r.created_at, r.resolved_at
+      FROM approval_requests r LEFT JOIN agents a ON a.id = r.agent_id WHERE r.created_at > ?`;
+    if (agentId) { apSql += " AND r.agent_id = ?"; apArgs.push(agentId); }
+    if (tool) { apSql += " AND r.tool = ?"; apArgs.push(tool); }
+    apSql += " ORDER BY r.created_at DESC LIMIT 200";
+    const approvals = db.prepare(apSql).all(...(apArgs as any[]));
+    return c.json({ runs, approvals });
   });
 
 // 승인된 도구를 실제 실행 → 결과 저장 → 봇 작업 재개

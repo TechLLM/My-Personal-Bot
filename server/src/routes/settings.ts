@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { db, getSetting, setSetting } from "../db";
 
 const KNOWN = ["system_prompt", "search_provider", "searxng_url", "tavily_key", "brave_key", "exa_key", "jina_key", "image_endpoint", "image_key", "image_model", "vision_model", "memory_enabled", "access_code", "default_model",
-  "fallback_chain", "run_deadline_sec", "tool_rounds", "delegate_cap_sec", "run_total_cap_sec",
+  "fallback_chain", "run_deadline_sec", "tool_rounds", "delegate_cap_sec", "run_total_cap_sec", "agent_cap_total",
   "notify_telegram", "telegram_bot_token", "telegram_chat_id", "telegram_listen",
   "notify_email", "smtp_host", "smtp_port", "smtp_user", "smtp_pass", "smtp_from", "email_to",
   "imap_host", "imap_port", "imap_user", "imap_pass", "imap_tls"];

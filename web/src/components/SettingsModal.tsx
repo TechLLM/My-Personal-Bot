@@ -2,16 +2,17 @@ import { useEffect, useState } from "react";
 import { api, type ProviderCard, type Agent, type Model, type SiteLogin, mybotFetch } from "../api";
 import {
   X, Crown, AlarmClock, Trash2, Folder, Cpu, Search, Image as ImageIcon, Bot,
-  Clock, Wrench, Globe, Bell, Brain, Settings2, Loader2,
+  Clock, Wrench, Globe, Bell, Brain, Settings2, Loader2, ScrollText,
   ChevronDown, ChevronUp, Plus, Zap, KeyRound,
 } from "lucide-react";
 import { AgentIcon } from "./icons";
 
-type Section = "providers" | "search" | "image" | "agents" | "routines" | "tools" | "browser" | "notify" | "memory" | "general";
+type Section = "providers" | "search" | "image" | "agents" | "audit" | "routines" | "tools" | "browser" | "notify" | "memory" | "general";
 
 const SECTIONS: { id: Section; label: string; icon: any }[] = [
   { id: "providers", label: "모델 · 프로바이더", icon: Cpu },
   { id: "agents", label: "에이전트 봇", icon: Bot },
+  { id: "audit", label: "봇 활동 이력", icon: ScrollText },
   { id: "routines", label: "루틴", icon: Clock },
   { id: "search", label: "검색", icon: Search },
   { id: "image", label: "이미지", icon: ImageIcon },
@@ -125,6 +126,9 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   const [testMsg, setTestMsg] = useState("");
   const [dirty, setDirty] = useState(false);
   const [savedMsg, setSavedMsg] = useState("");
+  const [audit, setAudit] = useState<{ runs: any[]; approvals: any[] } | null>(null);
+  const [auditAgent, setAuditAgent] = useState("");
+  const [auditDays, setAuditDays] = useState("7");
 
   const testNotify = (channel: string) => {
     setTestMsg("발송 중…");
@@ -147,6 +151,15 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
     loadProviders();
   };
   useEffect(() => { load(); }, []);
+
+  // 감사 뷰 — 섹션을 열 때만 조회 (실행 이력 + 승인 요청 통합)
+  const loadAudit = () => {
+    const qs = new URLSearchParams();
+    if (auditAgent) qs.set("agent_id", auditAgent);
+    qs.set("days", auditDays || "7");
+    mybotFetch(`/api/approvals/activity?${qs}`).then((r) => r.json()).then(setAudit).catch(() => {});
+  };
+  useEffect(() => { if (section === "audit") loadAudit(); }, [section, auditAgent, auditDays]);
 
   // 입력은 로컬 상태만 변경 — "저장" 버튼을 눌러야 서버에 반영
   const update = (patch: Record<string, string>) => { setS((p) => ({ ...p, ...patch })); setDirty(true); };
@@ -300,6 +313,58 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     if (!aName.trim()) return;
                     api.addAgent({ name: aName, role_prompt: aRole, model: aModel || undefined, avatar: "" }).then(() => { setAName(""); setARole(""); setAModel(""); load(); });
                   }}>봇 추가</button>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <Field k="agent_cap_total" label="전체 봇 정원(초과 시 승인 필요)" ph="20" />
+                </div>
+              </div>
+            )}
+
+            {section === "audit" && (
+              <div>
+                <H>봇 활동 이력</H>
+                <div className="mb-3 flex gap-1.5">
+                  <select className="flex-1 rounded-lg bg-stone-200 px-2 py-1.5 text-xs outline-none" value={auditAgent} onChange={(e) => setAuditAgent(e.target.value)}>
+                    <option value="">전체 봇</option>
+                    {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                  </select>
+                  <select className="w-24 rounded-lg bg-stone-200 px-2 py-1.5 text-xs outline-none" value={auditDays} onChange={(e) => setAuditDays(e.target.value)}>
+                    <option value="1">1일</option>
+                    <option value="7">7일</option>
+                    <option value="30">30일</option>
+                    <option value="90">90일</option>
+                  </select>
+                </div>
+                <p className="mb-1 text-[10px] font-medium text-stone-500">실행 이력 ({audit?.runs.length ?? 0})</p>
+                <div className="max-h-52 space-y-1 overflow-y-auto">
+                  {(audit?.runs ?? []).map((r) => (
+                    <div key={r.id} className="rounded-lg bg-white px-2.5 py-1.5 text-[11px]">
+                      <div className="flex items-center gap-1.5">
+                        <AgentIcon name={r.agent_name ?? "?"} seed={r.avatar} size={12} className="shrink-0" />
+                        <span className="font-medium">{r.agent_name ?? "(삭제된 봇)"}</span>
+                        <span className={`rounded px-1 text-[9px] ${r.status === "done" ? "bg-emerald-100 text-emerald-700" : r.status === "error" ? "bg-red-100 text-red-600" : "bg-stone-200 text-stone-500"}`}>{r.status}</span>
+                        {r.routine_id && <span className="rounded bg-amber-100 px-1 text-[9px] text-amber-700">루틴</span>}
+                        {r.resume_count > 0 && <span className="rounded bg-sky-100 px-1 text-[9px] text-sky-600">재개{r.resume_count}회</span>}
+                        <span className="ml-auto text-[9px] text-stone-400">{new Date(r.created_at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                      </div>
+                      <div className="mt-0.5 truncate text-stone-500">{r.task}</div>
+                    </div>
+                  ))}
+                  {audit && !audit.runs.length && <p className="text-xs text-stone-400">기록 없음</p>}
+                </div>
+                <p className="mb-1 mt-3 text-[10px] font-medium text-stone-500">승인 요청 ({audit?.approvals.length ?? 0})</p>
+                <div className="max-h-40 space-y-1 overflow-y-auto">
+                  {(audit?.approvals ?? []).map((r) => (
+                    <div key={r.id} className="rounded-lg bg-white px-2.5 py-1.5 text-[11px]">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-medium">{r.tool}</span>
+                        <span className={`rounded px-1 text-[9px] ${r.status === "approved" ? "bg-emerald-100 text-emerald-700" : r.status === "denied" ? "bg-red-100 text-red-600" : "bg-amber-100 text-amber-700"}`}>{r.status}</span>
+                        <span className="ml-auto text-[9px] text-stone-400">{r.agent_name ?? "—"} · {new Date(r.created_at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                      </div>
+                      <div className="mt-0.5 truncate text-stone-500">{r.summary}</div>
+                    </div>
+                  ))}
+                  {audit && !audit.approvals.length && <p className="text-xs text-stone-400">기록 없음</p>}
                 </div>
               </div>
             )}
