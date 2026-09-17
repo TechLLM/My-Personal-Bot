@@ -632,6 +632,9 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
   }
   if (name === "routine_add") {
     const { nextRunAt } = await import("./routines");
+    // 라우팅 규칙: 하위 봇이 자기 루틴을 스스로 등록하면 팀장을 우회한 독자 반복 업무가 됨 — 팀장·CEO 경유만 허용
+    const routineCaller = agentId ? getAgent(agentId) : null;
+    if (routineCaller?.parent_id) return "라우팅 규칙: 루틴 등록은 팀장 또는 관리자(CEO)에게 요청하세요 — 팀 소속 봇은 독자적으로 반복 업무를 배정할 수 없습니다";
     const isEmail = String(args.trigger ?? "") === "email";
     let schedule = pickStr(args, "schedule", "every", "interval", "time", "cron");
     // 접두사 없는 값 정규화 — "30m"→every:30m, "09:00"→daily:09:00 (모델이 형식을 빼먹는 경우 흡수)
@@ -660,6 +663,16 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     if (!rid) {
       const byName = pickStr(args, "name", "routine");
       if (byName) rid = String((db.prepare("SELECT id FROM routines WHERE name LIKE ? ESCAPE '\\' LIMIT 1").get(`%${byName.replace(/[\\%_]/g, (c) => `\\${c}`)}%`) as any)?.id ?? "");
+    }
+    // 소유권 검사 — 하위 봇은 팀장 경유(생성·삭제 모두). 그 외 봇은 자기 루틴만,
+    // 팀장은 하위 봇 루틴까지, CEO는 전부. 대장(agent_id NULL) 루틴은 CEO만.
+    const row = rid ? db.prepare("SELECT agent_id FROM routines WHERE id = ?").get(rid) as { agent_id: string | null } | undefined : undefined;
+    if (row && agentId) {
+      const caller = getAgent(agentId);
+      if (caller?.parent_id) return "라우팅 규칙: 루틴 변경은 팀장 또는 관리자(CEO)에게 요청하세요";
+      const owner = row.agent_id ? getAgent(row.agent_id) : null;
+      const allowed = caller?.is_boss || row.agent_id === agentId || (caller?.is_lead && owner?.parent_id === caller.id);
+      if (!allowed) return "권한 없음: 다른 봇의 루틴은 삭제할 수 없습니다 — 관리자(CEO)에게 요청하세요";
     }
     const r = rid ? db.prepare("DELETE FROM routines WHERE id = ?").run(rid) : { changes: 0 };
     return r.changes ? `루틴 삭제됨: ${rid}` : `루틴 없음: ${rid || args.id || args.name || "(식별자 없음)"} — 삭제된 것이 아닙니다. routine_list로 실제 ID를 확인한 뒤 다시 호출하세요.`;
@@ -903,7 +916,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
             const { undoUnrequestedChanges, mutationExecuted } = await import("./intent");
             const mutated = mutationExecuted(intent.object, calledTools, gatedTools);
             const undo = mutated
-              ? await undoUnrequestedChanges(intent.object, beforeIds, (t, a) => callBuiltin(t, a, agent.id, signal, state.depth, trackEmit))
+              ? await undoUnrequestedChanges(intent.object, beforeIds)
               : { created: 0, undone: 0, removed: 0 };
             if (undo.created > 0 || undo.removed > 0) {
               if (Date.now() < deadline) {
@@ -1306,8 +1319,13 @@ export const agentsRoute = new Hono()
     const id = uid();
     const avatar = typeof b.avatar === "string" && b.avatar.startsWith("face:") ? b.avatar : `face:${id}`;
     const maxOrder = (db.prepare("SELECT COALESCE(MAX(sort_order), 0) m FROM agents").get() as any).m;
+    // UI 생성 봇에도 agent_create와 같은 수행 기준 프레임을 붙인다 — 생성 경로와 무관하게 보고 규칙이 같아야 함
+    const rawRole = String(b.role_prompt ?? "").trim();
+    const rolePrompt = rawRole && !rawRole.includes("[전문가 수행 기준]")
+      ? `${rawRole}\n\n[전문가 수행 기준] 당신은 해당 분야 20년 경력의 시니어 실무자입니다. 결과는 도구로 실제 확인·검증한 것만 보고하고, 추측 보고는 금지하며, 확인하지 못한 것은 반드시 '미확인'으로 표기합니다.`
+      : rawRole;
     db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(id, String(b.name).slice(0, 30), b.role_prompt ?? "", b.model ?? defaultModel(), avatar, b.tools ? JSON.stringify(b.tools) : null, b.persistent === false ? 0 : 1, maxOrder + 1, now());
+      .run(id, String(b.name).slice(0, 30), rolePrompt, b.model ?? defaultModel(), avatar, b.tools ? JSON.stringify(b.tools) : null, b.persistent === false ? 0 : 1, maxOrder + 1, now());
     return c.json({ agent: withAgentMeta(db.prepare("SELECT * FROM agents WHERE id = ?").get(id)) });
   })
   .patch("/:id", async (c) => {
@@ -1350,8 +1368,11 @@ export const agentsRoute = new Hono()
   .post("/:id/boss", (c) => {
     const a = db.prepare("SELECT * FROM agents WHERE id = ?").get(c.req.param("id")) as Agent | null;
     if (!a) return c.json({ error: "not found" }, 404);
+    // 승격 봇이 데리고 있던 팀원은 먼저 최상위로 올림 — CEO 산하에 팀장 없는 하위 봇이 남지 않게
+    db.prepare("UPDATE agents SET parent_id = NULL WHERE parent_id = ?").run(a.id);
     db.prepare("UPDATE agents SET is_boss = 0").run();
-    db.prepare("UPDATE agents SET is_boss = 1 WHERE id = ?").run(a.id);
+    // 새 CEO는 트리 최상위 — 소속·팀장 지위를 해제한다 (하위 봇이 승격되면 parent가 남아 트리가 깨졌다)
+    db.prepare("UPDATE agents SET is_boss = 1, parent_id = NULL, is_lead = 0 WHERE id = ?").run(a.id);
     return c.json({ ok: true, agent: withAgentMeta(db.prepare("SELECT * FROM agents WHERE id = ?").get(a.id)) });
   })
   // 봇 구성보내기/가져오기 — 그록봇 "봇 공유"의 셀프호스팅 대응 (Phase 23)

@@ -135,12 +135,11 @@ export function mutationExecuted(object: IntentObject, calledTools: Set<string>,
 }
 
 // 조회 지시인데 변경이 실행된 경우(반대 동작) — 요청 없이 생성된 행을 되돌린다.
-// 삭제된 행은 복구할 수 없으므로 개수만 보고한다. exec는 게이트를 거치지 않는 직접 실행이어야 한다
-// (승인 없이 일어난 변경을 원상태로 돌리는 정리 작업이므로 새 승인 팝업을 만들면 안 된다).
+// 삭제된 행은 복구할 수 없으므로 개수만 보고한다. 롤백은 도구가 아니라 직접 삭제 — 승인 게이트·
+// 권한 검사(Eggbot 전용·루틴 소유권)를 우회해야 요청 없이 생긴 행을 확실히 되돌릴 수 있다.
 export async function undoUnrequestedChanges(
   object: IntentObject,
   beforeIds: Set<string>,
-  exec: (tool: string, args: Record<string, unknown>) => Promise<string>,
 ): Promise<{ created: number; undone: number; removed: number }> {
   const after = snapshot(object).rows;
   const afterIds = new Set(after.map((r) => r.id));
@@ -148,11 +147,15 @@ export async function undoUnrequestedChanges(
   const removed = [...beforeIds].filter((id) => !afterIds.has(id)).length;
   let undone = 0;
   for (const row of created) {
-    const tool = object === "routines" ? "routine_delete" : "agent_delete";
-    const args = object === "routines" ? { id: row.id } : { name: row.name };
     try {
-      const out = await exec(tool, args);
-      if (!out.includes("없음") && !out.startsWith("도구 오류")) undone++;
+      if (object === "agents") {
+        // 봇 삭제는 Eggbot 전용 권한이라 도구 호출로는 되돌릴 수 없다 — 롤백은 직접 삭제
+        const { deleteAgentRow } = await import("./team");
+        deleteAgentRow(row.id); undone++;
+      } else {
+        // 루틴도 도구 호출 경유 시 소유권 검사에 막힐 수 있다 — 롤백은 직접 삭제
+        db.prepare("DELETE FROM routines WHERE id = ?").run(row.id); undone++;
+      }
     } catch { /* 다음 행 계속 */ }
   }
   return { created: created.length, undone, removed };
@@ -184,8 +187,9 @@ export function verifyMutation(
     // "모두 삭제"라도 삭제 불가 대상(CEO 등)이 남을 수 있어 0을 요구하면 안 됨 — 감소 여부로 판정
     const gone = after < beforeCount;
     if (gone && intent.all && intent.object === "agents") {
-      // 전체 삭제 지시인데 삭제 가능한 대상(비-CEO)이 아직 남아 있으면 부분 이행 — 미완료로 판정
-      const remaining = (db.prepare("SELECT COUNT(*) c FROM agents WHERE is_boss = 0").get() as any)?.c ?? 0;
+      // 전체 삭제 지시인데 삭제 가능한 대상이 아직 남아 있으면 부분 이행 — 미완료로 판정
+      // CEO·Eggbot·비서실장은 삭제 불가라 잔여 산정에서 제외 — 안 빼면 "전부 삭제"가 영구 미이행이 된다
+      const remaining = (db.prepare("SELECT COUNT(*) c FROM agents WHERE is_boss = 0 AND special_role IS NULL").get() as any)?.c ?? 0;
       if (remaining > 0) return { ok: false, detail: `전체 삭제 지시였지만 삭제 가능한 봇이 ${remaining}개 남아 있습니다 — agent_list로 남은 봇을 확인하고 모두 삭제하세요.` };
     }
     if (gone) return { ok: true };

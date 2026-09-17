@@ -264,8 +264,9 @@ try { db.exec("ALTER TABLE agents ADD COLUMN max_children INTEGER"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN sort_order REAL"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN special_role TEXT"); } catch {} // 'org_admin'(Eggbot, 봇 관리 전담) / 'secretary'(비서실장, 업무 라우팅)
 // 조직 역할 자동 배정 — 이름 기준 1회 백필 (Eggbot=조직관리, 비서실장=라우팅)
-db.exec("UPDATE agents SET special_role = 'org_admin' WHERE name = 'Eggbot' AND special_role IS NULL");
-db.exec("UPDATE agents SET special_role = 'secretary' WHERE name = '비서실장봇' AND special_role IS NULL");
+// 역할이 이미 배정돼 있으면 백필하지 않음 — Eggbot 개명 후 새 "Eggbot"이 org_admin을 얻는 중복을 차단
+db.exec("UPDATE agents SET special_role = 'org_admin' WHERE name = 'Eggbot' AND special_role IS NULL AND NOT EXISTS (SELECT 1 FROM agents WHERE special_role = 'org_admin')");
+db.exec("UPDATE agents SET special_role = 'secretary' WHERE name = '비서실장봇' AND special_role IS NULL AND NOT EXISTS (SELECT 1 FROM agents WHERE special_role = 'secretary')");
 // 업무 트리 무결성 — 최대 2단계(CEO→팀장→봇). 잘못된 배정은 기동 시 자동 복구:
 // ① 특수 역할 봇(Eggbot·비서실장)은 항상 CEO 직속 ② 팀장도 CEO 직속
 // ③ parent는 팀장·CEO만 가능 ④ 3단계 이상 금지

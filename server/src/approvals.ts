@@ -137,6 +137,17 @@ export function dispatchAgentMessage(msgId: string) {
       onDone: (state) => {
         db.prepare("UPDATE agent_messages SET status = ?, reply = ?, done_at = ? WHERE id = ?")
           .run(state.status === "done" ? "done" : "failed", (state.result?.trim() || "(결과 없음)").slice(0, 4000), now(), msgId);
+        // 회신을 발신 봇이 실제로 받아 처리하게 재실행 — 세션에 기록만 하면 아무도 읽지 않는 데드레터가 됨
+        // (연쇄 방지: 봇 쌍 메시지 10건/30분 + 봇별 실행 15회/시간 상한이 ping-pong을 차단)
+        if (sender && state.status === "done" && getAgent(sender.id)) {
+          runAgentDetached(sender, {
+            label: `[${target.name} 회신] ${msg.content.slice(0, 120)}`,
+            task: `[${target.name} 봇이 보낸 회신이 도착했습니다 — 내용을 검토해 취합·보고·후속 조치 등 다음 단계를 이어가세요]\n\n${(state.result?.trim() || "(결과 없음)").slice(0, 3000)}`,
+            sessionTitle: `[${target.name} 회신] ${msg.content.slice(0, 80)}`,
+            sessionTask: msg.content,
+            verifyIntent: false, // 회신 전달은 지시가 아님 — 지시-실측 검증 대상에서 제외
+          });
+        }
       },
     });
   })().catch(() => {});

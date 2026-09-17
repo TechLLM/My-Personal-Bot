@@ -724,7 +724,7 @@ export const chatRoute = new Hono()
             const { undoUnrequestedChanges, mutationExecuted } = await import("../intent");
             const mutated = mutationExecuted(intent.object, calledTools, gatedTools);
             const undo = mutated
-              ? await undoUnrequestedChanges(intent.object, beforeIds, (t, a) => callBuiltin(t, a, conv?.agent_id ?? null, signal))
+              ? await undoUnrequestedChanges(intent.object, beforeIds)
               : { created: 0, undone: 0, removed: 0 };
             if (undo.created > 0 || undo.removed > 0) {
               content += `\n\n> ⚠️ [서버 검증] 조회 지시였는데 ${intent.object}에 요청하지 않은 변경이 발생했습니다 — 생성 ${undo.created}건 중 ${undo.undone}건을 되돌렸고${undo.removed > 0 ? `, 삭제된 ${undo.removed}건은 복구할 수 없습니다` : ""}. 위 보고의 변경 관련 주장은 무시하세요.`;
