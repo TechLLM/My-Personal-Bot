@@ -506,8 +506,8 @@ export const chatRoute = new Hono()
               send("done", { message: withSiblings(q.msgGet.get(asstMsg.id) as Msg) });
               const count = (db.prepare("SELECT COUNT(*) as n FROM messages WHERE conversation_id = ?").get(convId!) as any).n;
               if (count <= 2) {
-                await autoTitle(convId!, userMsg.content);
-                send("title", { conversation: q.convGet.get(convId!) });
+                // 제목 생성은 응답 경로를 지연시키지 않도록 백그라운드로 — 완료 시 title 이벤트 발송
+                autoTitle(convId!, userMsg.content).then(() => send("title", { conversation: q.convGet.get(convId!) })).catch(() => {});
               }
               return;
             }
@@ -547,17 +547,23 @@ export const chatRoute = new Hono()
             const gatedTools = new Set<string>(); // 승인 게이트에 걸려 미실행·승인 대기가 된 도구
             // ─── 검증 하네스: 지시 의도 파싱 → 내부 엔티티는 서버가 실측해 주입 ───
             // 모델이 목록·수량을 지어내지 못하게 DB 실측 상태를 미리 고정
-            const { classifyIntent, snapshot, verifyMutation, TOOL_CONTRACT } = await import("../intent");
+            const { classifyIntent, snapshot, verifyMutation, parseIntent, TOOL_CONTRACT } = await import("../intent");
             // 의도는 LLM이 문맥을 읽어 분류 — 정규식은 "삭제를 담당하는 봇"을 "전부 삭제"로
             // 오독해 하네스가 반대 실행을 강제하는 사고를 냈었다. 분류 실패 시 동사는 버려진다.
-            const intent: Intent = toolsCapable ? await classifyIntent(userMsg?.content ?? "", endpoint, realModel, signal) : { verb: null, object: null, all: false };
-            let beforeCount = 0;
-            let beforeIds = new Set<string>();
-            if (intent.object) {
-              const snap = snapshot(intent.object);
-              beforeCount = snap.count;
-              beforeIds = new Set(snap.rows.map((r) => r.id));
-              history.push({ role: "system", content: `[서버 실측] 현재 ${intent.object} 실제 상태 (방금 DB에서 조회 — 이 데이터만이 사실이며 여기 없는 항목을 지어내면 안 됩니다):\n${snap.text}` });
+            // LLM 분류는 도구 루프·스트리밍과 병렬로 돌리고 스냅샷은 정규식 추정 객체로 즉시 주입한다 —
+            // 직렬 대기를 없애고, 분류 결과는 검증 시점(selfcheck·실측 푸터)에만 받는다.
+            const intentP: Promise<Intent> = toolsCapable
+              ? classifyIntent(userMsg?.content ?? "", endpoint, realModel, signal).catch(() => ({ verb: null, object: null, all: false } as Intent))
+              : Promise.resolve({ verb: null, object: null, all: false } as Intent);
+            const quickObject = toolsCapable ? parseIntent(userMsg?.content ?? "").object : null;
+            const snapByObj: Partial<Record<"agents" | "routines", { count: number; ids: Set<string>; text: string }>> = {};
+            if (quickObject) {
+              // LLM 분류가 정규식 추정과 다른 객체로 나올 수 있으니 두 엔티티 모두 기준선을 잡아둔다 (조회 비용 ~ms)
+              for (const obj of ["agents", "routines"] as const) {
+                const s = snapshot(obj);
+                snapByObj[obj] = { count: s.count, ids: new Set(s.rows.map((r) => r.id)), text: s.text };
+              }
+              history.push({ role: "system", content: `[서버 실측] 현재 ${quickObject} 실제 상태 (방금 DB에서 조회 — 이 데이터만이 사실이며 여기 없는 항목을 지어내면 안 됩니다):\n${snapByObj[quickObject]!.text}` });
             }
             emitPhase("plan", "지시 분석");
             let popupShown = false; // request_credentials가 실제로 팝업을 생성했는지 (저장 계정 재사용 시 false)
@@ -643,8 +649,10 @@ export const chatRoute = new Hono()
           if (thinkParts.length) reasoning = [reasoning, ...thinkParts].filter(Boolean).join("\n\n").trim();
 
           // 자가교정 — 조건 검사는 selfcheck.ts의 규칙 테이블이 담당 (C11)
+          const intent = await intentP; // 병렬로 돌린 의도 분류 — 여기서 처음 필요
+          const before = (intent.object ? snapByObj[intent.object] : undefined) ?? { count: 0, ids: new Set<string>() };
           const lastUser = [...history].reverse().find((m) => m.role === "user" && typeof m.content === "string" && !m.content.startsWith("[시스템]"));
-          const sc = selfcheck({ content, calledTools, gatedTools, intent, beforeCount, lastUserText: (lastUser?.content as string) ?? "" });
+          const sc = selfcheck({ content, calledTools, gatedTools, intent, beforeCount: before.count, lastUserText: (lastUser?.content as string) ?? "" });
           const { degenerate, leakedCalls, claimsPopup, claimsAction, actionMismatch, jsonLeak, dodges, stateUnmet, pendingMisreport } = sc;
           let needsFix = sc.needsFix;
           // ─── PGE 평가 단계 — 형식·실측 검증을 통과한 응답도 결과물 품질을 독립 채점 ───
@@ -654,7 +662,9 @@ export const chatRoute = new Hono()
             const { shouldEvaluate, evaluateResult } = await import("../evaluate");
             if (shouldEvaluate(userMsg?.content ?? "", content, calledTools.size, toolsCapable)) {
               emitPhase("verify", "결과 검증");
-              const v = await evaluateResult(endpoint, realModel, userMsg?.content ?? "", content, { signal });
+              // 평가는 기본(fast) 모델로 — 작업 모델과 평가자를 분리해 자기 확증을 줄이고 지연을 줄인다
+              const evalTarget = (() => { try { return resolveModel(defaultModelId()); } catch { return { endpoint, model: realModel }; } })();
+              const v = await evaluateResult(evalTarget.endpoint, evalTarget.model, userMsg?.content ?? "", content, { signal });
               if (!v.pass) { needsFix = true; evalIssues = v.issues; }
               else emitPhase("verify_done", `검증 통과 ${v.score}점`);
             }
@@ -724,7 +734,7 @@ export const chatRoute = new Hono()
             const { undoUnrequestedChanges, mutationExecuted } = await import("../intent");
             const mutated = mutationExecuted(intent.object, calledTools, gatedTools);
             const undo = mutated
-              ? await undoUnrequestedChanges(intent.object, beforeIds)
+              ? await undoUnrequestedChanges(intent.object, before.ids)
               : { created: 0, undone: 0, removed: 0 };
             if (undo.created > 0 || undo.removed > 0) {
               content += `\n\n> ⚠️ [서버 검증] 조회 지시였는데 ${intent.object}에 요청하지 않은 변경이 발생했습니다 — 생성 ${undo.created}건 중 ${undo.undone}건을 되돌렸고${undo.removed > 0 ? `, 삭제된 ${undo.removed}건은 복구할 수 없습니다` : ""}. 위 보고의 변경 관련 주장은 무시하세요.`;
@@ -733,14 +743,14 @@ export const chatRoute = new Hono()
             }
           }
           if (intent.verb && intent.object && intent.verb !== "read") {
-            const finalVerdict = verifyMutation(intent, beforeCount, calledTools, gatedTools);
+            const finalVerdict = verifyMutation(intent, before.count, calledTools, gatedTools);
             if (!finalVerdict.ok) {
               // 서버는 지시를 추론해 직접 실행하지 않는다 — 의도가 틀리면 반대 동작 강제가 되므로
               // 미이행은 사실 표기로 끝내고, 실행은 모델의 도구 호출(승인 게이트 통과)로만 이뤄진다
-              content += `\n\n> ⚠️ [서버 검증] 지시된 ${intent.object} 변경이 실제로 이뤄지지 않았습니다 — 현재 ${intent.object}: ${snapshot(intent.object).count}건 (지시 전 ${beforeCount}건). 위 보고 중 "완료" 주장은 무시하세요.`;
+              content += `\n\n> ⚠️ [서버 검증] 지시된 ${intent.object} 변경이 실제로 이뤄지지 않았습니다 — 현재 ${intent.object}: ${snapshot(intent.object).count}건 (지시 전 ${before.count}건). 위 보고 중 "완료" 주장은 무시하세요.`;
             } else if (finalVerdict.pendingApproval) content += "\n\n> ⏸ [서버 검증] 위험 작업이 승인 팝업에서 대기 중입니다 — 승인하면 실제 실행됩니다. 아직 완료된 것이 아닙니다.";
             else if ([...calledTools].some((t) => TOOL_CONTRACT[intent.object!]?.[intent.verb!]?.test(t)))
-              content += `\n\n> ✅ [서버 검증] ${intent.object} 변경 확인됨 — 현재 ${snapshot(intent.object).count}건 (지시 전 ${beforeCount}건).`;
+              content += `\n\n> ✅ [서버 검증] ${intent.object} 변경 확인됨 — 현재 ${snapshot(intent.object).count}건 (지시 전 ${before.count}건).`;
           }
 
           if (!content.trim()) content = "⚠️ 응답이 생성되지 않았습니다 — 같은 지시를 다시 보내주세요."; // 어떤 경로로든 빈 메시지는 저장하지 않음
@@ -750,11 +760,10 @@ export const chatRoute = new Hono()
           emitPhase("done", "완료");
           send("done", { message: withSiblings(q.msgGet.get(asstMsg.id) as Msg) });
 
-          // 첫 교환이면 제목 자동 생성
+          // 첫 교환이면 제목 자동 생성 — 응답 경로를 지연시키지 않도록 백그라운드로
           const count = (db.prepare("SELECT COUNT(*) as n FROM messages WHERE conversation_id = ?").get(convId!) as any).n;
           if (count <= 2 && userMsg) {
-            await autoTitle(convId!, userMsg.content);
-            send("title", { conversation: q.convGet.get(convId!) });
+            autoTitle(convId!, userMsg.content).then(() => send("title", { conversation: q.convGet.get(convId!) })).catch(() => {});
           }
           // 메모리 추출 (비차단) — 담당 봇의 장기기억으로 저장
           if (userMsg && content) extractMemories(userMsg.content, content, conv?.agent_id, conv?.workspace_id).catch(() => {});

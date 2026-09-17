@@ -26,7 +26,7 @@ export function ApprovalModal({ request, onDone }: { request: ApprovalRequest; o
         </div>
         <div className="rounded-lg bg-stone-200/70 px-3 py-2.5">
           <div className="font-mono text-caption text-amber-700">{request.tool}</div>
-          <div className="mt-1 break-all text-xs leading-relaxed text-stone-600">{request.summary}</div>
+          <div className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-all text-xs leading-relaxed text-stone-600">{request.summary}</div>
         </div>
         <div className="mt-4 grid grid-cols-2 gap-2">
           <button onClick={() => act(() => api.approveRequest(request.id))} disabled={busy}

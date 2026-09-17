@@ -11,6 +11,7 @@ import { BROWSER_TOOLS, browserTool, closeAgentPage, closeAgentEgoSpace } from "
 import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { parseLeaked, execToolBatch } from "./toolloop";
+import type { Intent } from "./intent";
 
 // 에이전트 공용 작업 디렉터리 — 파일 도구는 여기로 샌드박스
 export const WORK_DIR = join(import.meta.dir, "..", "data", "workspace");
@@ -214,7 +215,7 @@ export const BUILTIN_TOOLS = [
   { type: "function", function: { name: "memory_save", description: "중요한 사실·결정·진행 상태·사용자 선호를 이 봇의 장기기억(SSD)에 저장합니다 — 대화가 끝나거나 세션이 압축돼도 유지됩니다. 나중에 필요할 정보를 배우거나 작업 중간 상태를 남길 때 사용하세요.", parameters: { type: "object", properties: { content: { type: "string", description: "기억할 내용 (한 줄 요약)" } }, required: ["content"] } } },
   { type: "function", function: { name: "request_credentials", description: "지금 진행 중인 작업이 계정이 없어 중단된 경우에만 사용자에게 보안 입력 팝업을 띄웁니다 (예: browser_login 실패, 로그인이 꼭 필요한 페이지). 나중에 필요할 것 같다고 미리 요청하지 마세요 — 봇 생성·일반 지시·'언젠가 필요할' 용도로는 절대 사용 금지. 입력된 계정은 암호화되어 사이트 계정에 저장되고 browser_login으로 사용됩니다. 채팅으로 비밀번호를 직접 받지 말고 반드시 이 도구를 사용하세요.", parameters: { type: "object", properties: { site: { type: "string", description: "서비스·사이트 이름 (예: 다우오피스)" }, url: { type: "string", description: "로그인 페이지 URL (아는 경우)" }, reason: { type: "string", description: "왜 필요한지 사용자에게 보여줄 설명" }, task: { type: "string", description: "계정 입력 후 자동으로 이어서 진행할 원래 작업" } }, required: ["site"] } } },
   // 학습 스킬 — 성공한 작업 절차를 저장하고 반복 작업에서 재사용
-  { type: "function", function: { name: "skill_save", description: "성공적으로 끝낸 반복 가능 작업의 절차를 재사용 스킬로 저장합니다 — 같은 이름으로 다시 저장하면 개선 내용이 누적·갱신됩니다. 검증된 절차(사용한 도구·선택자·완료 기준)만 저장하세요.", parameters: { type: "object", properties: { name: { type: "string", description: "스킬 이름 (예: 그룹웨어-메일브리핑)" }, trigger: { type: "string", description: "어떤 작업·상황에서 이 스킬을 쓰는지" }, steps: { type: "string", description: "성공 절차 — 단계별로 (도구·선택자·완료 기준 포함)" }, notes: { type: "string", description: "주의점·실패 경험·이번에 개선한 점" } }, required: ["name", "steps"] } } },
+  { type: "function", function: { name: "skill_save", description: "성공적으로 끝낸 반복 가능 작업의 절차를 재사용 스킬로 제안·저장합니다 — 저장 전 사용자 승인 팝업이 표시됩니다. 같은 이름으로 다시 저장하면 개선 내용이 누적·갱신됩니다. 도구로 실제 확인된 성공 절차(사용한 도구·선택자·완료 기준)만 제안하세요.", parameters: { type: "object", properties: { name: { type: "string", description: "스킬 이름 (예: 그룹웨어-메일브리핑)" }, trigger: { type: "string", description: "어떤 작업·상황에서 이 스킬을 쓰는지" }, steps: { type: "string", description: "성공 절차 — 단계별로 (도구·선택자·완료 기준 포함)" }, notes: { type: "string", description: "주의점·실패 경험·이번에 개선한 점" } }, required: ["name", "steps"] } } },
   { type: "function", function: { name: "skill_list", description: "학습된 업무 스킬 목록과 전체 절차를 조회합니다 — 반복·유사 작업을 시작할 때 먼저 확인해 성공 절차를 재사용하세요", parameters: { type: "object", properties: {} } } },
   // 봇 간 협업 — 모든 봇이 사용 가능
   { type: "function", function: { name: "agent_list", description: "전체 봇 목록과 각 봇의 역할·모델·상태를 확인합니다", parameters: { type: "object", properties: {} } } },
@@ -859,30 +860,49 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
   // ─── 검증 하네스: 내부 엔티티 지시는 서버가 실측해 주입 → 실행 후 DB 상태로 이행 검증 ───
   const calledTools = new Set<string>();
   const gatedTools = new Set<string>();
-  const { classifyIntent, snapshot, verifyMutation } = await import("./intent");
+  const { classifyIntent, snapshot, verifyMutation, parseIntent } = await import("./intent");
   // 봇 간 비동기 메시지는 보고·알림이라 지시가 아니고, 도구 미지원 모델(CLI)은
   // 변이 도구를 쓸 수 없어 이행 검증이 무의미하다 — 둘 다 의도 분류 생략.
   // 의도는 LLM이 문맥을 읽어 분류 — 정규식 키워드 매칭은 명령/서술을 구별 못 해
-  // "삭제를 담당하는 봇"을 "전부 삭제"로 오독해 반대 실행을 강제하는 사고가 났었다
-  const intent = (state.verifyIntent === false || !toolsCapable) ? { verb: null, object: null, all: false } : await classifyIntent(state.task, endpoint, model, signal);
-  let beforeCount = 0;
-  let beforeIds = new Set<string>();
-  if (intent.object) {
-    const snap = snapshot(intent.object);
-    beforeCount = snap.count;
-    beforeIds = new Set(snap.rows.map((r) => r.id));
-    messages.push({ role: "system", content: `[서버 실측] 현재 ${intent.object} 실제 상태 (방금 DB 조회 — 이 데이터만이 사실):\n${snap.text}` });
+  // "삭제를 담당하는 봇"을 "전부 삭제"로 오독해 반대 실행을 강제하는 사고가 났었다.
+  // LLM 분류는 도구 루프와 병렬로 진행하고 스냅샷은 정규식 추정 객체로 즉시 주입한다 —
+  // 직렬 대기를 없애고, 분류 결과는 검증이 필요한 시점(도구 없는 응답)에만 받는다.
+  const skipIntent = state.verifyIntent === false || !toolsCapable;
+  const intentP: Promise<Intent> = skipIntent
+    ? Promise.resolve({ verb: null, object: null, all: false })
+    : classifyIntent(state.task, endpoint, model, signal).catch(() => ({ verb: null, object: null, all: false } as Intent));
+  const quickObject = skipIntent ? null : parseIntent(state.task).object;
+  const snapByObj: Partial<Record<"agents" | "routines", { count: number; ids: Set<string>; text: string }>> = {};
+  if (quickObject) {
+    // LLM 분류가 정규식 추정과 다른 객체로 나올 수 있으니 두 엔티티 모두 기준선을 잡아둔다 (조회 비용 ~ms)
+    for (const obj of ["agents", "routines"] as const) {
+      const s = snapshot(obj);
+      snapByObj[obj] = { count: s.count, ids: new Set(s.rows.map((r) => r.id)), text: s.text };
+    }
+    messages.push({ role: "system", content: `[서버 실측] 현재 ${quickObject} 실제 상태 (방금 DB 조회 — 이 데이터만이 사실):\n${snapByObj[quickObject]!.text}` });
   }
   // 학습된 업무 스킬 인덱스 — 반복·유사 작업이면 전체 절차를 읽고 재사용하게 안내
   try {
     const idx = (db.prepare("SELECT name, prompt FROM skills WHERE prompt LIKE '[적용 조건]%' AND disabled = 0 ORDER BY created_at DESC LIMIT 8").all() as any[])
       .map((r) => `- ${r.name}: ${(r.prompt.match(/\[적용 조건\] (.+)/)?.[1] ?? "").slice(0, 80)}`).join("\n");
-    if (idx) messages[0].content += `\n\n[학습된 업무 스킬] 아래 스킬이 이 작업과 관련 있으면 skill_list로 전체 절차(도구 선택자·주의점 포함)를 읽고 따르세요:\n${idx}\n반복 작업을 성공적으로 마치면 skill_save로 검증된 절차를 스킬화하세요 — 같은 이름이면 개선 내용이 누적됩니다.`;
+    if (idx) messages[0].content += `\n\n[학습된 업무 스킬] 아래 스킬이 이 작업과 관련 있으면 skill_list로 전체 절차(도구 선택자·주의점 포함)를 읽고 따르세요:\n${idx}`;
   } catch {}
+  // 스킬화 제안 — 도구로 실제 검증된 성공 작업만. 저장은 사용자 승인 팝업을 거친다
+  if (toolsCapable) messages[0].content += `\n[스킬 제안] 반복 가치가 있는 작업을 도구로 실제 확인된 성공으로 마치면 skill_save로 절차(도구 선택·주의점 포함)를 제안하세요 — 사용자 승인 팝업을 거쳐 저장되고, 같은 이름이면 개선 내용이 누적됩니다. 검증되지 않은 작업은 제안하지 마세요.`;
+  // 위임 권한이 있는 봇에는 조직도를 미리 주입 — agent_list 왕복 한 라운드를 절약한다
+  if (agent.is_boss || agent.is_lead || agent.special_role) {
+    try {
+      const roster = (db.prepare("SELECT a.name, a.is_boss, a.is_lead, a.special_role, a.role_prompt, p.name AS parent_name FROM agents a LEFT JOIN agents p ON a.parent_id = p.id ORDER BY a.rowid").all() as any[])
+        .map((a) => `- ${a.name}${a.is_boss ? " [CEO]" : a.special_role === "org_admin" ? " [조직관리]" : a.special_role === "secretary" ? " [비서실장]" : a.is_lead ? " [팀장]" : ""}${a.parent_name ? ` (소속: ${a.parent_name})` : ""}: ${(a.role_prompt || "").slice(0, 60)}`).join("\n");
+      messages[0].content += `\n\n[현재 조직도 — 방금 DB 조회]\n${roster}`;
+    } catch {}
+  }
   // 봇당 최대 작업 시간 — 초과 시 수집된 결과로 즉시 보고 마무리
   const deadline = Date.now() + runDeadlineSec() * 1000;
   let evalCount = 0; // PGE 평가-재작업 루프 카운터 — 상한으로 무한 반복 차단
   const { shouldEvaluate, evaluateResult, EVAL_MAX_ROUNDS } = await import("./evaluate");
+  // 평가는 기본(fast) 모델로 수행 — 작업 모델과 평가자를 분리해 자기 확증을 줄이고 지연을 줄인다
+  const evalTarget = (() => { try { return resolveModel(defaultModel()); } catch { return { endpoint, model }; } })();
   // A4 — 프로바이더 폴백이 일어나면 도구 로그와 화면에 표기
   const noteFallback = (r: any) => {
     if (r?.fallbackFrom) {
@@ -912,11 +932,13 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
         if (leaked.length) res.toolCalls = leaked;
         else {
           // 하네스 사후 검증 — 내부 엔티티 변경 지시는 DB 상태 변화로 이행 여부를 확인
+          const intent = await intentP; // 병렬로 돌린 의도 분류 — 여기서 처음 필요
+          const before = (intent.object ? snapByObj[intent.object] : undefined) ?? { count: 0, ids: new Set<string>() };
           if (intent.object && intent.verb === "read") {
             const { undoUnrequestedChanges, mutationExecuted } = await import("./intent");
             const mutated = mutationExecuted(intent.object, calledTools, gatedTools);
             const undo = mutated
-              ? await undoUnrequestedChanges(intent.object, beforeIds)
+              ? await undoUnrequestedChanges(intent.object, before.ids)
               : { created: 0, undone: 0, removed: 0 };
             if (undo.created > 0 || undo.removed > 0) {
               if (Date.now() < deadline) {
@@ -929,7 +951,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
               res.content += `\n\n[서버 검증] 조회 지시였는데 ${intent.object} 변경 계열 도구가 실행됐습니다 — 위 보고에서 상태 변경을 주장하는 부분은 미검증입니다.`;
             }
           }
-          const verdict = verifyMutation(intent, beforeCount, calledTools, gatedTools);
+          const verdict = verifyMutation(intent, before.count, calledTools, gatedTools);
           if (!verdict.ok && Date.now() < deadline) {
             trackEmit({ type: "agent_step", agentId: state.id, tool: "실측 검증 — 미이행 재지시" });
             messages.push({ role: "assistant", content: res.content || "" });
@@ -942,7 +964,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
             && shouldEvaluate(state.task, res.content ?? "", calledTools.size, toolsCapable)
             && Date.now() < deadline - 30_000) {
             trackEmit({ type: "agent_phase", agentId: state.id, phase: "verify", label: "결과 검증" });
-            const v = await evaluateResult(endpoint, model, state.task, res.content ?? "", { toolLog: state.toolLog, signal });
+            const v = await evaluateResult(evalTarget.endpoint, evalTarget.model, state.task, res.content ?? "", { toolLog: state.toolLog, signal });
             if (!v.pass) {
               evalCount++;
               trackEmit({ type: "agent_step", agentId: state.id, tool: `품질 평가 ${v.score}점 — 보완 재작업` });

@@ -6,7 +6,8 @@ import { db, uid, now, getSetting } from "./db";
 // 규칙 우선순위: require > allow > 기본 위험 패턴. Require가 항상 이김 (그록과 동일)
 
 // 기본 위험 패턴 — 규칙이 없어도 이름만으로 승인 요구 (파괴적·외부 영향 액션)
-const DEFAULT_RISKY = /send_email|send_telegram|delete|publish|purchase|payment|pay_|_pay|submit_form|drop|execute_sql|shell_run/i;
+// skill_save — 스킬은 전 봇이 재사용하는 조직 자산이라 저장 전 사용자 승인
+const DEFAULT_RISKY = /send_email|send_telegram|delete|publish|purchase|payment|pay_|_pay|submit_form|drop|execute_sql|shell_run|skill_save/i;
 // 승인 면제 — 이름에 위험 단어가 있어도 실제로는 안전한 도구
 const DEFAULT_SAFE = /routine_list|agent_list|read_|list_|_list|search|lookup/i;
 
@@ -109,6 +110,12 @@ function canonicalArgs(args: Record<string, unknown>): string {
 }
 
 function summarizeArgs(tool: string, args: Record<string, unknown>): string {
+  // 스킬 저장 승인 — 사용자가 절차 전체를 보고 승인 여부를 판단해야 하므로 잘라내지 않고 표시
+  if (tool === "skill_save") {
+    const trigger = args.trigger ? `\n적용 조건: ${String(args.trigger).slice(0, 200)}` : "";
+    const notes = args.notes ? `\n주의점: ${String(args.notes).slice(0, 300)}` : "";
+    return `skill_save — 스킬 "${String(args.name ?? "").slice(0, 60)}"${trigger}\n절차:\n${String(args.steps ?? "").slice(0, 1200)}${notes}`.slice(0, 1800);
+  }
   const parts = Object.entries(args ?? {}).slice(0, 4).map(([k, v]) => `${k}: ${String(v).slice(0, 120)}`);
   return `${tool}(${parts.join(", ")})`.slice(0, 400);
 }
