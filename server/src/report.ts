@@ -49,6 +49,10 @@ export function cleanOutput(text: string): string {
 export async function normalizeReport(agentName: string, task: string, result: string, tools?: string[]): Promise<string> {
   const cleaned = cleanOutput(result);
   if (!cleaned.trim()) return "## 요약\n봇이 결과를 생성하지 못했습니다.\n\n## 결과\n없음\n\n## 미확인\n전체 작업 미수행\n\n## 다음 단계\n같은 지시를 다시 보내 확인"; // 빈 원문이면 섹션만 있는 빈 보고서 대신 명시
+  // LLM 재작성 생략 — 완료마다 돌던 포맷터 호출(비용·지연)을 줄인다:
+  // ① 이미 고정 섹션으로 작성된 결과(봇이 보고서 형식을 지킨 경우) ② 짧은 결과는 직접 감싸기
+  if (["## 요약", "## 결과", "## 미확인", "## 다음 단계"].every((h) => cleaned.includes(h))) return cleaned;
+  if (cleaned.length < 200) return `## 요약\n${cleaned.slice(0, 150)}\n\n## 결과\n${cleaned}\n\n## 미확인\n없음\n\n## 다음 단계\n없음`;
   try {
     const { endpoint, model } = resolveModel(defaultModelId());
     const { chatOnce } = await import("./providers/openaiCompat");

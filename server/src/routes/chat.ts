@@ -72,6 +72,8 @@ export function appendToAgentSession(convId: string, userText: string, assistant
   const u = insertMessage(convId, leaf?.id ?? null, "user", userText);
   insertMessage(convId, u.id, "assistant", assistantText, null, model ?? null, searchMeta ?? null);
   q.convTouch.run(now(), convId);
+  // 봇 세션은 실행 로그 누적용 — 무한 증가를 막기 위해 최근 100건만 유지한다
+  db.prepare("DELETE FROM messages WHERE conversation_id = ? AND id NOT IN (SELECT id FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 100)").run(convId, convId);
 }
 
 function withSiblings(m: Msg) {

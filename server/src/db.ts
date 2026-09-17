@@ -273,6 +273,8 @@ db.exec("UPDATE agents SET parent_id = NULL WHERE special_role IS NOT NULL AND p
 db.exec("UPDATE agents SET parent_id = NULL WHERE is_lead = 1 AND parent_id IS NOT NULL");
 db.exec("UPDATE agents SET parent_id = NULL WHERE parent_id IS NOT NULL AND parent_id NOT IN (SELECT id FROM agents WHERE is_lead = 1 OR is_boss = 1)");
 db.exec("UPDATE agents SET parent_id = NULL WHERE parent_id IN (SELECT id FROM agents WHERE parent_id IS NOT NULL)");
+// 삭제된 봇의 고아 세션 정리 — 봇이 사라져도 세션·메시지가 남아 무한 누적되던 문제 방지 (messages는 FK cascade)
+db.exec("DELETE FROM conversations WHERE mode = 'bot' AND agent_id IS NOT NULL AND agent_id NOT IN (SELECT id FROM agents)");
 { // 정렬값 백필 — 기존 표시 순서(CEO→핀→생성순)를 유지한 채 순번 부여
   let i = (db.prepare("SELECT COALESCE(MAX(sort_order), 0) m FROM agents").get() as any).m;
   for (const r of db.prepare("SELECT id FROM agents WHERE sort_order IS NULL ORDER BY is_boss DESC, pinned DESC, created_at").all() as any[])
