@@ -7,7 +7,8 @@ import { db, uid, now, getSetting } from "./db";
 
 // 기본 위험 패턴 — 규칙이 없어도 이름만으로 승인 요구 (파괴적·외부 영향 액션)
 // skill_save — 스킬은 전 봇이 재사용하는 조직 자산이라 저장 전 사용자 승인
-const DEFAULT_RISKY = /send_email|send_telegram|delete|publish|purchase|payment|pay_|_pay|submit_form|drop|execute_sql|shell_run|skill_save/i;
+// agent_create/update/reorder/delete — 봇 설정 변경은 사용자 승인 후 반영 (조직 관리 채널)
+const DEFAULT_RISKY = /send_email|send_telegram|delete|publish|purchase|payment|pay_|_pay|submit_form|drop|execute_sql|shell_run|skill_save|agent_(create|update|reorder)/i;
 // 승인 면제 — 이름에 위험 단어가 있어도 실제로는 안전한 도구
 const DEFAULT_SAFE = /routine_list|agent_list|read_|list_|_list|search|lookup/i;
 
@@ -115,6 +116,14 @@ function summarizeArgs(tool: string, args: Record<string, unknown>): string {
     const trigger = args.trigger ? `\n적용 조건: ${String(args.trigger).slice(0, 200)}` : "";
     const notes = args.notes ? `\n주의점: ${String(args.notes).slice(0, 300)}` : "";
     return `skill_save — 스킬 "${String(args.name ?? "").slice(0, 60)}"${trigger}\n절차:\n${String(args.steps ?? "").slice(0, 1200)}${notes}`.slice(0, 1800);
+  }
+  // 조직 변경 승인 — 무엇이 바뀌는지(대상·필드·일괄 생성 목록)를 명확히 표시
+  if (tool.startsWith("agent_")) {
+    const parts = Object.entries(args ?? {}).map(([k, v]) =>
+      k === "bots" && Array.isArray(v)
+        ? `bots: ${v.map((b: any) => b?.name ?? "?").join(", ")}`
+        : `${k}: ${String(v).slice(0, 300)}`);
+    return `${tool}(${parts.join(", ")})`.slice(0, 900);
   }
   const parts = Object.entries(args ?? {}).slice(0, 4).map(([k, v]) => `${k}: ${String(v).slice(0, 120)}`);
   return `${tool}(${parts.join(", ")})`.slice(0, 400);
