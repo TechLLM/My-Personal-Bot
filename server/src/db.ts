@@ -266,6 +266,13 @@ try { db.exec("ALTER TABLE agents ADD COLUMN special_role TEXT"); } catch {} // 
 // 조직 역할 자동 배정 — 이름 기준 1회 백필 (Eggbot=조직관리, 비서실장=라우팅)
 db.exec("UPDATE agents SET special_role = 'org_admin' WHERE name = 'Eggbot' AND special_role IS NULL");
 db.exec("UPDATE agents SET special_role = 'secretary' WHERE name = '비서실장봇' AND special_role IS NULL");
+// 업무 트리 무결성 — 최대 2단계(CEO→팀장→봇). 잘못된 배정은 기동 시 자동 복구:
+// ① 특수 역할 봇(Eggbot·비서실장)은 항상 CEO 직속 ② 팀장도 CEO 직속
+// ③ parent는 팀장·CEO만 가능 ④ 3단계 이상 금지
+db.exec("UPDATE agents SET parent_id = NULL WHERE special_role IS NOT NULL AND parent_id IS NOT NULL");
+db.exec("UPDATE agents SET parent_id = NULL WHERE is_lead = 1 AND parent_id IS NOT NULL");
+db.exec("UPDATE agents SET parent_id = NULL WHERE parent_id IS NOT NULL AND parent_id NOT IN (SELECT id FROM agents WHERE is_lead = 1 OR is_boss = 1)");
+db.exec("UPDATE agents SET parent_id = NULL WHERE parent_id IN (SELECT id FROM agents WHERE parent_id IS NOT NULL)");
 { // 정렬값 백필 — 기존 표시 순서(CEO→핀→생성순)를 유지한 채 순번 부여
   let i = (db.prepare("SELECT COALESCE(MAX(sort_order), 0) m FROM agents").get() as any).m;
   for (const r of db.prepare("SELECT id FROM agents WHERE sort_order IS NULL ORDER BY is_boss DESC, pinned DESC, created_at").all() as any[])
