@@ -61,7 +61,7 @@ export async function execToolCall(tc: ToolCall, ctx: ToolCtx): Promise<{ out: s
     const { callBuiltin, withToolTimeout, BUILTIN_TOOLS, MANAGE_TOOLS } = await import("./team");
     const isBuiltin = new Set([...BUILTIN_TOOLS, ...MANAGE_TOOLS].map((t) => t.function.name)).has(tc.name);
     const inner = isBuiltin
-      ? callBuiltin(tc.name, args, ctx.agentId, ctx.signal, ctx.depth ?? 0, ctx.emit)
+      ? callBuiltin(tc.name, args, ctx.agentId, ctx.signal, ctx.depth ?? 0, ctx.emit, ctx.browserKey)
       : isBrowserish(tc.name)
         ? (await import("./browser")).browserTool(ctx.browserKey, tc.name, args)
         : (await import("./mcp")).mcpCall(tc.name, args);

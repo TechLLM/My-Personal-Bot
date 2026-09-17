@@ -32,7 +32,11 @@ db.exec(`INSERT OR IGNORE INTO skills (id, name, prompt, created_at) VALUES
   ('sk_review', '리뷰', '다음 코드를 리뷰해줘. 버그-성능-가독성-보안 순으로:\n\n', ${now()})`);
 
 export const skillsRoute = new Hono()
-  .get("/", (c) => c.json({ skills: db.prepare("SELECT s.*, a.name agent_name FROM skills s LEFT JOIN agents a ON a.id = s.agent_id ORDER BY s.created_at").all() }))
+  .get("/", (c) => c.json({ skills: db.prepare(`SELECT s.*, a.name agent_name,
+    (SELECT COUNT(*) FROM skill_runs r WHERE r.skill_id = s.id AND r.ok IS NOT NULL) run_count,
+    (SELECT COALESCE(SUM(r.ok),0) FROM skill_runs r WHERE r.skill_id = s.id AND r.ok IS NOT NULL) ok_count,
+    (SELECT r.fail_reason FROM skill_runs r WHERE r.skill_id = s.id AND r.ok = 0 ORDER BY r.finished_at DESC LIMIT 1) last_fail
+    FROM skills s LEFT JOIN agents a ON a.id = s.agent_id ORDER BY s.created_at`).all() }))
   .post("/", async (c) => {
     const b = await c.req.json();
     if (!b.name?.trim()) return c.json({ error: "name 필요" }, 400);
@@ -44,13 +48,13 @@ export const skillsRoute = new Hono()
     }
     return c.json({ skill: db.prepare("SELECT * FROM skills WHERE id = ?").get(id) });
   })
-  // 봇별 활성화 — agent_id 지정 시 그 봇 전용, null이면 전체 공유
+  // 봇별 활성화 — agent_id 지정 시 그 봇 전용, null이면 전체 공유. disabled로 비활성 해제 가능
   .patch("/:id", async (c) => {
     const s = db.prepare("SELECT * FROM skills WHERE id = ?").get(c.req.param("id")) as any;
     if (!s) return c.json({ error: "not found" }, 404);
     const b = await c.req.json();
-    db.prepare("UPDATE skills SET prompt = ?, agent_id = ? WHERE id = ?")
-      .run(b.prompt ?? s.prompt, b.agent_id === undefined ? s.agent_id : b.agent_id, s.id);
+    db.prepare("UPDATE skills SET prompt = ?, agent_id = ?, disabled = ? WHERE id = ?")
+      .run(b.prompt ?? s.prompt, b.agent_id === undefined ? s.agent_id : b.agent_id, b.disabled === undefined ? s.disabled : (b.disabled ? 1 : 0), s.id);
     return c.json({ skill: db.prepare("SELECT * FROM skills WHERE id = ?").get(s.id) });
   })
   .delete("/:id", (c) => {
@@ -60,5 +64,5 @@ export const skillsRoute = new Hono()
 
 // agentId 지정 시: 공유 스킬(agent_id NULL) + 해당 봇 전용 스킬만 사용 가능
 export function getSkill(name: string, agentId?: string | null): { prompt: string } | null {
-  return (db.prepare("SELECT * FROM skills WHERE name = ? AND (agent_id IS NULL OR agent_id IS ?)").get(name, agentId ?? null) as any) ?? null;
+  return (db.prepare("SELECT * FROM skills WHERE name = ? AND disabled = 0 AND (agent_id IS NULL OR agent_id IS ?)").get(name, agentId ?? null) as any) ?? null;
 }

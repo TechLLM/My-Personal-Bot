@@ -252,7 +252,20 @@ const pickTargets = (args: Record<string, unknown>): string[] => {
 const agentListCache = new Map<string, { at: number; text: string }>();
 const invalidateListCache = () => agentListCache.clear();
 
-export async function callBuiltin(name: string, args: Record<string, unknown>, agentId?: string | null, signal?: AbortSignal, depth = 0, emit?: (ev: any) => void): Promise<string> {
+// 스킬 실행 통계 — 런이 끝나면 참조된 스킬들에 실제 결과를 귀속하고 성공률 미달을 비활성화한다 (A8 후속)
+export function closeSkillRuns(runKey: string, ok: boolean, reason?: string) {
+  const rows = db.prepare("SELECT id, skill_id FROM skill_runs WHERE run_key = ? AND ok IS NULL").all(runKey) as any[];
+  if (!rows.length) return;
+  db.prepare("UPDATE skill_runs SET ok = ?, fail_reason = ?, finished_at = ? WHERE run_key = ? AND ok IS NULL")
+    .run(ok ? 1 : 0, ok ? null : (reason ?? "").slice(0, 300) || null, now(), runKey);
+  for (const r of rows) {
+    const s = db.prepare("SELECT COUNT(*) n, COALESCE(SUM(ok),0) okN FROM skill_runs WHERE skill_id = ? AND ok IS NOT NULL").get(r.skill_id) as any;
+    if (s.n >= 3 && s.okN / s.n < 0.5)
+      db.prepare("UPDATE skills SET disabled = 1 WHERE id = ? AND disabled = 0").run(r.skill_id);
+  }
+}
+
+export async function callBuiltin(name: string, args: Record<string, unknown>, agentId?: string | null, signal?: AbortSignal, depth = 0, emit?: (ev: any) => void, runKey?: string): Promise<string> {
   // --- 봇 협업·관리 도구 ---
   if (name === "agent_list") {
     const ck = agentId ?? "global";
@@ -433,7 +446,10 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     return `스킬 저장됨: ${nm} — 모든 봇이 skill_list로 찾아 재사용합니다`;
   }
   if (name === "skill_list") {
-    const rows = db.prepare("SELECT name, prompt FROM skills WHERE prompt LIKE '[적용 조건]%' ORDER BY created_at DESC LIMIT 10").all() as any[];
+    const rows = db.prepare("SELECT id, name, prompt FROM skills WHERE prompt LIKE '[적용 조건]%' AND disabled = 0 ORDER BY created_at DESC LIMIT 10").all() as any[];
+    // 이 런에 주입된 스킬을 귀속 기록 — 런 종료 시 closeSkillRuns가 실제 성공/실패를 매긴다
+    if (runKey) for (const r of rows)
+      db.prepare("INSERT INTO skill_runs (id, skill_id, run_key, agent_id, created_at) VALUES (?, ?, ?, ?, ?)").run(uid(), r.id, runKey, agentId ?? null, now());
     return rows.length
       ? rows.map((r) => `### ${r.name}\n${r.prompt.slice(0, 2000)}`).join("\n\n")
       : "저장된 업무 스킬이 없습니다 — 반복 작업을 성공하면 skill_save로 절차를 남기세요";
@@ -734,7 +750,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
   }
   // 학습된 업무 스킬 인덱스 — 반복·유사 작업이면 전체 절차를 읽고 재사용하게 안내
   try {
-    const idx = (db.prepare("SELECT name, prompt FROM skills WHERE prompt LIKE '[적용 조건]%' ORDER BY created_at DESC LIMIT 8").all() as any[])
+    const idx = (db.prepare("SELECT name, prompt FROM skills WHERE prompt LIKE '[적용 조건]%' AND disabled = 0 ORDER BY created_at DESC LIMIT 8").all() as any[])
       .map((r) => `- ${r.name}: ${(r.prompt.match(/\[적용 조건\] (.+)/)?.[1] ?? "").slice(0, 80)}`).join("\n");
     if (idx) messages[0].content += `\n\n[학습된 업무 스킬] 아래 스킬이 이 작업과 관련 있으면 skill_list로 전체 절차(도구 선택자·주의점 포함)를 읽고 따르세요:\n${idx}\n반복 작업을 성공적으로 마치면 skill_save로 검증된 절차를 스킬화하세요 — 같은 이름이면 개선 내용이 누적됩니다.`;
   } catch {}
@@ -862,6 +878,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
   } finally {
     runningAgents.delete(state.id);
     agentActivity.delete(state.id);
+    closeSkillRuns(state.runId, state.status === "done", state.status === "error" ? state.result : undefined);
     closeAgentPage(state.runId).catch(() => {});
     closeAgentEgoSpace(state.runId).catch(() => {}); // 작업이 끝나면 ego Task Space(탭 포함)를 닫는다
   }

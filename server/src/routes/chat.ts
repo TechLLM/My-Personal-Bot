@@ -138,7 +138,7 @@ export function systemPrompt(mode: string, personaId?: string | null, workspaceI
   if (memories.length) p += "\n\n[사용자에 대해 기억하는 정보]\n" + memories.map((m) => `- ${m}`).join("\n");
   // 학습된 업무 스킬 인덱스 — 반복·유사 작업이면 skill_list로 전체 절차를 읽고 재사용하게 안내
   try {
-    const skillIdx = (db.prepare("SELECT name, prompt FROM skills WHERE prompt LIKE '[적용 조건]%' ORDER BY created_at DESC LIMIT 8").all() as any[])
+    const skillIdx = (db.prepare("SELECT name, prompt FROM skills WHERE prompt LIKE '[적용 조건]%' AND disabled = 0 ORDER BY created_at DESC LIMIT 8").all() as any[])
       .map((s) => `- ${s.name}: ${(s.prompt.match(/\[적용 조건\] (.+)/)?.[1] ?? "").slice(0, 80)}`).join("\n");
     if (skillIdx) p += `\n\n[학습된 업무 스킬] 아래 스킬이 이 작업과 관련 있으면 skill_list로 전체 절차를 읽고 따르세요:\n${skillIdx}\n반복 작업을 성공적으로 마치면 skill_save로 절차를 스킬화하세요 — 같은 이름이면 개선 내용이 누적됩니다.`;
   } catch {}
@@ -313,6 +313,7 @@ export const chatRoute = new Hono()
         };
         send("conversation", { id: convId });
         let asstMsgId: string | null = null; // catch에서도 빈 자리표시를 정리할 수 있게 try 밖에서 추적
+        let runKey = ""; let runOk = false; let runErr = ""; // 스킬 실행 통계 귀속용 — 런 키와 실제 결과
         try {
           let userMsg: Msg | null = null;
           let parentId: string | null;
@@ -496,6 +497,7 @@ export const chatRoute = new Hono()
             }
             const { chatOnce } = await import("../providers/openaiCompat");
             const browserKey = `${convId}:${asstMsg.id}`;
+            runKey = browserKey;
             const deadline = Date.now() + (Number(getSetting("run_deadline_sec")) || 480) * 1000; // 대화 도구 루프 최대 시간 — 브라우저 열람 같은 실제 업무가 3분을 넘김
             const { runDeadlines } = await import("../team");
             runDeadlines.set(signal, deadline); // 위임된 하위 봇이 잔여 시간을 상속받게 연결 (C6)
@@ -713,6 +715,7 @@ export const chatRoute = new Hono()
           if (!content.trim()) content = "⚠️ 응답이 생성되지 않았습니다 — 같은 지시를 다시 보내주세요."; // 어떤 경로로든 빈 메시지는 저장하지 않음
           content = cleanOutput(content); // 장식 이모지 제거·마커 치환 — 화면에 정돈된 결과만 저장
           q.msgUpdate.run(content, reasoning || null, usedModel, searchMeta ? JSON.stringify(searchMeta) : null, usage?.prompt_tokens ?? null, usage?.completion_tokens ?? null, asstMsg.id);
+          runOk = true;
           emitPhase("done", "완료");
           send("done", { message: withSiblings(q.msgGet.get(asstMsg.id) as Msg) });
 
@@ -730,7 +733,8 @@ export const chatRoute = new Hono()
             notifyResult(conv?.title ?? "MyBot", content, conv?.agent_name ?? "MyBot");
           }
         } catch (e: any) {
-          if (e?.name !== "AbortError") send("error", { message: String(e?.message ?? e) });
+          runErr = String(e?.message ?? e);
+          if (e?.name !== "AbortError") send("error", { message: runErr });
           // 예외로 스트림이 끊겨도 빈 자리표시 메시지가 DB에 남지 않게 사유를 기록하고 done으로 종료
           if (asstMsgId) {
             try {
@@ -744,6 +748,7 @@ export const chatRoute = new Hono()
           }
         } finally {
           activeRuns.delete(convId!);
+          try { if (runKey) { const { closeSkillRuns } = await import("../team"); closeSkillRuns(runKey, runOk, runErr); } } catch {}
           if (conv?.agent_id) {
             const { runningAgents, agentActivity } = await import("../team");
             runningAgents.delete(conv.agent_id);

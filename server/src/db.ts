@@ -210,6 +210,17 @@ try { db.exec("ALTER TABLE agent_runs ADD COLUMN routine_id TEXT"); } catch {} /
 try { db.exec("ALTER TABLE agent_runs ADD COLUMN resume_count INTEGER"); } catch {} // 재시작 후 재개 횟수 — 3회 초과 시 error 확정
 try { db.exec("ALTER TABLE approval_rules ADD COLUMN cond TEXT"); } catch {} // A12 — 인자 조건 규칙 {"field","op","value"}
 try { db.exec("ALTER TABLE site_logins ADD COLUMN success_check TEXT"); } catch {} // C20 — 사이트별 로그인 성공 기준 (CSS 선택자 또는 url:정규식)
+try { db.exec("ALTER TABLE skills ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0"); } catch {} // A8 — 성공률 미달 자동 비활성
+try { db.exec(`CREATE TABLE IF NOT EXISTS skill_runs (
+  id TEXT PRIMARY KEY,
+  skill_id TEXT NOT NULL,
+  run_key TEXT NOT NULL,
+  agent_id TEXT,
+  ok INTEGER,               -- NULL=참조됨(런 진행 중), 1=런 성공, 0=런 실패
+  fail_reason TEXT,
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER
+)`); } catch {}
 try { db.exec(`CREATE TABLE IF NOT EXISTS handoff_requests (
   id TEXT PRIMARY KEY,
   agent_id TEXT,

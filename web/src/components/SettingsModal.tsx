@@ -492,9 +492,18 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   <H>스킬 (/명령)</H>
                   <div className="space-y-1.5">
                     {skills.map((sk) => (
-                      <div key={sk.id} className="flex items-center gap-2 rounded-lg bg-white px-2.5 py-1.5 text-xs">
+                      <div key={sk.id} className={`flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs ${sk.disabled ? "bg-stone-200 opacity-70" : "bg-white"}`}>
                         <span className="font-mono text-sky-600">/{sk.name}</span>
-                        <span className="flex-1 truncate text-stone-500">{sk.prompt}</span>
+                        <span className="flex-1 truncate text-stone-500" title={sk.last_fail ? `최근 실패: ${sk.last_fail}` : sk.prompt}>{sk.prompt}</span>
+                        {sk.run_count > 0 && (
+                          <span className={`shrink-0 text-[10px] ${sk.run_count && sk.ok_count / sk.run_count < 0.5 ? "text-red-500" : "text-stone-400"}`}>
+                            성공 {sk.ok_count}/{sk.run_count}
+                          </span>
+                        )}
+                        {sk.disabled ? (
+                          <button className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 hover:bg-amber-200" title="성공률 미달로 자동 비활성됨 — 재학습 후 다시 켜세요"
+                            onClick={() => mybotFetch(`/api/skills/${sk.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ disabled: false }) }).then(load)}>비활성 — 켜기</button>
+                        ) : null}
                         <button className="text-stone-400 hover:text-red-600" onClick={() => mybotFetch(`/api/skills/${sk.id}`, { method: "DELETE" }).then(load)}>삭제</button>
                       </div>
                     ))}
