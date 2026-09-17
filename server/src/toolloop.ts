@@ -36,6 +36,7 @@ export interface ToolCtx {
   agentId: string | null;            // 승인 게이트·builtin에 넘길 봇 id
   context: string;                   // gateApproval의 조건 평가에 쓸 지시문
   browserKey: string;                // 브라우저 페이지 스택 키 (runId 또는 convId:msgId)
+  fileRoot?: string;                 // C19 — 프로젝트 파일 네임스페이스
   signal?: AbortSignal;
   depth?: number;
   emit?: (ev: any) => void;          // 하위 위임의 진행 이벤트 통로
@@ -61,7 +62,7 @@ export async function execToolCall(tc: ToolCall, ctx: ToolCtx): Promise<{ out: s
     const { callBuiltin, withToolTimeout, BUILTIN_TOOLS, MANAGE_TOOLS } = await import("./team");
     const isBuiltin = new Set([...BUILTIN_TOOLS, ...MANAGE_TOOLS].map((t) => t.function.name)).has(tc.name);
     const inner = isBuiltin
-      ? callBuiltin(tc.name, args, ctx.agentId, ctx.signal, ctx.depth ?? 0, ctx.emit, ctx.browserKey)
+      ? callBuiltin(tc.name, args, ctx.agentId, ctx.signal, ctx.depth ?? 0, ctx.emit, ctx.browserKey, ctx.fileRoot)
       : isBrowserish(tc.name)
         ? (await import("./browser")).browserTool(ctx.browserKey, tc.name, args)
         : (await import("./mcp")).mcpCall(tc.name, args);

@@ -83,22 +83,25 @@ function withSiblings(m: Msg) {
 // 관련성 기반 장기기억 회상 (C15) — FTS5 전문검색으로 전체 기억을 대상으로 하고,
 // 점수는 검색 관련성 + 중요도(weight) + 최근성(90일 반감) 가중합. 아카이브된 기억은 제외.
 // 회상된 기억은 last_seen을 갱신한다 — 90일 미참조 아카이브의 기준.
-function recallMemories(agentId: string | null, queryText: string): string[] {
+function recallMemories(agentId: string | null, queryText: string, workspaceId?: string | null): string[] {
   const keywords = [...new Set(queryText.replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter((w) => w.length >= 2))].slice(0, 12);
-  const recent = db.prepare("SELECT rowid, content FROM memories WHERE agent_id IS ? AND archived = 0 ORDER BY created_at DESC LIMIT 10").all(agentId) as any[];
+  // C19 — 스코프: 봇 기억 + 같은 프로젝트의 공유 기억. 둘 다 없으면(사용자 전역) 프로젝트 기억은 제외
+  const scope = workspaceId ? "(agent_id IS ? OR workspace_id IS ?)" : "(agent_id IS ? AND workspace_id IS NULL)";
+  const scopeArgs = workspaceId ? [agentId, workspaceId] : [agentId];
+  const recent = db.prepare(`SELECT rowid, content FROM memories WHERE ${scope} AND archived = 0 ORDER BY created_at DESC LIMIT 10`).all(...scopeArgs) as any[];
   let hits: { rowid: number; content: string; created_at: number; weight: number; rank: number }[] = [];
   if (keywords.length) {
     const ftsQ = keywords.map((k) => `"${k.replace(/"/g, "")}"*`).join(" OR ");
     try {
       hits = db.prepare(`SELECT m.rowid, m.content, m.created_at, m.weight, f.rank
         FROM memories_fts f JOIN memories m ON m.rowid = f.rowid
-        WHERE memories_fts MATCH ? AND m.agent_id IS ? AND m.archived = 0
-        ORDER BY f.rank LIMIT 30`).all(ftsQ, agentId) as any[];
+        WHERE memories_fts MATCH ? AND ${scope.replace("agent_id", "m.agent_id").replace("workspace_id", "m.workspace_id")} AND m.archived = 0
+        ORDER BY f.rank LIMIT 30`).all(ftsQ, ...scopeArgs) as any[];
     } catch {}
     // FTS 토큰 경계에서 빠지는 부분문자열(한국어 조사 붙은 형태 등)은 LIKE로 보충 — 전수 스캔
     if (hits.length < 5) {
       const seen = new Set(hits.map((h) => h.rowid));
-      for (const r of db.prepare("SELECT rowid, content, created_at, weight FROM memories WHERE agent_id IS ? AND archived = 0").all(agentId) as any[]) {
+      for (const r of db.prepare(`SELECT rowid, content, created_at, weight FROM memories WHERE ${scope} AND archived = 0`).all(...scopeArgs) as any[]) {
         if (seen.has(r.rowid)) continue;
         const n = keywords.filter((k) => (r.content as string).includes(k)).length;
         if (n > 0) hits.push({ ...r, rank: -(n * 2) });
@@ -133,7 +136,7 @@ export function systemPrompt(mode: string, personaId?: string | null, workspaceI
         const note = readFileSync(memPath, "utf8").trim();
         if (note) p += `\n\n[이 봇의 장기 업무 노트 — agents/${agent.name}/MEMORY.md의 최신 내용이 아래에 이미 주입돼 있습니다. read_file로 다시 읽지 마세요 — 도구 라운드만 낭비됩니다. 갱신이 필요할 때만 write_file을 쓰세요]\n${note.slice(0, 1500)}`;
       }
-      const amems = recallMemories(agentId, queryText);
+      const amems = recallMemories(agentId, queryText, workspaceId); // C19 — 봇 기억 + 프로젝트 공유 기억
       if (amems.length) p += "\n\n[이 봇이 기억하는 업무 맥락]\n" + amems.map((m) => `- ${m}`).join("\n");
       const orgRule = agent.is_boss
         ? "당신은 관리자(CEO)입니다 — agent_create(봇 생성)·agent_update(역할·모델 수정, lead 옵션으로 팀장 지정/해제)·agent_delete(봇 삭제)·agent_direct(임의 봇 지시)로 전체 조직을 관리합니다. 조직이 크면 팀장을 지정해 하위 봇 관리를 위임하세요."
@@ -201,7 +204,7 @@ async function compactHistory(convId: string, path: Msg[]): Promise<{ summary: s
 
 // 대화에서 지속 저장할 가치가 있는 사실 추출 (fast 모델, 백그라운드)
 // agentId가 있으면 그 봇의 장기기억으로 저장 — 모델을 바꿔도 봇의 업무 맥락은 유지됨
-async function extractMemories(userText: string, assistantText: string, agentId?: string | null) {
+async function extractMemories(userText: string, assistantText: string, agentId?: string | null, workspaceId?: string | null) {
   if (getSetting("memory_enabled") === "0") return;
   try {
     const { endpoint, model } = resolveModel(defaultModelId());
@@ -218,7 +221,7 @@ async function extractMemories(userText: string, assistantText: string, agentId?
     for (const f of facts.slice(0, 5)) {
       const c = String(f).trim();
       if (c && !existing.has(c)) {
-        db.prepare("INSERT INTO memories (id, content, agent_id, created_at, last_seen) VALUES (?, ?, ?, ?, ?)").run(uid(), c, agentId ?? null, now(), now());
+        db.prepare("INSERT INTO memories (id, content, agent_id, created_at, last_seen, workspace_id) VALUES (?, ?, ?, ?, ?, ?)").run(uid(), c, agentId ?? null, now(), now(), workspaceId ?? null); // C19 — 프로젝트 대화의 기억은 워크스페이스 귀속
       }
     }
   } catch {}
@@ -561,8 +564,10 @@ export const chatRoute = new Hono()
               }
               send("team", ev);
             };
+            const { workspaceRoot } = await import("../team");
             const toolCtx: ToolCtx = {
               agentId: conv?.agent_id ?? null, context: userMsg?.content ?? "", browserKey, signal, emit: teamEmit,
+              fileRoot: workspaceRoot(conv?.workspace_id), // C19 — 프로젝트 대화는 파일 도구가 프로젝트 네임스페이스를 쓴다
               onStart: (n) => { calledTools.add(n); emitTool(n); },
               onGate: (n) => gatedTools.add(n),
               onDispatch: (n) => {
@@ -745,7 +750,7 @@ export const chatRoute = new Hono()
             send("title", { conversation: q.convGet.get(convId!) });
           }
           // 메모리 추출 (비차단) — 담당 봇의 장기기억으로 저장
-          if (userMsg && content) extractMemories(userMsg.content, content, conv?.agent_id).catch(() => {});
+          if (userMsg && content) extractMemories(userMsg.content, content, conv?.agent_id, conv?.workspace_id).catch(() => {});
           // 설정된 알림 채널로 결과 발송 (기본은 채팅창만)
           if (content) {
             const { notifyResult } = await import("../notify");

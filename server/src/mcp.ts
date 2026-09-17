@@ -3,9 +3,11 @@ import type { Subprocess } from "bun";
 
 export interface McpServerConf {
   name: string;
-  command: string;
+  command?: string;      // stdio — 실행할 명령
   args?: string[];
   env?: Record<string, string>;
+  url?: string;          // A11 — remote Streamable HTTP 엔드포인트
+  headers?: Record<string, string>; // remote — Authorization 등
 }
 
 interface Pending {
@@ -25,7 +27,7 @@ export class McpClient {
   private constructor(conf: McpServerConf) {
     this.name = conf.name;
     this.confKey = JSON.stringify(conf);
-    this.proc = Bun.spawn([conf.command, ...(conf.args ?? [])], {
+    this.proc = Bun.spawn([conf.command!, ...(conf.args ?? [])], {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "inherit",
@@ -106,9 +108,91 @@ export class McpClient {
   close() { try { this.proc.kill(); } catch {} }
 }
 
+// A11 — remote MCP (Streamable HTTP): 같은 JSON-RPC를 HTTP POST로 주고받는다.
+// 응답은 application/json 또는 text/event-stream(SSE) 둘 다 받을 수 있다 — 서버가 골라 보낸다.
+export class McpHttpClient {
+  name: string;
+  confKey: string;
+  private url: string;
+  private hdrs: Record<string, string>;
+  private sessionId?: string;
+  private nextId = 1;
+
+  private constructor(conf: McpServerConf) {
+    this.name = conf.name;
+    this.confKey = JSON.stringify(conf);
+    this.url = conf.url!;
+    this.hdrs = conf.headers ?? {};
+  }
+
+  static async connect(conf: McpServerConf): Promise<McpHttpClient> {
+    const client = new McpHttpClient(conf);
+    await client.request("initialize", {
+      protocolVersion: "2025-03-26",
+      capabilities: {},
+      clientInfo: { name: "mybot", version: "0.1.0" },
+    });
+    client.notify("notifications/initialized");
+    return client;
+  }
+
+  private async post(msg: any, expectReply: boolean): Promise<any> {
+    const res = await fetch(this.url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        ...(this.sessionId ? { "mcp-session-id": this.sessionId } : {}),
+        ...this.hdrs,
+      },
+      body: JSON.stringify(msg),
+      signal: AbortSignal.timeout(20_000),
+    });
+    const sid = res.headers.get("mcp-session-id");
+    if (sid) this.sessionId = sid;
+    if (!expectReply) return null;
+    const ct = res.headers.get("content-type") ?? "";
+    if (ct.includes("text/event-stream")) {
+      // SSE — data: {...} 줄에서 우리 요청 id의 응답을 찾는다
+      const text = await res.text();
+      for (const line of text.split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        try { const m = JSON.parse(line.slice(5).trim()); if (m.id === msg.id) return m; } catch {}
+      }
+      throw new Error("MCP SSE 응답에 결과 없음");
+    }
+    if (!res.ok) throw new Error(`MCP HTTP ${res.status}`);
+    return res.json();
+  }
+
+  private async request(method: string, params?: object): Promise<any> {
+    const msg = { jsonrpc: "2.0", id: this.nextId++, method, params };
+    const r = await this.post(msg, true);
+    if (r?.error) throw new Error(r.error.message ?? "MCP error");
+    return r?.result;
+  }
+
+  private notify(method: string, params?: object) {
+    this.post({ jsonrpc: "2.0", method, params }, false).catch(() => {});
+  }
+
+  async listTools(): Promise<{ name: string; description?: string; inputSchema?: object }[]> {
+    const res = await this.request("tools/list");
+    return (res?.tools ?? []).map((t: any) => ({ name: `${this.name}__${t.name}`, description: t.description, inputSchema: t.inputSchema, _orig: t.name }));
+  }
+
+  async callTool(origName: string, args: object): Promise<string> {
+    const res = await this.request("tools/call", { name: origName, arguments: args });
+    const parts = res?.content ?? [];
+    return parts.map((p: any) => (p.type === "text" ? p.text : JSON.stringify(p))).join("\n");
+  }
+
+  close() {} // HTTP는 유지할 연결이 없다 — 세션 id는 서버가 만료 관리
+}
+
 // --- 도구 레지스트리: 설정된 MCP 서버들을 지연 연결 ---
-const clients = new Map<string, McpClient>();
-const toolMap = new Map<string, { client: McpClient; orig: string; description?: string; inputSchema?: object }>();
+const clients = new Map<string, McpClient | McpHttpClient>();
+const toolMap = new Map<string, { client: McpClient | McpHttpClient; orig: string; description?: string; inputSchema?: object }>();
 
 export function getMcpServers(): McpServerConf[] {
   try { return JSON.parse(getSetting("mcp_servers") ?? "[]"); } catch { return []; }
@@ -128,7 +212,7 @@ export async function mcpTools(): Promise<{ name: string; description?: string; 
   const out: { name: string; description?: string; inputSchema?: object }[] = [];
   for (const conf of confs) {
     try {
-      if (!clients.has(conf.name)) clients.set(conf.name, await McpClient.connect(conf));
+      if (!clients.has(conf.name)) clients.set(conf.name, conf.url ? await McpHttpClient.connect(conf) : await McpClient.connect(conf));
       const client = clients.get(conf.name)!;
       // 죽은 프로세스면 listTools가 throw → 클라이언트를 버려 다음 호출 때 재연결
       const tools = await client.listTools();

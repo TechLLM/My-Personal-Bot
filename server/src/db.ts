@@ -198,6 +198,10 @@ try { db.exec("ALTER TABLE messages ADD COLUMN attachments TEXT"); } catch {}
 try { db.exec("ALTER TABLE routines ADD COLUMN agent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE routines ADD COLUMN trigger_type TEXT NOT NULL DEFAULT 'schedule'"); } catch {}
 try { db.exec("ALTER TABLE routines ADD COLUMN email_filter TEXT"); } catch {}
+try { db.exec("ALTER TABLE routines ADD COLUMN webhook_token TEXT"); } catch {} // A9 — 웹훅 트리거 수신 토큰
+try { db.exec("ALTER TABLE routines ADD COLUMN match_rule TEXT"); } catch {} // A9 — 웹훅 매칭 규칙 {"sender_field","sender","contains":[]}
+try { db.exec("ALTER TABLE agents ADD COLUMN workspace_id TEXT"); } catch {} // C19 — 봇의 프로젝트(워크스페이스) 배정
+try { db.exec("ALTER TABLE memories ADD COLUMN workspace_id TEXT"); } catch {} // C19 — 프로젝트 공유 메모리
 try { db.exec("ALTER TABLE skills ADD COLUMN agent_id TEXT"); } catch {} // 구 스키마 호환 (신규 DB는 위 CREATE에 포함)
 try { db.exec("ALTER TABLE agents ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0"); } catch {}

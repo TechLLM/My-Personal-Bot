@@ -192,6 +192,7 @@ export interface Agent {
   parent_id?: string | null;
   pinned?: number;
   hidden?: number;
+  workspace_id?: string | null;
   created_at: number;
 }
 

@@ -16,6 +16,12 @@ export const workspacesRoute = new Hono()
     const w = db.prepare("SELECT * FROM workspaces WHERE id = ?").get(c.req.param("id")) as any;
     if (!w) return c.json({ error: "not found" }, 404);
     db.prepare("UPDATE workspaces SET name = ?, instructions = ? WHERE id = ?").run(b.name ?? w.name, b.instructions ?? w.instructions, w.id);
+    // C19 — 봇 배정: agent_ids가 오면 그 봇들의 workspace_id를 이 프로젝트로 동기화
+    if (Array.isArray(b.agent_ids)) {
+      db.prepare("UPDATE agents SET workspace_id = NULL WHERE workspace_id = ?").run(w.id);
+      const ins = db.prepare("UPDATE agents SET workspace_id = ? WHERE id = ?");
+      for (const aid of b.agent_ids) if (typeof aid === "string") ins.run(w.id, aid);
+    }
     return c.json({ workspace: db.prepare("SELECT * FROM workspaces WHERE id = ?").get(w.id) });
   })
   .delete("/:id", (c) => {

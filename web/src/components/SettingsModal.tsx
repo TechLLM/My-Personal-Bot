@@ -116,6 +116,15 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   const [skName, setSkName] = useState(""); const [skPrompt, setSkPrompt] = useState("");
   const [rName, setRName] = useState(""); const [rPrompt, setRPrompt] = useState("");
   const [rSched, setRSched] = useState("daily:08:00");
+  const [rTrig, setRTrig] = useState<"schedule" | "email" | "webhook">("schedule");
+  const [rMatchField, setRMatchField] = useState(""); const [rMatchSender, setRMatchSender] = useState(""); const [rMatchKw, setRMatchKw] = useState("");
+  const [rMailFrom, setRMailFrom] = useState(""); const [rMailSubj, setRMailSubj] = useState("");
+  const [hookUrl, setHookUrl] = useState("");
+  const [rRuns, setRRuns] = useState<Record<string, any[]>>({}); // 펼쳐진 루틴별 실행 이력 (A10)
+  // MCP 서버 추가 폼 (A11)
+  const [mcName, setMcName] = useState(""); const [mcType, setMcType] = useState<"remote" | "stdio">("remote");
+  const [mcUrl, setMcUrl] = useState(""); const [mcHdrs, setMcHdrs] = useState(""); const [mcCmd, setMcCmd] = useState("");
+  const [wsAgentsOpen, setWsAgentsOpen] = useState(""); // C19 — 봇 배정 펼친 워크스페이스 id
   const [agents, setAgents] = useState<Agent[]>([]);
   const [aName, setAName] = useState(""); const [aRole, setARole] = useState(""); const [aModel, setAModel] = useState("");
   const [rAgent, setRAgent] = useState("");
@@ -305,8 +314,16 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                         {routines.some((r) => r.agent_id === a.id && r.enabled) && (
                           <span className="flex items-center gap-0.5 rounded bg-amber-100 px-1 text-[9px] text-amber-700"><AlarmClock size={9} /> 루틴</span>
                         )}
+                        <button className="ml-auto text-stone-400 hover:text-stone-700" title="봇 구성을 JSON으로보내기" onClick={() => {
+                          mybotFetch(`/api/agents/${a.id}/export`).then((r) => r.json()).then((d) => {
+                            const blob = new Blob([JSON.stringify(d, null, 2)], { type: "application/json" });
+                            const el = document.createElement("a");
+                            el.href = URL.createObjectURL(blob); el.download = `mybot-${a.name}.json`; el.click();
+                            URL.revokeObjectURL(el.href);
+                          });
+                        }}>보내기</button>
                         {!a.is_boss && (
-                          <button className="ml-auto text-stone-400 hover:text-red-600" onClick={() => mybotFetch(`/api/agents/${a.id}`, { method: "DELETE" }).then(load)}><Trash2 size={12} /></button>
+                          <button className="text-stone-400 hover:text-red-600" onClick={() => mybotFetch(`/api/agents/${a.id}`, { method: "DELETE" }).then(load)}><Trash2 size={12} /></button>
                         )}
                       </div>
                       <div className="mt-0.5 truncate text-stone-500">{a.role_prompt}</div>
@@ -327,6 +344,16 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     if (!aName.trim()) return;
                     api.addAgent({ name: aName, role_prompt: aRole, model: aModel || undefined, avatar: "" }).then(() => { setAName(""); setARole(""); setAModel(""); load(); });
                   }}>봇 추가</button>
+                  <label className="block cursor-pointer text-center">
+                    <input type="file" accept=".json" className="hidden" onChange={(e) => {
+                      const f = e.target.files?.[0]; if (!f) return;
+                      f.text().then((t) => mybotFetch("/api/agents/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: t }).then((r) => r.json()).then((d) => {
+                        if (d.error) alert(d.error); else load();
+                      }));
+                      e.target.value = "";
+                    }} />
+                    <span className="inline-block rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs text-stone-600 hover:bg-stone-300">JSON 파일에서 봇 가져오기</span>
+                  </label>
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2">
                   <Field k="agent_cap_total" label="전체 봇 정원(초과 시 승인 필요)" ph="20" />
@@ -392,17 +419,40 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                       <div className="flex items-center gap-2">
                         <button onClick={() => mybotFetch(`/api/routines/${r.id}/toggle`, { method: "POST" }).then(load)} className={r.enabled ? "text-emerald-600" : "text-stone-400"}>{r.enabled ? "●" : "○"}</button>
                         <span className="font-medium">{r.name}</span>
-                        <span className="text-stone-500">{r.schedule}</span>
+                        <span className="text-stone-500">{r.trigger_type === "webhook" ? "웹훅" : r.trigger_type === "email" ? "이메일" : r.schedule}</span>
                         {r.agent_id && (
                           <span className="flex items-center gap-1 text-stone-400">
                             <AgentIcon name={agents.find((a) => a.id === r.agent_id)?.name} seed={agents.find((a) => a.id === r.agent_id)?.avatar} size={12} />
                             {agents.find((a) => a.id === r.agent_id)?.name ?? "봇"}
                           </span>
                         )}
-                        <button className="ml-auto text-stone-400 hover:text-sky-600" onClick={() => mybotFetch(`/api/routines/${r.id}/run`, { method: "POST" }).then(load)}>지금 실행</button>
+                        <button className="ml-auto text-stone-400 hover:text-stone-700" title="최근 실행 이력"
+                          onClick={() => rRuns[r.id]
+                            ? setRRuns((p) => { const n = { ...p }; delete n[r.id]; return n; })
+                            : mybotFetch(`/api/routines/${r.id}/runs`).then((x) => x.json()).then((d) => setRRuns((p) => ({ ...p, [r.id]: d.runs })))}>{rRuns[r.id] ? "이력 ▴" : "이력 ▾"}</button>
+                        <button className="text-stone-400 hover:text-sky-600" onClick={() => mybotFetch(`/api/routines/${r.id}/run`, { method: "POST" }).then(load)}>지금 실행</button>
                         <button className="text-stone-400 hover:text-red-600" onClick={() => mybotFetch(`/api/routines/${r.id}`, { method: "DELETE" }).then(load)}>삭제</button>
                       </div>
                       <div className="mt-0.5 truncate text-stone-500">{r.prompt}</div>
+                      {r.webhook_token && (
+                        <div className="mt-1 truncate text-[10px] text-stone-400">
+                          웹훅 URL: <code className="rounded bg-stone-100 px-1">POST /api/hooks/{r.webhook_token}</code>
+                        </div>
+                      )}
+                      {rRuns[r.id] && (
+                        <div className="mt-1.5 max-h-40 space-y-1 overflow-y-auto rounded bg-stone-50 p-1.5">
+                          {rRuns[r.id]!.length === 0 && <div className="text-[10px] text-stone-400">실행 이력 없음</div>}
+                          {rRuns[r.id]!.map((run: any) => (
+                            <div key={run.id} className="text-[10px] text-stone-600">
+                              <span className={run.status === "done" ? "text-emerald-600" : run.status === "error" ? "text-red-500" : "text-amber-600"}>{run.status === "done" ? "성공" : run.status === "error" ? "실패" : run.status}</span>
+                              {" "}{new Date(run.created_at).toLocaleString("ko-KR", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                              {run.finished_at && <span className="text-stone-400"> · {Math.round((run.finished_at - run.created_at) / 1000)}s · {run.steps}단계</span>}
+                              {(() => { try { const tl = JSON.parse(run.tool_log ?? "[]"); return tl.length ? <span className="text-stone-400"> · 도구 {tl.length}회</span> : null; } catch { return null; } })()}
+                              {run.result && <div className="truncate text-stone-400">{run.result.slice(0, 120)}</div>}
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -413,18 +463,58 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                       <option value="">담당 봇 없음</option>
                       {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
                     </select>
-                    <select className="rounded-lg bg-stone-200 px-2 py-1.5 text-xs outline-none" value={rSched} onChange={(e) => setRSched(e.target.value)}>
-                      <option value="every:30m">30분마다</option>
-                      <option value="every:2h">2시간마다</option>
-                      <option value="daily:08:00">매일 08:00</option>
-                      <option value="daily:17:00">매일 17:00</option>
+                    <select className="rounded-lg bg-stone-200 px-2 py-1.5 text-xs outline-none" value={rTrig} onChange={(e) => setRTrig(e.target.value as any)} title="트리거">
+                      <option value="schedule">예약</option>
+                      <option value="email">이메일 수신</option>
+                      <option value="webhook">웹훅</option>
                     </select>
+                    {rTrig === "schedule" && (
+                      <select className="rounded-lg bg-stone-200 px-2 py-1.5 text-xs outline-none" value={rSched} onChange={(e) => setRSched(e.target.value)}>
+                        <option value="every:30m">30분마다</option>
+                        <option value="every:2h">2시간마다</option>
+                        <option value="daily:08:00">매일 08:00</option>
+                        <option value="daily:17:00">매일 17:00</option>
+                      </select>
+                    )}
                   </div>
-                  <textarea className={Input} rows={2} placeholder="예약 실행할 프롬프트 (예: 오늘 AI 뉴스 요약)" value={rPrompt} onChange={(e) => setRPrompt(e.target.value)} />
+                  {rTrig === "email" && (
+                    <div className="flex gap-1.5">
+                      <input className={`${Input} flex-1`} placeholder="발신자 필터 (선택 — 예: boss@corp.com)" value={rMailFrom} onChange={(e) => setRMailFrom(e.target.value)} />
+                      <input className={`${Input} flex-1`} placeholder="제목 필터 (선택 — 예: [긴급])" value={rMailSubj} onChange={(e) => setRMailSubj(e.target.value)} />
+                    </div>
+                  )}
+                  {rTrig === "webhook" && (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] text-stone-500">매칭 규칙:</span>
+                        <button className="rounded bg-stone-200 px-1.5 py-0.5 text-[10px] hover:bg-stone-300" onClick={() => { setRMatchField("user_name"); setRMatchSender(""); setRMatchKw(""); }}>Slack 프리셋</button>
+                        <button className="rounded bg-stone-200 px-1.5 py-0.5 text-[10px] hover:bg-stone-300" onClick={() => { setRMatchField("sender.login"); setRMatchSender(""); setRMatchKw(""); }}>GitHub 프리셋</button>
+                      </div>
+                      <div className="flex gap-1.5">
+                        <input className={`${Input} flex-1`} placeholder="발신자 필드 (점 경로 — Slack: user_name, GitHub: sender.login)" value={rMatchField} onChange={(e) => setRMatchField(e.target.value)} />
+                        <input className={`${Input} flex-1`} placeholder="발신자 값 (선택 — 정확 일치)" value={rMatchSender} onChange={(e) => setRMatchSender(e.target.value)} />
+                      </div>
+                      <input className={Input} placeholder="본문 필수 키워드 (쉼표 구분 — 모두 포함돼야 발화, 비우면 전부 수신)" value={rMatchKw} onChange={(e) => setRMatchKw(e.target.value)} />
+                    </div>
+                  )}
+                  <textarea className={Input} rows={2} placeholder="실행할 프롬프트 (예: 오늘 AI 뉴스 요약)" value={rPrompt} onChange={(e) => setRPrompt(e.target.value)} />
                   <button className={Btn} onClick={() => {
                     if (!rName.trim() || !rPrompt.trim()) return;
-                    mybotFetch("/api/routines", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: rName, prompt: rPrompt, schedule: rSched, agent_id: rAgent || undefined }) }).then(() => { setRName(""); setRPrompt(""); setRAgent(""); load(); });
+                    const body: any = { name: rName, prompt: rPrompt, schedule: rSched, agent_id: rAgent || undefined, trigger_type: rTrig };
+                    if (rTrig === "email") body.email_filter = { from: rMailFrom || undefined, subject: rMailSubj || undefined };
+                    if (rTrig === "webhook") body.match_rule = { sender_field: rMatchField || undefined, sender: rMatchSender || undefined, contains: rMatchKw.split(",").map((s) => s.trim()).filter(Boolean) };
+                    mybotFetch("/api/routines", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+                      .then((r) => r.json()).then((d) => {
+                        if (d.routine?.webhook_url) setHookUrl(`${location.origin}${d.routine.webhook_url}`);
+                        setRName(""); setRPrompt(""); setRAgent(""); load();
+                      });
                   }}>루틴 추가</button>
+                  {hookUrl && (
+                    <div className="rounded-lg bg-sky-50 px-2.5 py-2 text-[11px] text-sky-800">
+                      웹훅 URL이 발급됐습니다 — 이 주소로 POST하면 루틴이 발화됩니다:
+                      <code className="mt-1 block select-all break-all rounded bg-white px-2 py-1 font-mono text-[10px]">{hookUrl}</code>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -471,11 +561,30 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   <H>워크스페이스</H>
                   <div className="space-y-1.5">
                     {workspaces.map((w) => (
-                      <div key={w.id} className="flex items-center gap-2 rounded-lg bg-white px-2.5 py-1.5 text-xs">
-                        <Folder size={13} className="shrink-0 text-stone-500" />
-                        <span>{w.name}</span>
-                        <span className="flex-1 truncate text-stone-500">{w.instructions}</span>
-                        <button className="text-stone-400 hover:text-red-600" onClick={() => mybotFetch(`/api/workspaces/${w.id}`, { method: "DELETE" }).then(load)}>삭제</button>
+                      <div key={w.id} className="rounded-lg bg-white px-2.5 py-1.5 text-xs">
+                        <div className="flex items-center gap-2">
+                          <Folder size={13} className="shrink-0 text-stone-500" />
+                          <span>{w.name}</span>
+                          <span className="flex-1 truncate text-stone-500">{w.instructions}</span>
+                          <button className="text-stone-400 hover:text-stone-700" onClick={() => setWsAgentsOpen(wsAgentsOpen === w.id ? "" : w.id)}>봇 배정</button>
+                          <button className="text-stone-400 hover:text-red-600" onClick={() => mybotFetch(`/api/workspaces/${w.id}`, { method: "DELETE" }).then(load)}>삭제</button>
+                        </div>
+                        {/* C19 — 프로젝트 배정 봇: 이 프로젝트 대화는 봇들의 공유 메모리·전용 파일 폴더를 쓴다 */}
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {agents.filter((a) => a.workspace_id === w.id).map((a) => (
+                            <span key={a.id} className="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] text-sky-700">{a.name}</span>
+                          ))}
+                          {wsAgentsOpen === w.id && agents.map((a) => (
+                            <label key={a.id} className="flex items-center gap-1 rounded bg-stone-100 px-1.5 py-0.5 text-[10px]">
+                              <input type="checkbox" checked={a.workspace_id === w.id} onChange={() => {
+                                const cur = new Set(agents.filter((x) => x.workspace_id === w.id).map((x) => x.id));
+                                if (cur.has(a.id)) cur.delete(a.id); else cur.add(a.id);
+                                mybotFetch(`/api/workspaces/${w.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agent_ids: [...cur] }) }).then(load);
+                              }} />
+                              {a.name}
+                            </label>
+                          ))}
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -515,6 +624,56 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                       if (!skName.trim()) return;
                       mybotFetch("/api/skills", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: skName, prompt: skPrompt }) }).then(() => { setSkName(""); setSkPrompt(""); load(); });
                     }}>스킬 추가</button>
+                  </div>
+                </div>
+                <div>
+                  <H>MCP 서버 (stdio · remote HTTP)</H>
+                  <p className="mb-2 text-[11px] leading-relaxed text-stone-400">
+                    외부 MCP 서버의 도구를 봇이 사용합니다. stdio는 로컬 명령 실행, remote는 HTTP 엔드포인트 URL입니다.
+                  </p>
+                  <div className="space-y-1.5">
+                    {(() => { try { return JSON.parse(s.mcp_servers ?? "[]") as any[]; } catch { return []; } })().map((m: any, i: number) => (
+                      <div key={i} className="flex items-center gap-2 rounded-lg bg-white px-2.5 py-1.5 text-xs">
+                        <span className="font-medium">{m.name}</span>
+                        <span className="flex-1 truncate text-stone-500">{m.url ? `remote: ${m.url}` : `stdio: ${m.command} ${(m.args ?? []).join(" ")}`}</span>
+                        <button className="text-stone-400 hover:text-red-600" onClick={() => {
+                          const list = (JSON.parse(s.mcp_servers ?? "[]") as any[]).filter((_: any, j: number) => j !== i);
+                          mybotFetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mcp_servers: JSON.stringify(list) }) }).then(load);
+                        }}>삭제</button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-2 space-y-1.5">
+                    <div className="flex gap-1.5">
+                      <input className="w-28 rounded-lg bg-stone-200 px-2 py-1.5 text-xs outline-none" placeholder="서버 이름" value={mcName} onChange={(e) => setMcName(e.target.value)} />
+                      <select className="rounded-lg bg-stone-200 px-2 py-1.5 text-xs outline-none" value={mcType} onChange={(e) => setMcType(e.target.value as any)}>
+                        <option value="remote">remote HTTP</option>
+                        <option value="stdio">stdio</option>
+                      </select>
+                    </div>
+                    {mcType === "remote" ? (
+                      <>
+                        <input className={Input} placeholder="엔드포인트 URL (예: https://mcp.example.com/mcp)" value={mcUrl} onChange={(e) => setMcUrl(e.target.value)} />
+                        <input className={Input} placeholder='헤더 JSON (선택 — {"Authorization":"Bearer …"})' value={mcHdrs} onChange={(e) => setMcHdrs(e.target.value)} />
+                      </>
+                    ) : (
+                      <input className={Input} placeholder="실행 명령 (예: npx -y @modelcontextprotocol/server-everything)" value={mcCmd} onChange={(e) => setMcCmd(e.target.value)} />
+                    )}
+                    <button className={Btn} onClick={() => {
+                      if (!mcName.trim()) return;
+                      let list: any[] = []; try { list = JSON.parse(s.mcp_servers ?? "[]"); } catch {}
+                      if (mcType === "remote") {
+                        if (!mcUrl.trim()) return;
+                        let hdrs: any; try { hdrs = mcHdrs.trim() ? JSON.parse(mcHdrs) : undefined; } catch { return; }
+                        list.push({ name: mcName.trim(), url: mcUrl.trim(), headers: hdrs });
+                      } else {
+                        const parts = mcCmd.trim().split(/\s+/).filter(Boolean);
+                        if (!parts.length) return;
+                        list.push({ name: mcName.trim(), command: parts[0], args: parts.slice(1) });
+                      }
+                      mybotFetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mcp_servers: JSON.stringify(list) }) })
+                        .then(() => { setMcName(""); setMcUrl(""); setMcHdrs(""); setMcCmd(""); load(); });
+                    }}>서버 추가</button>
                   </div>
                 </div>
                 <div>

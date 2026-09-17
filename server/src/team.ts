@@ -31,6 +31,7 @@ export interface Agent {
   hidden: number;
   max_children: number | null;
   sort_order: number | null;
+  workspace_id?: string | null; // C19 — 프로젝트 배정
   created_at: number;
 }
 
@@ -101,6 +102,7 @@ export interface TeamAgentState {
   toolLog: ToolLogEntry[];
   depth: number; // 위임 깊이 — agent_direct 재귀 제한용
   verifyIntent?: boolean; // false면 지시-실측 검증 생략 — 봇 간 메시지(보고·알림)는 지시가 아니라서 의도 파싱이 오독됨
+  fileRoot?: string;      // C19 — 프로젝트 파일 네임스페이스 (없으면 공유 WORK_DIR)
 }
 
 type Emit = (ev: object) => void;
@@ -174,7 +176,7 @@ export function renameAgentFolder(oldName: string, newName: string): string {
 // C14: 봇이 준 경로를 NFC로 정규화한다. macOS는 NFD로 저장하므로 같은 이름이 두 파일로
 // 갈라질 수 있고, 실제로 "논문분석…"/"논ᆫ문분석…" 중복이 생겼다. NFC 후에도 남는 낱자모
 // (U+1100~U+11FF)는 모델이 만든 깨진 파일명이므로 제거한다. 기존 NFD 파일은 폴백으로 계속 읽는다.
-function safePath(p: string): string {
+function safePath(p: string, root = WORK_DIR): string {
   const clean = String(p ?? "")
     .normalize("NFC")
     .replace(/[\u1100-\u11FF]/g, "")
@@ -182,10 +184,20 @@ function safePath(p: string): string {
     .split("/")
     .filter((s) => s !== ".." && s !== ".")
     .join("/");
-  const nfc = join(WORK_DIR, clean);
+  const nfc = join(root, clean);
   if (existsSync(nfc)) return nfc;
-  const nfd = join(WORK_DIR, clean.normalize("NFD"));
+  const nfd = join(root, clean.normalize("NFD"));
   return existsSync(nfd) ? nfd : nfc; // 신규 생성은 항상 NFC
+}
+
+// C19 — 프로젝트(워크스페이스) 파일 네임스페이스: WORK_DIR/projects/<워크스페이스명>
+export function workspaceRoot(workspaceId?: string | null): string | undefined {
+  if (!workspaceId) return undefined;
+  const ws = db.prepare("SELECT name FROM workspaces WHERE id = ?").get(workspaceId) as any;
+  if (!ws) return undefined;
+  const dir = join(WORK_DIR, "projects", String(ws.name).replace(/[/\\]/g, "_"));
+  mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 export const BUILTIN_TOOLS = [
@@ -265,7 +277,8 @@ export function closeSkillRuns(runKey: string, ok: boolean, reason?: string) {
   }
 }
 
-export async function callBuiltin(name: string, args: Record<string, unknown>, agentId?: string | null, signal?: AbortSignal, depth = 0, emit?: (ev: any) => void, runKey?: string): Promise<string> {
+export async function callBuiltin(name: string, args: Record<string, unknown>, agentId?: string | null, signal?: AbortSignal, depth = 0, emit?: (ev: any) => void, runKey?: string, fileRoot?: string): Promise<string> {
+  const ROOT = fileRoot ?? WORK_DIR; // C19 — 프로젝트 대화면 파일 도구가 그 네임스페이스를 쓴다
   // --- 봇 협업·관리 도구 ---
   if (name === "agent_list") {
     const ck = agentId ?? "global";
@@ -353,6 +366,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
         id: target.id, runId, name: target.name, avatar: target.avatar ?? "🤖",
         role: target.role_prompt, task: `${caller?.name ?? "사용자"} 봇이 지시한 업무입니다. 수행하고 결과를 보고하세요.\n\n${inst}`,
         model: target.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: depth + 1,
+        fileRoot: fileRoot ?? workspaceRoot(target.workspace_id), // C19 — 호출 측 프로젝트 네임스페이스 상속, 아니면 봇 배정 프로젝트
       };
       // 화면에 하위 봇 작업이 실시간으로 보이도록 이벤트 전파 (봇 카드 + 작업 애니메이션)
       emit?.({ type: "agent_join", agent: { id: target.id, name: target.name, avatar: target.avatar, role: target.role_prompt, task: inst.slice(0, 200), model: target.model, model_label: modelLabel(target.model ?? defaultModel()), runId } });
@@ -459,7 +473,8 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     if (!content) return "오류: content 필요";
     const dup = db.prepare("SELECT id FROM memories WHERE agent_id IS ? AND content = ?").get(agentId ?? null, content);
     if (dup) return "이미 기억하고 있는 내용입니다";
-    db.prepare("INSERT INTO memories (id, content, agent_id, created_at, last_seen, weight) VALUES (?, ?, ?, ?, ?, 2)").run(uid(), content.slice(0, 500), agentId ?? null, now(), now()); // 봇이 직접 저장한 기억은 중요도 가산 (C15)
+    const wsId = agentId ? (db.prepare("SELECT workspace_id FROM agents WHERE id = ?").get(agentId) as any)?.workspace_id ?? null : null;
+    db.prepare("INSERT INTO memories (id, content, agent_id, created_at, last_seen, weight, workspace_id) VALUES (?, ?, ?, ?, ?, 2, ?)").run(uid(), content.slice(0, 500), agentId ?? null, now(), now(), wsId); // 봇이 직접 저장한 기억은 중요도 가산 (C15) + 프로젝트 배정 시 워크스페이스 귀속 (C19)
     return "장기기억에 저장했습니다 — 세션이 압축되거나 끝나도 유지됩니다";
   }
   if (name === "request_credentials") {
@@ -582,7 +597,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
   }
   if (name === "read_file") {
     const filePath = pickStr(args, "path", "file", "filename", "file_path");
-    const p = safePath(filePath);
+    const p = safePath(filePath, ROOT);
     if (!existsSync(p)) return `파일 없음: ${filePath} — list_files로 실제 경로를 확인하세요`;
     // 디렉터리를 넘기면 readFileSync가 EISDIR로 터짐 — 명확한 안내로 대체 (list_files 안내)
     if (statSync(p).isDirectory()) return `경로가 파일이 아닌 디렉터리입니다: ${filePath} — 하위 항목은 list_files로 확인하세요`;
@@ -592,7 +607,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
   }
   if (name === "write_file") {
     const filePath = pickStr(args, "path", "file", "filename", "file_path");
-    const p = safePath(filePath);
+    const p = safePath(filePath, ROOT);
     // 기존 디렉터리에 쓰기를 시도하면 EISDIR — 조기에 명확한 오류 반환
     if (existsSync(p) && statSync(p).isDirectory()) return `경로가 디렉터리입니다: ${filePath} — 파일명을 지정하세요`;
     mkdirSync(join(p, ".."), { recursive: true }); // 하위 디렉터리 자동 생성 — ENOENT 재시도 방지
@@ -601,7 +616,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
   }
   if (name === "list_files") {
     const sub = pickStr(args, "path", "dir", "directory");
-    const p = sub ? safePath(sub) : WORK_DIR;
+    const p = sub ? safePath(sub, ROOT) : ROOT;
     if (!existsSync(p)) return `경로 없음: ${sub || "."} — 상위 항목은 list_files()로 확인하세요`;
     if (!statSync(p).isDirectory()) return `디렉터리가 아닙니다: ${sub} — 파일은 read_file로 읽으세요`;
     const entries = readdirSync(p).map((e) => statSync(join(p, e)).isDirectory() ? `${e}/` : e);
@@ -838,7 +853,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
       // 위임 호출이 여러 개면 병렬로 실행하고 나머지는 순차 유지 (페이지·경로 공유 충돌 방지).
       const tcs = res.toolCalls;
       const outs = await execToolBatch(tcs, {
-        agentId: agent.id, context: state.task, browserKey: state.runId, signal, depth: state.depth, emit: trackEmit,
+        agentId: agent.id, context: state.task, browserKey: state.runId, signal, depth: state.depth, emit: trackEmit, fileRoot: state.fileRoot,
         onStart: (n) => { calledTools.add(n); trackEmit({ type: "agent_step", agentId: state.id, runId: state.runId, tool: n }); },
         onGate: (n) => gatedTools.add(n),
         onEnd: (n, out, ok, ms) => {
@@ -998,7 +1013,9 @@ export async function runTeamTasks(
   signal?: AbortSignal,
 ): Promise<TeamAgentState[]> {
   const { existing, busyIds } = rosterInfo();
-  const convOwner = (db.prepare("SELECT agent_id FROM conversations WHERE id = ?").get(convId) as any)?.agent_id ?? null;
+  const convRow = db.prepare("SELECT agent_id, workspace_id FROM conversations WHERE id = ?").get(convId) as any;
+  const convOwner = convRow?.agent_id ?? null;
+  const convFileRoot = workspaceRoot(convRow?.workspace_id); // C19 — 팀 실행도 프로젝트 네임스페이스 상속
   const states: TeamAgentState[] = tasks.map((t) => {
     const reuse = t.agent ? existing.find((a) => a.name === t.agent && !busyIds.has(a.id) && !a.is_boss) : undefined;
     const agent = reuse ?? createAgent(t, convOwner); // 팀 생성 봇의 상위 = 이 대화를 소유한 봇
@@ -1010,6 +1027,7 @@ export async function runTeamTasks(
       name: agent.name, avatar: agent.avatar ?? "🤖",
       role: agent.role_prompt, task: t.task,
       model: agent.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: 0,
+      fileRoot: convFileRoot ?? workspaceRoot(agent.workspace_id),
     };
   });
   emit({ type: "team_plan", agents: states.map((s) => ({ id: s.id, name: s.name, avatar: s.avatar, role: s.role, task: s.task, model: s.model, model_label: modelLabel(s.model) })) });
@@ -1041,6 +1059,7 @@ export interface DetachedRunOpts {
   notifyTitle?: string;                // 설정하면 notifyResult로 결과 발송
   verifyIntent?: boolean;              // false면 지시-실측 검증 생략 (보고 메시지 등)
   runId?: string;                      // 기존 run 이어달리기 (resumeAgentRun)
+  fileRoot?: string;                   // C19 — 프로젝트 파일 네임스페이스 (없으면 봇 배정 프로젝트 → 그래도 없으면 WORK_DIR)
   onDone?: (state: TeamAgentState) => void | Promise<void>; // agent_messages 갱신 같은 후처리
 }
 
@@ -1053,6 +1072,7 @@ export function runAgentDetached(agent: Agent, o: DetachedRunOpts): { runId: str
     id: agent.id, runId, name: agent.name, avatar: agent.avatar ?? "🤖", role: agent.role_prompt,
     task: o.task, model: o.model ?? agent.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: 0,
     verifyIntent: o.verifyIntent,
+    fileRoot: o.fileRoot ?? workspaceRoot(agent.workspace_id),
   };
   const done = (async () => {
     try { await runAgent(state, agent, () => {}, delegateTimeout() ?? AbortSignal.timeout(540_000)); }
@@ -1228,6 +1248,37 @@ export const agentsRoute = new Hono()
     db.prepare("UPDATE agents SET is_boss = 0").run();
     db.prepare("UPDATE agents SET is_boss = 1 WHERE id = ?").run(a.id);
     return c.json({ ok: true, agent: withAgentMeta(db.prepare("SELECT * FROM agents WHERE id = ?").get(a.id)) });
+  })
+  // 봇 구성보내기/가져오기 — 그록봇 "봇 공유"의 셀프호스팅 대응 (Phase 23)
+  // 비밀값은보내지 않는다 — 웹훅 토큰·계정 정보는 가져온 뒤 다시 발급
+  .get("/:id/export", (c) => {
+    const a = db.prepare("SELECT * FROM agents WHERE id = ?").get(c.req.param("id")) as Agent | null;
+    if (!a) return c.json({ error: "not found" }, 404);
+    return c.json({
+      mybot_agent: 1, name: a.name, role_prompt: a.role_prompt, model: a.model,
+      is_lead: a.is_lead, max_children: a.max_children,
+      skills: db.prepare("SELECT name, prompt FROM skills WHERE agent_id = ?").all(a.id),
+      routines: db.prepare("SELECT name, prompt, schedule, trigger_type, email_filter, match_rule FROM routines WHERE agent_id = ?").all(a.id),
+    });
+  })
+  .post("/import", async (c) => {
+    const b = await c.req.json().catch(() => null);
+    if (!b || b.mybot_agent !== 1 || !b.name) return c.json({ error: "보내기 형식이 아닙니다 (mybot_agent)" }, 400);
+    if (b.model && !(await listAllModelIds()).has(b.model)) return c.json({ error: `인증된 모델이 아닙니다: ${b.model}` }, 400);
+    const id = uid();
+    const name = uniqueName(String(b.name).slice(0, 30));
+    const maxOrder = (db.prepare("SELECT COALESCE(MAX(sort_order), 0) m FROM agents").get() as any).m;
+    db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, is_lead, max_children, persistent, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)")
+      .run(id, name, b.role_prompt ?? "", b.model ?? defaultModel(), `face:${id}`, b.is_lead ? 1 : 0, b.max_children ?? null, maxOrder + 1, now());
+    let skN = 0, rtN = 0;
+    for (const s of (b.skills ?? []) as any[]) {
+      try { db.prepare("INSERT INTO skills (id, name, prompt, agent_id, created_at) VALUES (?, ?, ?, ?, ?)").run(uid(), String(s.name).slice(0, 50), s.prompt ?? "", id, now()); skN++; } catch {}
+    }
+    for (const r of (b.routines ?? []) as any[]) {
+      try { db.prepare("INSERT INTO routines (id, name, schedule, prompt, agent_id, enabled, trigger_type, email_filter, match_rule, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)").run(uid(), String(r.name ?? "루틴").slice(0, 50), r.schedule ?? "daily:09:00", r.prompt ?? "", id, r.trigger_type === "webhook" ? "schedule" : (r.trigger_type ?? "schedule"), r.email_filter ?? null, r.match_rule ?? null, now()); rtN++; } catch {}
+      // 웹훅 루틴은 토큰 없이 schedule로 내려온다 — 필요하면 UI에서 webhook으로 재생성
+    }
+    return c.json({ agent: withAgentMeta(db.prepare("SELECT * FROM agents WHERE id = ?").get(id)), imported: { skills: skN, routines: rtN } });
   })
   .delete("/:id", (c) => {
     const a = db.prepare("SELECT * FROM agents WHERE id = ?").get(c.req.param("id")) as Agent | null;
