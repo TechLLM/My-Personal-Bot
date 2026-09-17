@@ -38,7 +38,7 @@ async function runRoutineInner(r: any): Promise<string> {
     role: agent.role_prompt, task: `예약된 정기 업무입니다. 수행하고 결과를 보고하세요.\n\n${r.prompt}`,
     model: useModel, status: "running", steps: 0, toolLog: [], depth: 0,
   };
-  await runAgent(state, agent, () => {}, AbortSignal.timeout(540_000));
+  await runAgent(state, agent, () => {}, (await import("./team")).delegateTimeout()!);
   db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
     .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
   const out = state.result ?? "(결과 없음)";
@@ -108,9 +108,11 @@ export function startScheduler() {
     const nowMs = Date.now();
     for (const r of rows) {
       const next = nextRunAt(r.schedule, r.last_run_at ?? r.created_at);
+      // C17 — 서버 다운·절전으로 놓친 실행은 2시간 유예까지만 보정한다.
+      // 그보다 오래된 누락은 last_run_at만 갱신해 몰아 실행되지 않게 한다.
       if (next !== null && nowMs >= next) {
         db.prepare("UPDATE routines SET last_run_at = ? WHERE id = ?").run(nowMs, r.id);
-        runRoutine(r).catch((e) => console.error(`[routine ${r.name}]`, e.message));
+        if (nowMs - next <= 2 * 3600_000) runRoutine(r).catch((e) => console.error(`[routine ${r.name}]`, e.message));
       }
     }
     if (!emailChecking) {

@@ -1,4 +1,5 @@
 import type { Endpoint } from "./index";
+import { resolveModel, nextInChain } from "./index";
 import { responsesChatOnce, responsesStream, geminiChatOnce, geminiStream, cliChatOnce, cliStream } from "./adapters";
 
 export interface ChatMessage {
@@ -15,11 +16,53 @@ export interface ToolCall {
 export interface ChatResult {
   content: string;
   toolCalls?: ToolCall[];
+  model?: string;        // 실제로 응답한 모델 — 폴백 시 요청한 것과 다를 수 있음
+  fallbackFrom?: string; // 폴백이 일어났으면 최초 실패한 모델 id
 }
 
-// 비스트리밍 호출 (도구 루프·내부용)
-// HTTP 오류는 content로 위장하지 않고 throw — 네트워크/5xx/429는 1회 재시도 (사용자 abort 제외)
+// A4 — transient 판정: 429/5xx/네트워크 단절/잔액부족(1113). TimeoutError도 포함하되
+// 호출자 신호가 abort된 경우는 호출 지점에서 먼저 걸러진다(실행 상한이면 전파해야 함)
+function isTransientErr(e: unknown): boolean {
+  const m = String((e as Error)?.message ?? e);
+  return /\b(429|5\d\d)\b/.test(m) // chatOnce는 "오류 429:", 스트림은 "이름 429:" 형식 — 둘 다 잡는다
+    || /1113|insufficient|잔액|balance|rate.?limit/i.test(m)
+    || /fetch failed|unable to connect|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|network|socket hang/i.test(m)
+    || (e as Error)?.name === "TimeoutError";
+}
+
+// 비스트리밍 호출 (도구 루프·내부용) — 프로바이더 폴백 체인 포함
+// HTTP 오류는 content로 위장하지 않고 throw — transient는 백오프 재시도 후 폴백 (사용자 abort 제외)
 export async function chatOnce(
+  endpoint: Endpoint,
+  model: string,
+  messages: any[],
+  opts: { signal?: AbortSignal; tools?: { type: string; function: { name: string; description?: string; parameters?: object } }[]; toolChoice?: string | object } = {},
+): Promise<ChatResult> {
+  let ep = endpoint, mdl = model, origin: string | null = null;
+  for (;;) {
+    try {
+      const r = await chatOnceAttempt(ep, mdl, messages, opts);
+      r.model = mdl;
+      if (origin) r.fallbackFrom = origin;
+      return r;
+    } catch (e) {
+      if (opts.signal?.aborted || !isTransientErr(e)) throw e;
+      let next = nextInChain(`${ep.id}/${mdl}`);
+      while (next) {
+        let r;
+        try { r = resolveModel(next); } catch { next = nextInChain(next); continue; } // 해석 불가 항목은 건너뛴다
+        // 도구가 필요한 실행에서 도구 미지원(CLI) 모델은 폴백 대상이 아니다
+        if (opts.tools?.length && r.endpoint.caps?.tools === false) { next = nextInChain(next); continue; }
+        ({ endpoint: ep, model: mdl } = r); break;
+      }
+      if (!next) throw e;
+      console.warn(`[mybot] 모델 폴백: ${endpoint.id}/${model} → ${ep.id}/${mdl} (${String((e as Error).message).slice(0, 80)})`);
+      origin ??= `${endpoint.id}/${model}`;
+    }
+  }
+}
+
+async function chatOnceAttempt(
   endpoint: Endpoint,
   model: string,
   messages: any[],
@@ -31,14 +74,16 @@ export async function chatOnce(
     case "gemini": return geminiChatOnce(endpoint, model, messages, { signal: opts.signal, tools: opts.tools });
     case "cli": return cliChatOnce(endpoint, model, messages, { signal: opts.signal });
   }
-  // tool_choice 객체 형식은 프록시마다 다름 — airoute는 Responses식 평탄 형식만 받아 nested 형식을 400으로 거부.
+  // tool_choice 객체 형식은 프록시마다 다름 — airoute는 Responses식 폴백 형식만 받아 nested 형식을 400으로 거부.
   // 거부되면 tool_choice 없이 재시도 (호출 지시는 프롬프트·서버 폴백이 커버)
   let toolChoice: unknown = opts.toolChoice ?? "auto";
   const makeBody = () => JSON.stringify({ model, messages, stream: false, ...(opts.tools?.length ? { tools: opts.tools, tool_choice: toolChoice } : {}) });
   let lastErr: Error | null = null;
+  const BACKOFF = [1000, 4000, 10_000]; // C9 — 지수 백오프
+  let pendingWait: number | undefined; // Retry-After 헤더가 지정한 대기
   for (let attempt = 0; attempt < 3; attempt++) {
     if (opts.signal?.aborted) break;
-    if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
+    if (attempt > 0) await new Promise((r) => setTimeout(r, pendingWait ?? BACKOFF[attempt - 1] ?? 10_000));
     let res: Response;
     try {
       res = await fetch(`${endpoint.baseUrl}/chat/completions`, {
@@ -60,7 +105,13 @@ export async function chatOnce(
       const err = new Error(`오류 ${res.status}: ${txt}`);
       // tool_choice 형식 거부 → 형식을 빼고 재시도
       if (res.status === 400 && /tool_choice/i.test(txt) && toolChoice !== "auto") { toolChoice = "auto"; continue; }
-      if (res.status >= 500 || res.status === 429) { lastErr = err; continue; } // transient만 재시도
+      if (res.status >= 500 || res.status === 429) {
+        lastErr = err;
+        // C9 — Retry-After 헤더 준수 (지정 없으면 위 백오프 적용)
+        const ra = Number(res.headers.get("retry-after"));
+        pendingWait = Number.isFinite(ra) && ra > 0 ? Math.min(ra * 1000, 30_000) : undefined;
+        continue;
+      }
       throw err; // 나머지 4xx는 즉시 실패
     }
     const data = await res.json();
@@ -82,7 +133,43 @@ export interface StreamEvent {
 }
 
 // OpenAI 호환 스트리밍. reasoning_content(DeepSeek계열), reasoning(일부), <think> 태그 모두 처리.
+// A4 — 본문이 시작되기 전 transient 실패면 fallback_chain의 다음 모델로 자동 전환하고
+// 폴백 사실을 reasoning 이벤트로 화면에 표기한다.
 export async function* streamChat(
+  endpoint: Endpoint,
+  model: string,
+  messages: ChatMessage[],
+  opts: { signal?: AbortSignal; temperature?: number; maxTokens?: number } = {},
+): AsyncGenerator<StreamEvent> {
+  let ep = endpoint, mdl = model, origin: string | null = null;
+  for (;;) {
+    let failMsg: string | null = null;
+    let produced = false;
+    let noted = !origin;
+    try {
+      for await (const ev of streamChatOnce(ep, mdl, messages, opts)) {
+        if (!noted) { yield { type: "reasoning", text: `⚠️ ${origin} 실패 — ${ep.id}/${mdl}로 폴백했습니다\n` }; noted = true; }
+        if (ev.type === "error" && !produced && isTransientErr(new Error(ev.error ?? ""))) { failMsg = ev.error ?? "오류"; break; }
+        if (ev.type === "content") produced = true;
+        yield ev;
+      }
+    } catch (e) {
+      if (opts.signal?.aborted || produced || !isTransientErr(e)) throw e; // 본문 출력이 시작된 뒤엔 중간 전환 금지
+      failMsg = String((e as Error).message);
+    }
+    if (!failMsg) return;
+    let next = nextInChain(`${ep.id}/${mdl}`);
+    while (next) {
+      try { ({ endpoint: ep, model: mdl } = resolveModel(next)); break; }
+      catch { next = nextInChain(next); }
+    }
+    if (!next) { yield { type: "error", error: failMsg }; return; }
+    console.warn(`[mybot] 스트림 폴백: ${endpoint.id}/${model} → ${ep.id}/${mdl} (${failMsg.slice(0, 80)})`);
+    origin ??= `${endpoint.id}/${model}`;
+  }
+}
+
+async function* streamChatOnce(
   endpoint: Endpoint,
   model: string,
   messages: ChatMessage[],

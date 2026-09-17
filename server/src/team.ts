@@ -335,11 +335,13 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
       emit?.({ type: "agent_start", agentId: target.id });
       // 위임 실행은 독립 시간 상한으로 분리 — 호출 측 signal(HTTP 요청 생명주기)을 전파하면
       // 스트림 종료·연결 끊김 시 진행 중인 하위 작업이 "chatOnce 실패"로 죽는다.
-      // 상한은 runAgent 내부 8분 데드라인 + 여기 540초로 충분히 제한된다.
+      // C6 — 하위 상한은 min(위임 상한, 상위 잔여 - 60초): 상위 데드라인을 하위가 넘지 않게 상속한다.
       // 실행+기록을 하나의 잡으로 묶어, 호출 측이 중단돼도 하위 작업이 백그라운드에서
       // 완료까지 진행되고 실행 이력·세션 기록이 빠지지 않게 한다.
+      const childSignal = delegateTimeout(signal);
+      if (!childSignal) return `[시스템] 상위 작업의 잔여 시간이 1분 미만입니다 — 위임하지 말고 지금까지 확보한 결과로 부분 보고하세요.`;
       const job = (async () => {
-        await runAgent(state, target, emit ?? (() => {}), AbortSignal.timeout(540_000));
+        await runAgent(state, target, emit ?? (() => {}), childSignal);
         emit?.({ type: "agent_done", agentId: target.id, status: state.status, result: (state.result ?? "").slice(0, 4000) });
         db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
           .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
@@ -605,6 +607,23 @@ export const agentActivity = new Map<string, string>();
 // 봇별 실행 꼬리 — 같은 봇의 run이 동시에 겹쳐 세션 메시지가 뒤섞이지 않게 직렬화
 const runTails = new Map<string, Promise<void>>();
 
+// C6 — 실행별 내부 데드라인을 signal에 연결 — 위임된 하위 봇이 상위 잔여 시간을 상속받는다
+export const runDeadlines = new WeakMap<AbortSignal, number>();
+
+// 설정값 (기본값은 기존 하드코딩과 동일 — 데드라인·라운드·위임 상한)
+const runDeadlineSec = () => Number(getSetting("run_deadline_sec")) || 480;
+const toolRounds = () => Number(getSetting("tool_rounds")) || 12;
+const delegateCapSec = () => Number(getSetting("delegate_cap_sec")) || 540;
+// 하위 위임의 시간 상한 — min(위임 상한, 상위 잔여 - 60초). 잔여 부족 시 null(위임 불가)
+// 상위 signal은 합성해 전파 — 명시적 /stop이나 상위 상한이 하위 작업에도 적용되게 한다
+export function delegateTimeout(parent?: AbortSignal): AbortSignal | null {
+  const pd = parent ? runDeadlines.get(parent) : undefined;
+  const capMs = pd === undefined ? delegateCapSec() * 1000 : Math.min(delegateCapSec() * 1000, pd - Date.now() - 60_000);
+  if (capMs <= 0) return null;
+  const cap = AbortSignal.timeout(capMs);
+  return parent ? AbortSignal.any([parent, cap]) : cap;
+}
+
 export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, signal?: AbortSignal): Promise<void> {
   const prev = runTails.get(state.id);
   const p = (async () => {
@@ -687,22 +706,33 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
     if (idx) messages[0].content += `\n\n[학습된 업무 스킬] 아래 스킬이 이 작업과 관련 있으면 skill_list로 전체 절차(도구 선택자·주의점 포함)를 읽고 따르세요:\n${idx}\n반복 작업을 성공적으로 마치면 skill_save로 검증된 절차를 스킬화하세요 — 같은 이름이면 개선 내용이 누적됩니다.`;
   } catch {}
   // 봇당 최대 작업 시간 — 초과 시 수집된 결과로 즉시 보고 마무리
-  const deadline = Date.now() + 8 * 60_000;
+  const deadline = Date.now() + runDeadlineSec() * 1000;
+  if (signal) runDeadlines.set(signal, deadline); // 하위 위임이 잔여 시간을 상속받게 연결 (C6)
   let evalCount = 0; // PGE 평가-재작업 루프 카운터 — 상한으로 무한 반복 차단
   const { shouldEvaluate, evaluateResult, EVAL_MAX_ROUNDS } = await import("./evaluate");
+  // A4 — 프로바이더 폴백이 일어나면 도구 로그와 화면에 표기
+  const noteFallback = (r: any) => {
+    if (r?.fallbackFrom) {
+      const msg = `${r.fallbackFrom} → ${r.model}`;
+      state.toolLog.push({ tool: "provider_fallback", ok: true, ms: 0, err: msg });
+      trackEmit({ type: "agent_step", agentId: state.id, tool: `모델 폴백: ${msg}` });
+    }
+  };
   trackEmit({ type: "agent_phase", agentId: state.id, phase: "exec", label: "작업 실행" });
   try {
-    for (let round = 0; round < 12; round++) {
+    for (let round = 0; round < toolRounds(); round++) {
       if (Date.now() > deadline) {
         trackEmit({ type: "agent_step", agentId: state.id, tool: "시간 제한 — 결과 정리" });
         messages.push({ role: "user", content: "작업 시간 제한에 도달했습니다. 도구를 더 사용하지 말고, 지금까지 얻은 결과로 최종 보고서를 즉시 작성하세요. 완료하지 못한 작업이 있으면 보고서 끝에 '## 남은 작업' 항목으로 구체적으로 적으세요 — 다음 지시에서 이어서 진행하는 데 사용됩니다." });
         const res = await chatOnce(endpoint, model, messages, { signal });
+        noteFallback(res);
         state.status = "done";
         state.result = res.content || "(시간 제한 — 결과 없음)";
         checkpointMemory(agent, state.task, state.result);
         return;
       }
       const res = await chatOnce(endpoint, model, messages, { signal, tools });
+      noteFallback(res);
       state.steps = round + 1;
       if (!res.toolCalls?.length) {
         const leaked = parseLeaked(res.content ?? "");
@@ -814,6 +844,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
     messages.push({ role: "user", content: "도구 사용 단계 상한에 도달했습니다. 도구를 더 쓰지 말고, 지금까지 얻은 결과로 최종 보고서를 즉시 작성하세요." });
     try {
       const res = await chatOnce(endpoint, model, messages, { signal });
+      noteFallback(res);
       state.result = res.content || "(도구 단계 상한 — 결과 없음)";
     } catch {
       state.result = "(도구 단계 상한에 도달해 작업을 마무리합니다)";
@@ -831,6 +862,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
         trackEmit({ type: "agent_step", agentId: state.id, tool: "시간 초과 — 부분 결과 정리" });
         messages.push({ role: "user", content: "시간 제한으로 작업이 중단됐습니다. 지금까지 도구로 실제 확보한 결과만으로 부분 보고서를 즉시 작성하세요. 완료하지 못한 부분은 ## 미확인에, 백그라운드로 계속되는 하위 작업이 있으면 그 사실을 명시하세요." });
         const res = await chatOnce(endpoint, model, messages, { signal: AbortSignal.timeout(45_000) });
+        noteFallback(res);
         if (res.content?.trim()) { state.result = res.content; state.status = "done"; }
       } catch {}
     }
@@ -975,13 +1007,38 @@ export async function runTeamTasks(
   await Promise.all(states.map(async (s) => {
     const agent = db.prepare("SELECT * FROM agents WHERE id = ?").get(s.id) as Agent;
     emit({ type: "agent_start", agentId: s.id });
-    await runAgent(s, agent, emit, signal);
+    // C6 — 상위 데드라인이 연결된 signal이면 하위 상한을 잔여 시간으로 상속
+    await runAgent(s, agent, emit, delegateTimeout(signal) ?? AbortSignal.timeout(5000));
     db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
       .run(s.status, s.result ?? null, s.steps, JSON.stringify(s.toolLog), now(), s.runId);
     emit({ type: "agent_done", agentId: s.id, status: s.status, result: (s.result ?? "").slice(0, 4000) });
   }));
 
   return states;
+}
+
+// A5 — 재시작으로 끊긴 실행 재개: 같은 run id에 이어 쓰고, 이전 도구 로그를 작업에 넣어 중복 조회를 막는다
+export async function resumeAgentRun(run: any): Promise<void> {
+  const agent = getAgent(run.agent_id);
+  if (!agent) { db.prepare("UPDATE agent_runs SET status = 'error', result = '재개 실패 — 봇이 삭제됨', finished_at = ? WHERE id = ?").run(now(), run.id); return; }
+  const prevTools = ((JSON.parse(run.tool_log || "[]") as any[]) ?? []).map((t) => t.tool).filter(Boolean).join(", ");
+  const n = (run.resume_count ?? 0) + 1;
+  const state: TeamAgentState = {
+    id: agent.id, runId: run.id, name: agent.name, avatar: agent.avatar ?? "🤖",
+    role: agent.role_prompt,
+    task: `${run.task}\n\n[자동 재개 ${n}회차 — 서버 재시작으로 이전 실행이 중단됐습니다. 중단 전 사용한 도구: ${prevTools || "없음"}. 이미 확보한 결과를 반복 조회하지 말고 이어서 완료하세요.]`,
+    model: agent.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: 0,
+  };
+  db.prepare("UPDATE agent_runs SET status = 'running', resume_count = ? WHERE id = ?").run(n, run.id);
+  await runAgent(state, agent, () => {}, delegateTimeout()!);
+  db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
+    .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), run.id);
+  // 봇 자기 세션에 재개 결과 기록 — 사용자가 봇 화면에서 완료 여부를 볼 수 있게
+  const { appendToAgentSession } = await import("./routes/chat");
+  const { normalizeReport } = await import("./report");
+  const runMeta = JSON.stringify({ type: "tools", events: state.toolLog.map((l) => ({ type: "read", title: l.tool, url: "" })) });
+  const report = await normalizeReport(agent.name, run.task, state.result?.trim() || "(결과 없음)", state.toolLog.map((l) => l.tool));
+  appendToAgentSession(agentSessionConvId(agent.id), `[재개된 작업 ${n}회차] ${run.task}`, report, agent.model, runMeta);
 }
 
 // 승인된 팀 계획 실행 SSE: 봇 실행 → 대장 종합 답변을 기존 assistant 메시지에 스트리밍
@@ -996,7 +1053,8 @@ export const teamRoute = new Hono()
     if (!conv || !msg || !Array.isArray(tasks) || !tasks.length) return c.json({ error: "conversationId/messageId/tasks 필요" }, 400);
     // 실행은 요청 연결과 분리 — 화면 이탈로 작업이 죽지 않고 /stop으로만 중단된다
     const runCtl = new AbortController();
-    const signal = AbortSignal.any([runCtl.signal, AbortSignal.timeout(15 * 60_000)]); // 무응답 hang 방지 총 상한
+    const signal = AbortSignal.any([runCtl.signal, AbortSignal.timeout((Number(getSetting("run_total_cap_sec")) || 900) * 1000)]); // 무응답 hang 방지 총 상한
+    runDeadlines.set(signal, Date.now() + (Number(getSetting("run_total_cap_sec")) || 900) * 1000); // 하위 봇이 잔여 시간 상속 (C6)
     activeRuns.set(convId, runCtl);
     if (conv.agent_id) { runningAgents.add(conv.agent_id); agentActivity.set(conv.agent_id, ""); }
     const { endpoint, model: realModel } = resolveModel(body.model ?? conv.model ?? defaultModelId());

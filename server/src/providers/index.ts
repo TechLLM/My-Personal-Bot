@@ -121,6 +121,30 @@ export function modelLabel(modelId: string): string {
   return migrateId(modelId || "") || modelId;
 }
 
+// A4 — 폴백 체인. 설정 fallback_chain은 "minimax/MiniMax-M3, zai/glm-5.3" 또는
+// "minimax → zai" 처럼 쉼표·화살표로 구분된 목록. 프로바이더만 적으면 그 첫 모델을 쓴다.
+// 비활성·자격증명 없는 항목은 건너뛴다. curId가 체인에 없으면 첫 항목을 반환한다.
+export function nextInChain(curId: string): string | null {
+  const chain = (getSetting("fallback_chain") ?? "").split(/[,;>\n→]+/).map((s) => s.trim()).filter(Boolean);
+  if (!chain.length) return null;
+  const expand = (c: string): string | null => {
+    const pid = c.includes("/") ? c.split("/")[0] : c;
+    const def = findProvider(pid);
+    if (!def || !providerEnabled(def.id)) return null;
+    const auth = resolveAuth(def);
+    if (!auth.apiKey && !auth.accessToken && auth.source !== "cli" && auth.source !== "로컬") return null;
+    if (!c.includes("/") && !def.models?.length) return null; // 모델 없는 프로바이더 항목은 건너뛴다
+    return c.includes("/") ? c : `${pid}/${def.models![0]}`;
+  };
+  const cur = curId.toLowerCase();
+  const idx = chain.findIndex((c) => cur === c.toLowerCase() || cur.startsWith(c.toLowerCase() + "/"));
+  for (let i = idx === -1 ? 0 : idx + 1; i < chain.length; i++) {
+    const e = expand(chain[i]);
+    if (e && e.toLowerCase() !== cur) return e;
+  }
+  return null;
+}
+
 export async function listRemoteModels(endpoint: Endpoint): Promise<{ id: string; label: string }[]> {
   const def = findProvider(endpoint.id);
   // cli/oauth 프로바이더는 /models가 없음 — 정적 목록

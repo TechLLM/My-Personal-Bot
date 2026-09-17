@@ -207,6 +207,7 @@ try { db.exec("ALTER TABLE memories ADD COLUMN agent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN is_boss INTEGER NOT NULL DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE agent_runs ADD COLUMN tool_log TEXT"); } catch {}
 try { db.exec("ALTER TABLE agent_runs ADD COLUMN routine_id TEXT"); } catch {} // 루틴별 실행이력 보존·조회 키
+try { db.exec("ALTER TABLE agent_runs ADD COLUMN resume_count INTEGER"); } catch {} // 재시작 후 재개 횟수 — 3회 초과 시 error 확정
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_agent_runs_routine ON agent_runs(routine_id, created_at)"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN parent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN is_lead INTEGER NOT NULL DEFAULT 0"); } catch {}

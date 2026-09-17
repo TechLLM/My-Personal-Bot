@@ -272,7 +272,7 @@ export const chatRoute = new Hono()
     const runCtl = new AbortController();
     // 총 상한 — 신호를 넘긴 모델 호출은 기본 타임아웃이 꺼지므로, 프로바이더 무응답으로
     // 실행이 영구 hang하고 runningAgents가 안 비워지는 것을 막는다
-    const signal = AbortSignal.any([runCtl.signal, AbortSignal.timeout(15 * 60_000)]);
+    const signal = AbortSignal.any([runCtl.signal, AbortSignal.timeout((Number(getSetting("run_total_cap_sec")) || 900) * 1000)]); // 무응답 hang 방지 총 상한
     const reqModel = body.model ?? defaultModelId();
     const mode = body.mode ?? "auto";
 
@@ -384,7 +384,7 @@ export const chatRoute = new Hono()
           // 그룹채팅 모드 — 멤버 봇들이 차례로 응답 (@멘션으로 특정 봇만 지정 가능)
           if (conv?.group_id && userMsg) {
             const { groupMembers } = await import("./groups");
-            const { runAgent, defaultModel, agentSessionConvId } = await import("../team");
+            const { runAgent, defaultModel, agentSessionConvId, delegateTimeout } = await import("../team");
             const { modelLabel } = await import("../providers");
             const { normalizeReport } = await import("../report");
             let members = groupMembers(conv.group_id);
@@ -407,7 +407,7 @@ export const chatRoute = new Hono()
                 task: `[그룹 대화 메시지 — 다른 봇 멤버들도 같은 대화를 봅니다. 당신의 역할에 맞게 응답·작업하고 보고하세요]\n\n[그룹 최근 대화]\n${recentCtx}\n\n[사용자 메시지]\n${userMsg.content}`,
                 model: bot.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: 0,
               };
-              await runAgent(state, bot, (ev: any) => send("team", ev), AbortSignal.timeout(540_000));
+              await runAgent(state, bot, (ev: any) => send("team", ev), delegateTimeout(signal) ?? AbortSignal.timeout(5000));
               db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
                 .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
               const meta = JSON.stringify({ type: "tools", events: state.toolLog.map((l: any) => ({ type: "read", title: l.tool, url: "" })) });
@@ -496,7 +496,9 @@ export const chatRoute = new Hono()
             const builtinNames = new Set([...BUILTIN_TOOLS, ...MANAGE_TOOLS].map((t) => t.function.name));
             const { chatOnce } = await import("../providers/openaiCompat");
             const browserKey = `${convId}:${asstMsg.id}`;
-            const deadline = Date.now() + 8 * 60_000; // 대화 도구 루프 최대 8분 — 브라우저 열람 같은 실제 업무가 3분을 넘김
+            const deadline = Date.now() + (Number(getSetting("run_deadline_sec")) || 480) * 1000; // 대화 도구 루프 최대 시간 — 브라우저 열람 같은 실제 업무가 3분을 넘김
+            const { runDeadlines } = await import("../team");
+            runDeadlines.set(signal, deadline); // 위임된 하위 봇이 잔여 시간을 상속받게 연결 (C6)
             let browserUsed = false;
             const toolEvents: any[] = []; // search_meta에 누적 — 새로고침 후에도 도구 사용 내역 표시
             const emitTool = (title: string) => {
@@ -581,9 +583,11 @@ export const chatRoute = new Hono()
             // 4였을 때는 봇이 자기 노트를 읽는 데만 예산을 다 쓰고 브라우저를 열어보지도 못했다
             // (실측: 메일 조회 지시 3회 모두 list_files/skill_list/read_file로 소진 후 종료).
             // 시간은 아래 deadline(8분)이 별도로 막으므로 라운드 확대가 무한 실행이 되지는 않는다.
-            for (let round = 0; round < 12; round++) {
+            const maxRounds = Number(getSetting("tool_rounds")) || 12;
+            for (let round = 0; round < maxRounds; round++) {
               if (Date.now() > deadline) break;
               const res = await chatOnce(endpoint, realModel, history, { signal, tools: openaiTools });
+              if (res.fallbackFrom) emitTool(`모델 폴백: ${res.fallbackFrom} → ${res.model}`); // A4 — 전환 사실 화면 표기
               if (!res.toolCalls?.length) {
                 const leaked = parseLeaked(res.content ?? "");
                 if (leaked.length) res.toolCalls = leaked;

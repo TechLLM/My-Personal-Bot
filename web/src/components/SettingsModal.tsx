@@ -236,6 +236,19 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   </select>
                   <span className="mt-0.5 block text-[10px] text-stone-400">인증된 프로바이더의 모델만 표시됩니다 — 목록에 없으면 위에서 프로바이더를 연결하세요</span>
                 </label>
+
+                <label className="mt-3 block">
+                  <span className="text-xs text-stone-600">폴백 체인 — 모델 장애(429·5xx·잔액부족) 시 자동 전환 순서</span>
+                  <input className="mt-1 w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none" value={s.fallback_chain ?? ""} placeholder="예: minimax/MiniMax-M3 → zai/glm-5.3 → opencode-zen" onChange={(e) => update({ fallback_chain: e.target.value })} />
+                  <span className="mt-0.5 block text-[10px] text-stone-400">쉼표나 → 로 구분. 프로바이더만 적으면 첫 모델 사용. 비워두면 폴백 없음</span>
+                </label>
+
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <Field k="run_deadline_sec" label="봇 작업 상한(초)" ph="480" />
+                  <Field k="tool_rounds" label="도구 단계 상한" ph="12" />
+                  <Field k="delegate_cap_sec" label="위임 상한(초)" ph="540" />
+                  <Field k="run_total_cap_sec" label="실행 총 상한(초)" ph="900" />
+                </div>
               </div>
             )}
 

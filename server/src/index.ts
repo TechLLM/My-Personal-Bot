@@ -61,8 +61,19 @@ seedPersonas();
 const boss = ensureBossAgent();
 // 그룹 대화는 agent_id가 원래 NULL — 대장 귀속에서 제외해야 그룹 대화가 대장 대화로 겹쳐 보이지 않음
 db.prepare("UPDATE conversations SET agent_id = ? WHERE agent_id IS NULL AND group_id IS NULL").run(boss.id);
-// 서버 재시작으로 끊긴 실행을 'running'에서 중단 처리 — 고아 레코드가 영원히 실행 중으로 남지 않게
-db.prepare("UPDATE agent_runs SET status = 'error', result = COALESCE(result, '서버 재시작으로 작업이 중단됨'), finished_at = ? WHERE status = 'running'").run(now());
+// 서버 재시작으로 끊긴 실행 — A5: error로 죽이지 말고 재개한다. 같은 run id에 이어 기록되고
+// 재개 횟수(resume_count)가 3회를 넘으면 그때만 error로 확정한다.
+const orphanRuns = db.prepare("SELECT * FROM agent_runs WHERE status = 'running'").all() as any[];
+for (const r of orphanRuns) {
+  if ((r.resume_count ?? 0) < 3) {
+    db.prepare("UPDATE agent_runs SET status = 'resumable' WHERE id = ?").run(r.id); // 상태 전이로 중복 재개 방지
+    import("./team").then(({ resumeAgentRun }) => resumeAgentRun(r)).catch((e) => console.error(`[mybot] 실행 재개 실패 (${r.id}):`, (e as Error).message));
+  } else {
+    db.prepare("UPDATE agent_runs SET status = 'error', result = COALESCE(result, '서버 재시작으로 작업이 중단됨 — 재개 3회 초과'), finished_at = ? WHERE id = ?").run(now(), r.id);
+  }
+}
+// 재시작으로 끊긴 대화 스트림의 빈 assistant 자리표시 — 빈 말풍선으로 남지 않게
+db.prepare("UPDATE messages SET content = '⚠️ 서버 재시작으로 중단된 작업입니다.' WHERE role = 'assistant' AND trim(content) = ''").run();
 // 같은 이유로 처리 중이던 봇 간 메시지도 정리 — 'processing' 상태로 영원히 멈추지 않게
 db.prepare("UPDATE agent_messages SET status = 'failed', reply = '서버 재시작으로 처리 중단', done_at = ? WHERE status = 'processing'").run(now());
 // 재시작 사이에 디스패치가 끊긴 pending 메시지 재배달 — pending은 아직 시작 안 한 큐이므로 전달해야 함
