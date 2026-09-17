@@ -8,7 +8,7 @@ import { db, uid, now, getSetting } from "./db";
 // 기본 위험 패턴 — 규칙이 없어도 이름만으로 승인 요구 (파괴적·외부 영향 액션)
 // skill_save — 스킬은 전 봇이 재사용하는 조직 자산이라 저장 전 사용자 승인
 // agent_create/update/reorder/delete — 봇 설정 변경은 사용자 승인 후 반영 (조직 관리 채널)
-const DEFAULT_RISKY = /send_email|send_telegram|delete|publish|purchase|payment|pay_|_pay|submit_form|drop|execute_sql|shell_run|skill_save|agent_(create|update|reorder)/i;
+const DEFAULT_RISKY = /send_email|send_telegram|delete|publish|purchase|payment|pay_|_pay|submit_form|drop|execute_sql|shell_run|skill_save|agent_(create|update|reorder)|computer_/i;
 // 승인 면제 — 이름에 위험 단어가 있어도 실제로는 안전한 도구
 const DEFAULT_SAFE = /routine_list|agent_list|read_|list_|_list|search|lookup/i;
 
@@ -124,6 +124,11 @@ function summarizeArgs(tool: string, args: Record<string, unknown>): string {
         ? `bots: ${v.map((b: any) => b?.name ?? "?").join(", ")}`
         : `${k}: ${String(v).slice(0, 300)}`);
     return `${tool}(${parts.join(", ")})`.slice(0, 900);
+  }
+  // 데스크톱 제어 승인 — 무슨 화면 액션인지 한국어로 표시
+  if (tool.startsWith("computer_")) {
+    const label: Record<string, string> = { computer_look: "화면 분석", computer_apps: "실행 앱 목록", computer_activate: `앱 전면 전환 (${args.app})`, computer_click: `화면 클릭 (${args.x}, ${args.y})`, computer_doubleclick: `화면 더블클릭 (${args.x}, ${args.y})`, computer_rightclick: `화면 우클릭 (${args.x}, ${args.y})`, computer_type: `텍스트 입력 "${String(args.text ?? "").slice(0, 120)}"`, computer_key: `키 입력 ${args.key}`, computer_scroll: `스크롤 (${args.x}, ${args.y}) ${args.clicks ?? ""}`, computer_drag: `드래그 (${args.x1},${args.y1})→(${args.x2},${args.y2})` };
+    return `데스크톱 제어 — ${label[tool] ?? `${tool}(${JSON.stringify(args).slice(0, 200)})`}`;
   }
   const parts = Object.entries(args ?? {}).slice(0, 4).map(([k, v]) => `${k}: ${String(v).slice(0, 120)}`);
   return `${tool}(${parts.join(", ")})`.slice(0, 400);
@@ -253,7 +258,8 @@ async function executeApproved(req: any) {
   const args = JSON.parse(req.args ?? "{}");
   let result: string;
   try {
-    if (BROWSER_TOOLS.some((t: any) => t.function.name === req.tool)) result = await browserTool(req.id, req.tool, args);
+    if (req.tool.startsWith("computer_")) result = await (await import("./computer")).computerTool(req.tool, args);
+    else if (BROWSER_TOOLS.some((t: any) => t.function.name === req.tool)) result = await browserTool(req.id, req.tool, args);
     else {
       const mcpNames = (await mcpTools().catch(() => [] as any[])).map((t: any) => t.function?.name ?? t.name);
       if (mcpNames.includes(req.tool)) result = await mcpCall(req.tool, args);

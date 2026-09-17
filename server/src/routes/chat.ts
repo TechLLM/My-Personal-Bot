@@ -518,10 +518,11 @@ export const chatRoute = new Hono()
             const { mcpConfigured, mcpTools } = await import("../mcp");
             const { BROWSER_TOOLS, closeAgentPage, closeAgentEgoSpace } = await import("../browser");
             const { BUILTIN_TOOLS, MANAGE_TOOLS, callBuiltin, getAgent } = await import("../team");
+            const { COMPUTER_TOOLS } = await import("../computer");
             const convAgent = getAgent(conv?.agent_id);
             // CLI 어댑터 모델은 네이티브 도구 호출이 없음 — 도구 목록·검증 루프를 건너뛰고 단발 응답으로
             const toolsCapable = endpoint.caps?.tools !== false;
-            const openaiTools: any[] = toolsCapable ? [...BUILTIN_TOOLS, ...(convAgent?.is_boss || convAgent?.is_lead ? MANAGE_TOOLS : []), ...BROWSER_TOOLS] : [];
+            const openaiTools: any[] = toolsCapable ? [...BUILTIN_TOOLS, ...(convAgent?.is_boss || convAgent?.is_lead ? MANAGE_TOOLS : []), ...BROWSER_TOOLS, ...COMPUTER_TOOLS] : [];
             if (toolsCapable && mcpConfigured()) {
               const tools = await mcpTools();
               openaiTools.push(...tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.inputSchema } })));

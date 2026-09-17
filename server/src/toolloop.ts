@@ -67,7 +67,9 @@ export async function execToolCall(tc: ToolCall, ctx: ToolCtx): Promise<{ out: s
       ? callBuiltin(tc.name, args, ctx.agentId, ctx.signal, ctx.depth ?? 0, ctx.emit, ctx.browserKey, ctx.fileRoot)
       : isBrowserish(tc.name)
         ? (await import("./browser")).browserTool(ctx.browserKey, tc.name, args)
-        : (await import("./mcp")).mcpCall(tc.name, args);
+        : tc.name.startsWith("computer_")
+          ? (await import("./computer")).computerTool(tc.name, args)
+          : (await import("./mcp")).mcpCall(tc.name, args);
     const out = DELEGATION.has(tc.name) ? await inner : await withToolTimeout(inner, LONG_RUNNING.test(tc.name) ? 400_000 : undefined);
     if (/^(도구 오류|알 수 없는 도구|브라우저 오류):/.test(out)) { console.error(`[mybot] 도구 실패 — 도구:${tc.name} ${out.slice(0, 120)}`); return finish(out, false); }
     return finish(out, true);
