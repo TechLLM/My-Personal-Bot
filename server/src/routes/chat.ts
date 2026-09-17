@@ -80,21 +80,40 @@ function withSiblings(m: Msg) {
   return { ...m, sibling_count: sibs.length, sibling_index: idx };
 }
 
-// 관련성 기반 장기기억 회상 — 쿼리 키워드와 매칭되는 기억 top-K + 최근 기억을 합쳐 반환.
-// (기억 수백 건 규모에선 LIKE 스캔이 FTS보다 단순하고 2글자 한국어 키워드도 잡음)
+// 관련성 기반 장기기억 회상 (C15) — FTS5 전문검색으로 전체 기억을 대상으로 하고,
+// 점수는 검색 관련성 + 중요도(weight) + 최근성(90일 반감) 가중합. 아카이브된 기억은 제외.
+// 회상된 기억은 last_seen을 갱신한다 — 90일 미참조 아카이브의 기준.
 function recallMemories(agentId: string | null, queryText: string): string[] {
-  const rows = db.prepare("SELECT content, created_at FROM memories WHERE agent_id IS ? ORDER BY created_at DESC LIMIT 300").all(agentId) as { content: string; created_at: number }[];
-  if (!rows.length) return [];
-  const recent = rows.slice(0, 10).map((r) => r.content);
   const keywords = [...new Set(queryText.replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter((w) => w.length >= 2))].slice(0, 12);
-  if (!keywords.length) return recent;
-  const relevant = rows
-    .map((r) => ({ c: r.content, n: keywords.filter((k) => r.content.includes(k)).length }))
-    .filter((x) => x.n > 0)
-    .sort((a, b) => b.n - a.n)
-    .slice(0, 5)
-    .map((x) => x.c);
-  return [...new Set([...relevant, ...recent])];
+  const recent = db.prepare("SELECT rowid, content FROM memories WHERE agent_id IS ? AND archived = 0 ORDER BY created_at DESC LIMIT 10").all(agentId) as any[];
+  let hits: { rowid: number; content: string; created_at: number; weight: number; rank: number }[] = [];
+  if (keywords.length) {
+    const ftsQ = keywords.map((k) => `"${k.replace(/"/g, "")}"*`).join(" OR ");
+    try {
+      hits = db.prepare(`SELECT m.rowid, m.content, m.created_at, m.weight, f.rank
+        FROM memories_fts f JOIN memories m ON m.rowid = f.rowid
+        WHERE memories_fts MATCH ? AND m.agent_id IS ? AND m.archived = 0
+        ORDER BY f.rank LIMIT 30`).all(ftsQ, agentId) as any[];
+    } catch {}
+    // FTS 토큰 경계에서 빠지는 부분문자열(한국어 조사 붙은 형태 등)은 LIKE로 보충 — 전수 스캔
+    if (hits.length < 5) {
+      const seen = new Set(hits.map((h) => h.rowid));
+      for (const r of db.prepare("SELECT rowid, content, created_at, weight FROM memories WHERE agent_id IS ? AND archived = 0").all(agentId) as any[]) {
+        if (seen.has(r.rowid)) continue;
+        const n = keywords.filter((k) => (r.content as string).includes(k)).length;
+        if (n > 0) hits.push({ ...r, rank: -(n * 2) });
+      }
+    }
+  }
+  const nowMs = now();
+  const scored = hits
+    .map((r) => ({ rowid: r.rowid, c: r.content, s: -(r.rank ?? 0) + (r.weight ?? 1) + 2 * Math.exp(-(nowMs - r.created_at) / (90 * 86_400_000)) }))
+    .sort((a, b) => b.s - a.s)
+    .slice(0, 5);
+  const out = [...new Set([...scored.map((x) => x.c), ...recent.map((r) => r.content as string)])];
+  const ids = [...scored.map((x) => x.rowid), ...recent.map((r) => r.rowid)];
+  if (ids.length) db.prepare(`UPDATE memories SET last_seen = ? WHERE rowid IN (${ids.map(() => "?").join(",")})`).run(nowMs, ...ids);
+  return out;
 }
 
 export function systemPrompt(mode: string, personaId?: string | null, workspaceId?: string | null, agentId?: string | null, queryText = ""): string {
@@ -199,7 +218,7 @@ async function extractMemories(userText: string, assistantText: string, agentId?
     for (const f of facts.slice(0, 5)) {
       const c = String(f).trim();
       if (c && !existing.has(c)) {
-        db.prepare("INSERT INTO memories (id, content, agent_id, created_at) VALUES (?, ?, ?, ?)").run(uid(), c, agentId ?? null, now());
+        db.prepare("INSERT INTO memories (id, content, agent_id, created_at, last_seen) VALUES (?, ?, ?, ?, ?)").run(uid(), c, agentId ?? null, now(), now());
       }
     }
   } catch {}

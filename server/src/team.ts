@@ -459,7 +459,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     if (!content) return "오류: content 필요";
     const dup = db.prepare("SELECT id FROM memories WHERE agent_id IS ? AND content = ?").get(agentId ?? null, content);
     if (dup) return "이미 기억하고 있는 내용입니다";
-    db.prepare("INSERT INTO memories (id, content, agent_id, created_at) VALUES (?, ?, ?, ?)").run(uid(), content.slice(0, 500), agentId ?? null, now());
+    db.prepare("INSERT INTO memories (id, content, agent_id, created_at, last_seen, weight) VALUES (?, ?, ?, ?, ?, 2)").run(uid(), content.slice(0, 500), agentId ?? null, now(), now()); // 봇이 직접 저장한 기억은 중요도 가산 (C15)
     return "장기기억에 저장했습니다 — 세션이 압축되거나 끝나도 유지됩니다";
   }
   if (name === "request_credentials") {

@@ -211,6 +211,28 @@ try { db.exec("ALTER TABLE agent_runs ADD COLUMN resume_count INTEGER"); } catch
 try { db.exec("ALTER TABLE approval_rules ADD COLUMN cond TEXT"); } catch {} // A12 — 인자 조건 규칙 {"field","op","value"}
 try { db.exec("ALTER TABLE site_logins ADD COLUMN success_check TEXT"); } catch {} // C20 — 사이트별 로그인 성공 기준 (CSS 선택자 또는 url:정규식)
 try { db.exec("ALTER TABLE skills ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0"); } catch {} // A8 — 성공률 미달 자동 비활성
+// C15 — 장기기억 FTS5: content 전문검색 인덱스 + 중요도(weight)·마지막 회상(last_seen)·아카이브(archived)
+try { db.exec("ALTER TABLE memories ADD COLUMN weight INTEGER NOT NULL DEFAULT 1"); } catch {}
+try { db.exec("ALTER TABLE memories ADD COLUMN last_seen INTEGER"); } catch {}
+try { db.exec("ALTER TABLE memories ADD COLUMN archived INTEGER NOT NULL DEFAULT 0"); } catch {}
+db.exec(`
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, content='memories', content_rowid='rowid');
+CREATE TRIGGER IF NOT EXISTS memories_fts_ai AFTER INSERT ON memories BEGIN
+  INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content); END;
+CREATE TRIGGER IF NOT EXISTS memories_fts_ad AFTER DELETE ON memories BEGIN
+  INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content); END;
+CREATE TRIGGER IF NOT EXISTS memories_fts_au AFTER UPDATE OF content ON memories BEGIN
+  INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+  INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content); END;
+`);
+// 기존 행을 FTS로 싱크 — external-content FTS의 COUNT는 백업 테이블을 읽어 인덱스 유무를 못 보므로 설정 플래그로 1회 rebuild
+try {
+  const flag = db.prepare("SELECT value FROM settings WHERE key = 'memories_fts_v1'").get() as any;
+  if (!flag) {
+    db.exec("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')");
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('memories_fts_v1', '1')").run();
+  }
+} catch {}
 try { db.exec(`CREATE TABLE IF NOT EXISTS skill_runs (
   id TEXT PRIMARY KEY,
   skill_id TEXT NOT NULL,

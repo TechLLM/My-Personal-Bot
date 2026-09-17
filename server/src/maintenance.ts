@@ -63,6 +63,11 @@ export function cleanupRecords(): string[] {
     .run(now() - keepApprovalDays * DAY);
   if (msgs.changes) out.push(`봇 간 메시지 ${msgs.changes}건 (${keepApprovalDays}일 경과)`);
 
+  // 5) 장기기억 아카이브 (C15) — 90일간 회상되지 않은 기억은 archived=1. 삭제가 아니라 회상·인덱스 대상에서 제외
+  const memArch = db.prepare("UPDATE memories SET archived = 1 WHERE archived = 0 AND COALESCE(last_seen, created_at) < ?")
+    .run(now() - num("memory_archive_days", 90) * DAY);
+  if (memArch.changes) out.push(`장기기억 ${memArch.changes}건 아카이브 (90일 미참조)`);
+
   return out;
 }
 
