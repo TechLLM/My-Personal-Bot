@@ -270,7 +270,9 @@ export const chatRoute = new Hono()
     // 실행은 요청 연결과 분리 — 클라이언트가 끊겨도(탭 닫기·화면 이탈·탭 동결) 작업은 계속되고
     // 결과는 DB에 기록돼 복귀 시 폴링으로 보인다. 중단은 /stop 경로로만.
     const runCtl = new AbortController();
-    const signal = runCtl.signal;
+    // 총 상한 — 신호를 넘긴 모델 호출은 기본 타임아웃이 꺼지므로, 프로바이더 무응답으로
+    // 실행이 영구 hang하고 runningAgents가 안 비워지는 것을 막는다
+    const signal = AbortSignal.any([runCtl.signal, AbortSignal.timeout(15 * 60_000)]);
     const reqModel = body.model ?? defaultModelId();
     const mode = body.mode ?? "auto";
 
@@ -794,7 +796,8 @@ export const chatRoute = new Hono()
             try {
               const cur = q.msgGet.get(asstMsgId) as Msg | undefined;
               if (cur && !cur.content.trim()) {
-                q.msgUpdate.run(e?.name === "AbortError" ? "⚠️ 작업이 중단됐습니다." : `⚠️ 응답 처리 중 오류가 발생했습니다 — ${String(e?.message ?? e).slice(0, 160)}`, null, null, null, null, null, asstMsgId);
+                const stopMsg = signal.reason?.name === "TimeoutError" ? "⚠️ 시간이 오래 걸려 작업을 중단했습니다 (15분 상한)." : "⚠️ 작업이 중단됐습니다.";
+                q.msgUpdate.run(e?.name === "AbortError" || e?.name === "TimeoutError" ? stopMsg : `⚠️ 응답 처리 중 오류가 발생했습니다 — ${String(e?.message ?? e).slice(0, 160)}`, null, null, null, null, null, asstMsgId);
                 send("done", { message: withSiblings(q.msgGet.get(asstMsgId) as Msg) });
               }
             } catch {}

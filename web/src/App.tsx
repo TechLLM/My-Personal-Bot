@@ -302,7 +302,7 @@ export default function App() {
         }]);
       }
       setStreaming(false);
-    });
+    }).finally(() => setStreaming(false)); // 스트림이 done 없이 끝나도(서버 hang·연결 단절) 실행 표시가 고착되지 않게
   }, [convId, currentConv, effectiveModel, streaming, patchMessage, refreshConversations, refreshAgents, pendingAgent, agents, conversations, personaId, workspaceId]);
 
   // 스트리밍이 끝나면 대기 중인 명령을 한 건씩 자동 전송 — 다음 건은 다시 스트리밍이 끝날 때 전송.
@@ -349,7 +349,7 @@ export default function App() {
         onError: () => setStreaming(false),
       },
       abort.signal,
-    ).catch(() => setStreaming(false));
+    ).catch(() => setStreaming(false)).finally(() => setStreaming(false));
   }, [effectiveModel, streaming]);
 
   const editMessage = useCallback((m: Message, content: string) => {
@@ -377,8 +377,8 @@ export default function App() {
           onError: () => setStreaming(false),
         },
         abort.signal,
-      );
-    });
+      ).catch(() => setStreaming(false)).finally(() => setStreaming(false));
+    }).catch(() => setStreaming(false)); // 편집 요청 자체가 실패해도 실행 표시가 고착되지 않게
   }, [effectiveModel, streaming]);
 
   // 팀 계획 승인 → 선택된 봇들로 실행 (같은 assistant 메시지에 결과 스트리밍)
@@ -410,7 +410,7 @@ export default function App() {
         },
       },
       abort.signal,
-    ).catch(() => setStreaming(false));
+    ).catch(() => setStreaming(false)).finally(() => setStreaming(false));
   }, [effectiveModel, streaming, patchMessage]);
 
   // 팀 계획 취소 → 메타만 cancelled로

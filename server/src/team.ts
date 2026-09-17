@@ -996,7 +996,7 @@ export const teamRoute = new Hono()
     if (!conv || !msg || !Array.isArray(tasks) || !tasks.length) return c.json({ error: "conversationId/messageId/tasks 필요" }, 400);
     // 실행은 요청 연결과 분리 — 화면 이탈로 작업이 죽지 않고 /stop으로만 중단된다
     const runCtl = new AbortController();
-    const signal = runCtl.signal;
+    const signal = AbortSignal.any([runCtl.signal, AbortSignal.timeout(15 * 60_000)]); // 무응답 hang 방지 총 상한
     activeRuns.set(convId, runCtl);
     if (conv.agent_id) { runningAgents.add(conv.agent_id); agentActivity.set(conv.agent_id, ""); }
     const { endpoint, model: realModel } = resolveModel(body.model ?? conv.model ?? defaultModelId());
