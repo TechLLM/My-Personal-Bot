@@ -446,6 +446,15 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
       egoSpaces.add(agentKey); // run 종료 시 closeAgentEgoSpace가 이 공간을 닫음
       return await egoRun(script, `mybot-${agentKey}`);
     }
+    // BrowserSkill (bsk) 경유 — 사용자의 실제 로그인된 Chrome/Edge를 CLI로 제어.
+    // 내장 browser_*·ego_run과 달리 사용자의 일상 브라우저 세션을 그대로 쓴다.
+    if (name === "bsk") {
+      const { bskAvailable, bskExec } = await import("./bsk");
+      if (!bskAvailable()) return "브라우저 오류: bsk가 설치돼 있지 않습니다 (~/.local/bin/bsk) — 내장 browser_* 또는 ego_run을 사용하세요";
+      const cmd = String(args.cmd ?? "");
+      if (!cmd.trim()) return "오류: cmd 필요 — 예: 'session start --json', 'observe --session <id>'";
+      return await bskExec(cmd);
+    }
     const page = await pageFor(agentKey);
     switch (name) {
       case "browser_open": {
@@ -641,6 +650,7 @@ export const BROWSER_TOOLS = [
   { type: "function", function: { name: "browser_look", description: "현재 화면을 캡처해 비전 모델이 설명합니다 — 차트·캔버스·이미지 기반 UI처럼 텍스트로 안 읽히는 화면에만 쓰세요. 텍스트가 읽히는 화면은 browser_read가 훨씬 빠르고 정확합니다.", parameters: { type: "object", properties: { question: { type: "string", description: "화면에서 알고 싶은 것" } } } } },
   { type: "function", function: { name: "browser_handoff", description: "2FA·CAPTCHA·결제 비밀번호처럼 사람만 통과할 수 있는 화면을 만나면 호출합니다. 실제 브라우저 창이 열리고 사용자에게 인계 팝업이 뜹니다 — 사용자가 완료하면 세션 그대로 작업을 이어갑니다. 반복 시도로 막힌 화면을 억지로 돌파하지 마세요.", parameters: { type: "object", properties: { reason: { type: "string", description: "사용자에게 보여줄 인계 사유 — 무엇을 해야 하는지 구체적으로" } }, required: ["reason"] } } },
   { type: "function", function: { name: "ego_run", description: "ego lite — 사용자의 실제 로그인된 브라우저에서 JavaScript를 실행합니다 (컴퓨트 유즈). 내장 browser_* 도구로 접근이 안 되는 사이트에 쓰세요. script 안에서 쓸 수 있는 헬퍼: openOrReuseTab(url,{wait:true}), snapshotText()(요소를 [ref=N]으로 표시), click('@N' 또는 CSS), typeText(sel,text), fillInput(sel,text), pressKey('Enter'), scrollBy(픽셀), js('JS표현식'), captureScreenshot(), listTabs(), waitForElement(sel). 결과는 반드시 cliLog(...)로 출력하세요. 작업 공간은 자동으로 'mybot-{작업ID}' Space에서 실행됩니다.", parameters: { type: "object", properties: { script: { type: "string", description: "실행할 JS (top-level await 가능). 예: await openOrReuseTab('https://...', {wait:true}); cliLog(await snapshotText());" } }, required: ["script"] } } },
+  { type: "function", function: { name: "bsk", description: "BrowserSkill — 사용자의 실제 로그인된 Chrome/Edge를 제어합니다 (bsk CLI). 내장 browser_*·ego_run으로 안 되는 사이트에 쓰세요 — 실제 사용자 브라우저라 로그인 세션·봇 감지 문제가 없습니다. cmd에 bsk 서브커맨드를 통째로 넣으세요. 기본 흐름: 1) 'session start --json' → session_id 획득 2) 'navigate <url> --session <id>' 3) 'observe --session <id>' → @eN 참조 확인 4) 'click @e3 --session <id>' / 'fill @e3 --value \"텍스트\" --session <id>' 5) 작업 끝에 반드시 'session stop <id>'. 사람 개입 필요하면 'request-help --session <id> --prompt \"설명\"'. 허용 명령: session/navigate/observe/click/fill/press/select/hover/scroll-to/wheel/focus/blur/snapshot/get-html/screenshot/tab/request-help/status/browsers.", parameters: { type: "object", properties: { cmd: { type: "string", description: "bsk 서브커맨드 전체 — 예: 'observe --session abc123'" } }, required: ["cmd"] } } },
 ];
 
 // 등록된 사이트 계정 CRUD — 비밀번호는 암호화 저장, 목록/조회에서 절대 반환하지 않음 (write-only)
