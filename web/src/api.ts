@@ -116,6 +116,12 @@ export const api = {
   // 테이크오버 — 봇이 사람에게 넘긴 브라우저 인계 대기열
   handoffs: () => mybotFetch("/api/browser/handoffs").then(j) as Promise<{ requests: HandoffRequest[] }>,
   handoffDone: (id: string) => mybotFetch(`/api/browser/handoffs/${id}/done`, { method: "POST" }).then(j),
+  // 시연 레코더 — 사용자 조작 녹화 → 스킬 초안
+  recordStart: (url: string) => mybotFetch("/api/browser/record/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) }).then(j),
+  recordStatus: () => mybotFetch("/api/browser/record/status").then(j) as Promise<{ active: boolean; count: number; elapsed: number }>,
+  recordStop: () => mybotFetch("/api/browser/record/stop", { method: "POST" }).then(j) as Promise<{ events: unknown[]; draft: { trigger: string; steps: string; notes: string } }>,
+  saveSkill: (s: { name: string; prompt: string }) =>
+    mybotFetch("/api/skills", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(s) }).then(j),
   // 승인 경계 — 위험 액션 승인 큐
   approvals: () => mybotFetch("/api/approvals").then(j) as Promise<{ requests: ApprovalRequest[]; rules: ApprovalRule[] }>,
   approveRequest: (id: string, always = false) =>

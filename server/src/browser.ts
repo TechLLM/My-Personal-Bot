@@ -699,9 +699,89 @@ export function browserRunning(): boolean {
   return ctx !== null;
 }
 
+// ─── 시연 레코더 (A8) — headed 창에서 사용자 조작을 이벤트로 기록 ───
+// 요소는 CSS 셀렉터가 아니라 "사람이 읽을 수 있는 설명"(라벨·placeholder·텍스트)으로 남긴다 —
+// 봇이 재현할 때 @번호 스냅샷에서 의미로 찾을 수 있게 (Phase 17 산출물과 같은 원리).
+// 비밀번호 필드 값은 [비밀값]으로 마스킹 — 녹화에 비밀이 남지 않는다.
+const recorder = { active: false, events: [] as Record<string, unknown>[], startedAt: 0, timer: null as ReturnType<typeof setTimeout> | null };
+
+export function recordStatus() {
+  return { active: recorder.active, count: recorder.events.length, elapsed: recorder.active ? Date.now() - recorder.startedAt : 0 };
+}
+
+export async function recordStart(url: string): Promise<void> {
+  if (recorder.active) await recordStop();
+  const b = await getBrowser(false); // 사용자가 보고 조작하므로 headed
+  try { await b.exposeBinding("__mybotRec", (_src, ev: Record<string, unknown>) => {
+    if (recorder.active && recorder.events.length < 500) recorder.events.push({ t: Date.now() - recorder.startedAt, ...ev });
+  }); } catch {} // 이미 바인딩된 컨텍스트 재사용 시 무시
+  await b.addInitScript(`(() => {
+    const desc = (el) => {
+      if (!el || el.nodeType !== 1) return { tag: "", label: "", pw: false };
+      const e = el;
+      const label = e.getAttribute("aria-label") || e.getAttribute("placeholder") || (e.innerText || "").trim().slice(0, 40) || e.name || e.id || e.tagName;
+      const pw = e.type === "password" || /pass|pw|pwd|secret/i.test(String(e.name) + " " + String(e.id));
+      return { tag: String(e.tagName || "").toLowerCase(), label: String(label).slice(0, 60), pw: !!pw };
+    };
+    const rec = (type, data) => { try { window.__mybotRec({ type, ...data }); } catch {} };
+    rec("navigate", { url: location.href });
+    document.addEventListener("click", (e) => { const d = desc(e.target); rec("click", { el: d.label, tag: d.tag }); }, true);
+    document.addEventListener("submit", (e) => { const d = desc(e.target); rec("submit", { el: d.label }); }, true);
+    document.addEventListener("change", (e) => { const d = desc(e.target); rec("input", { el: d.label, value: d.pw ? "[비밀값]" : String(e.target.value ?? "").slice(0, 100) }); }, true);
+  })()`);
+  recorder.active = true;
+  recorder.events = [];
+  recorder.startedAt = Date.now();
+  recorder.timer = setTimeout(() => { recordStop().catch(() => {}); }, 10 * 60_000); // 그록봇 동일 — 최대 10분
+  const page = await b.newPage();
+  await page.goto(/^https?:/.test(url) ? url : "about:blank", { waitUntil: "domcontentloaded" }).catch(() => {});
+}
+
+export async function recordStop(): Promise<Record<string, unknown>[]> {
+  recorder.active = false;
+  if (recorder.timer) { clearTimeout(recorder.timer); recorder.timer = null; }
+  const events = recorder.events;
+  recorder.events = [];
+  try { await ctx?.close(); } catch {}
+  ctx = null;
+  pages.clear();
+  return events;
+}
+
+// 녹화 이벤트 → LLM이 스킬 초안 생성 — [적용 조건]/[절차]/[주의] 형식 (skill_save와 동일 포맷)
+export async function recordDraft(events: Record<string, unknown>[]): Promise<{ trigger: string; steps: string; notes: string }> {
+  const transcript = events.map((e) => `${Math.round(Number(e.t) / 1000)}s ${e.type}: ${e.el ? `${e.el}` : ""}${e.url ? ` ${e.url}` : ""}${e.value !== undefined ? ` = "${e.value}"` : ""}`).join("\n").slice(0, 6000);
+  const { resolveModel, defaultModelId } = await import("./providers");
+  const { chatOnce } = await import("./providers/openaiCompat");
+  const { endpoint, model } = resolveModel(defaultModelId());
+  const res = await chatOnce(endpoint, model, [
+    { role: "system", content: "사용자의 브라우저 조작 녹화를 보고, 봇이 재사용할 업무 절차 초안을 작성합니다. 요소는 화면에 보이는 라벨·이름으로 지칭하세요(CSS 셀렉터 금지 — 봇은 @번호 스냅샷으로 찾습니다). 반드시 JSON만 출력: {\"trigger\": \"어떤 작업·상황에서 이 절차를 쓰는지 한 줄\", \"steps\": \"번호 매긴 절차 — browser_open/login/click/type/read 도구명 포함\", \"notes\": \"주의점·실패 가능 지점\"}" },
+    { role: "user", content: `조작 녹화:\n${transcript || "(이벤트 없음)"}` },
+  ], { signal: AbortSignal.timeout(60_000) });
+  try {
+    const m = (res.content ?? "").match(/\{[\s\S]*\}/);
+    const d = JSON.parse(m?.[0] ?? "{}");
+    return { trigger: String(d.trigger ?? ""), steps: String(d.steps ?? ""), notes: String(d.notes ?? "") };
+  } catch {
+    return { trigger: "", steps: res.content ?? "", notes: "" };
+  }
+}
+
 // 수동 로그인용: 브라우저 창을 열어 사용자가 직접 로그인 (세션이 프로필에 저장됨)
 export const browserRoute = new Hono()
   .get("/status", (c) => c.json({ running: browserRunning() }))
+  // 시연 레코더 — 사용자 조작을 녹화해 스킬 초안으로 변환 (A8)
+  .post("/record/start", async (c) => {
+    const b = await c.req.json().catch(() => ({}));
+    try { await recordStart(String(b.url ?? "")); return c.json({ ok: true }); }
+    catch (e) { return c.json({ error: (e as Error).message }, 500); }
+  })
+  .get("/record/status", (c) => c.json(recordStatus()))
+  .post("/record/stop", async (c) => {
+    const events = await recordStop();
+    const draft = events.length ? await recordDraft(events).catch((e) => ({ trigger: "", steps: `(초안 생성 실패: ${(e as Error).message})`, notes: "" })) : { trigger: "", steps: "", notes: "" };
+    return c.json({ events: events.slice(0, 200), draft });
+  })
   // 테이크오버 대기열 — 프론트가 폴링해 인계 모달을 띄운다 (A2)
   .get("/handoffs", (c) =>
     c.json({ requests: db.prepare("SELECT h.id, h.agent_id, h.run_id, h.reason, h.url, h.created_at, a.name agent_name, a.avatar FROM handoff_requests h LEFT JOIN agents a ON a.id = h.agent_id WHERE h.status = 'pending' ORDER BY h.created_at").all() }))

@@ -130,6 +130,12 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   const [audit, setAudit] = useState<{ runs: any[]; approvals: any[] } | null>(null);
   const [auditAgent, setAuditAgent] = useState("");
   const [auditDays, setAuditDays] = useState("7");
+  // 시연 녹화 → 스킬 초안 (A8)
+  const [recActive, setRecActive] = useState(false);
+  const [recUrl, setRecUrl] = useState("");
+  const [recCount, setRecCount] = useState(0);
+  const [recBusy, setRecBusy] = useState(false);
+  const [recDraft, setRecDraft] = useState<{ name: string; trigger: string; steps: string; notes: string } | null>(null);
 
   const testNotify = (channel: string) => {
     setTestMsg("발송 중…");
@@ -161,6 +167,13 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
     mybotFetch(`/api/approvals/activity?${qs}`).then((r) => r.json()).then(setAudit).catch(() => {});
   };
   useEffect(() => { if (section === "audit") loadAudit(); }, [section, auditAgent, auditDays]);
+
+  // 녹화 중 상태 폴링 — 10분 자동 종료도 UI에 반영
+  useEffect(() => {
+    if (!recActive) return;
+    const t = setInterval(() => api.recordStatus().then((d) => { setRecCount(d.count); if (!d.active) setRecActive(false); }).catch(() => {}), 2000);
+    return () => clearInterval(t);
+  }, [recActive]);
 
   // 입력은 로컬 상태만 변경 — "저장" 버튼을 눌러야 서버에 반영
   const update = (patch: Record<string, string>) => { setS((p) => ({ ...p, ...patch })); setDirty(true); };
@@ -562,6 +575,43 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     </div>
                     <input className={`${Input} w-full`} placeholder="로그인 성공 기준 (선택) — CSS 선택자 또는 url:정규식. 비우면 비밀번호 칸 소멸로 판정" value={siteCheck} onChange={(e) => setSiteCheck(e.target.value)} />
                   </div>
+                </div>
+                <div>
+                  <H>시연 녹화 → 스킬</H>
+                  <p className="mb-2 text-[11px] leading-relaxed text-stone-400">
+                    녹화를 시작하면 브라우저 창이 열립니다. 그 안에서 업무를 직접 한 번 수행하면 조작이 기록돼, 봇이 재사용할 절차(스킬) 초안으로 변환됩니다. 최대 10분 — 비밀번호 입력은 자동으로 마스킹됩니다.
+                  </p>
+                  {recDraft ? (
+                    <div className="space-y-1.5">
+                      <input className={Input} placeholder="스킬 이름 (예: 다우오피스 메일 확인)" value={recDraft.name} onChange={(e) => setRecDraft({ ...recDraft, name: e.target.value })} />
+                      <input className={Input} placeholder="적용 조건 — 어떤 작업에서 쓰는지" value={recDraft.trigger} onChange={(e) => setRecDraft({ ...recDraft, trigger: e.target.value })} />
+                      <textarea className={`${Input} h-28 resize-y font-mono`} placeholder="절차" value={recDraft.steps} onChange={(e) => setRecDraft({ ...recDraft, steps: e.target.value })} />
+                      <textarea className={`${Input} h-14 resize-y`} placeholder="주의·실패 경험" value={recDraft.notes} onChange={(e) => setRecDraft({ ...recDraft, notes: e.target.value })} />
+                      <div className="flex gap-1.5">
+                        <button className={Btn} onClick={() => {
+                          if (!recDraft.name.trim() || !recDraft.steps.trim()) return;
+                          api.saveSkill({ name: recDraft.name.trim(), prompt: `[적용 조건] ${recDraft.trigger}\n\n[절차]\n${recDraft.steps}\n\n[주의·실패 경험]\n${recDraft.notes}` })
+                            .then(() => { setRecDraft(null); load(); });
+                        }}>스킬로 저장</button>
+                        <button className={Sub} onClick={() => setRecDraft(null)}>버리기</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex gap-1.5">
+                      <input className={`${Input} flex-1`} placeholder="시작 URL (선택 — 예: https://mail.daouoffice.com)" value={recUrl} onChange={(e) => setRecUrl(e.target.value)} />
+                      {!recActive ? (
+                        <button className={Btn} disabled={recBusy} onClick={async () => {
+                          setRecBusy(true);
+                          try { await api.recordStart(recUrl); setRecActive(true); setRecCount(0); } catch {} setRecBusy(false);
+                        }}>녹화 시작</button>
+                      ) : (
+                        <button className={Btn} disabled={recBusy} onClick={async () => {
+                          setRecBusy(true);
+                          try { const r = await api.recordStop(); setRecActive(false); setRecDraft({ name: "", ...r.draft }); } catch {} setRecBusy(false);
+                        }}>중지 ({recCount}개 조작)</button>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             )}
