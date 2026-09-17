@@ -288,7 +288,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     const rows = db.prepare("SELECT a.*, (SELECT COUNT(*) FROM agent_runs r WHERE r.agent_id = a.id) run_count, p.name parent_name FROM agents a LEFT JOIN agents p ON p.id = a.parent_id ORDER BY a.is_boss DESC, a.pinned DESC, COALESCE(CASE WHEN p.id IS NOT NULL AND p.is_boss = 0 THEN p.sort_order END, a.sort_order, a.created_at), CASE WHEN p.id IS NOT NULL AND p.is_boss = 0 THEN 1 ELSE 0 END, COALESCE(a.sort_order, a.created_at)").all() as any[];
     const busyIds = new Set((db.prepare("SELECT DISTINCT agent_id FROM routines WHERE enabled = 1 AND agent_id IS NOT NULL").all() as any[]).map((r) => r.agent_id));
     const text = rows.length
-      ? rows.map((a) => `- ${a.name}${a.is_boss ? " [CEO]" : a.is_lead ? " [팀장]" : ""} | 역할: ${(a.role_prompt || "").slice(0, 80)} | 모델: ${modelLabel(a.model ?? defaultModel())} | 실행 ${a.run_count}회${a.parent_name ? ` | 상위: ${a.parent_name}` : ""}${busyIds.has(a.id) ? " | 예약 루틴 담당 중" : ""}`).join("\n")
+      ? rows.map((a) => `- ${a.name}${a.is_boss ? " [CEO]" : a.special_role === "org_admin" ? " [조직관리 전담]" : a.special_role === "secretary" ? " [비서실장]" : a.is_lead ? " [팀장]" : ""} | 역할: ${(a.role_prompt || "").slice(0, 80)} | 모델: ${modelLabel(a.model ?? defaultModel())} | 실행 ${a.run_count}회${a.parent_name ? ` | 상위: ${a.parent_name}` : ""}${busyIds.has(a.id) ? " | 예약 루틴 담당 중" : ""}`).join("\n")
       : "등록된 봇 없음";
     agentListCache.set(ck, { at: Date.now(), text });
     return text;
@@ -364,7 +364,8 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     // 대상·지시 인자는 별칭을 허용 — 모델이 to/agent/target/task 등으로 불러도 동작해야 한다
     const names = pickTargets(args);
     if (!names.length) return '오류: 지시할 봇 이름이 없습니다 — {"name":"봇이름","instruction":"업무 지시"} 형식으로 호출하세요 (name·to·agent·target 또는 names·targets 배열 지원)';
-    if (depth >= 2) return "위임 깊이 제한(2단계) — 이 봇에게 직접 수행하라고 지시하세요";
+    // 위임 사슬은 CEO→비서실장→팀장→하위봇 최대 3회 — 하위 봇(depth 3)의 추가 위임은 거부
+    if (depth >= 3) return "위임 깊이 제한(3단계) — 이 봇에게 직접 수행하라고 지시하세요";
     const caller = agentId ? getAgent(agentId) : null;
     const instruction = pickStr(args, "instruction", "task", "content", "message");
     if (!instruction && !Array.isArray(args.instructions)) return '오류: 지시 내용이 없습니다 — instruction(또는 task) 필드로 구체적인 업무를 적어주세요';
@@ -1158,7 +1159,7 @@ export function runAgentDetached(agent: Agent, o: DetachedRunOpts): { runId: str
     if (o.replyTo)
       appendToAgentSession(agentSessionConvId(o.replyTo.id), `[${agent.name} 회신 도착] ${(o.sessionTask ?? o.label).slice(0, 100)}`, report, o.replyTo.model, meta);
     await o.onDone?.(state);
-    if (o.notifyTitle) { const { notifyResult } = await import("./notify"); notifyResult({ title: o.notifyTitle, agents: [agent.name], request: o.sessionTask ?? o.label, content: state.result ?? "(결과 없음)", dedupeKey: `run:${runId}` }); }
+    if (o.notifyTitle) { const { notifyResult } = await import("./notify"); notifyResult({ title: state.status === "done" ? o.notifyTitle : `${o.notifyTitle} — 실패`, agents: [agent.name], request: o.sessionTask ?? o.label, content: state.result ?? "(결과 없음)", dedupeKey: `run:${runId}` }); }
     return state;
   })();
   done.catch((e) => console.error(`[mybot] 분리 실행 실패 (${o.label.slice(0, 60)}):`, (e as Error).message));
