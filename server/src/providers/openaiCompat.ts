@@ -36,7 +36,7 @@ export async function chatOnce(
   endpoint: Endpoint,
   model: string,
   messages: any[],
-  opts: { signal?: AbortSignal; tools?: { type: string; function: { name: string; description?: string; parameters?: object } }[]; toolChoice?: string | object } = {},
+  opts: { signal?: AbortSignal; tools?: { type: string; function: { name: string; description?: string; parameters?: object } }[]; toolChoice?: string | object; reasoningEffort?: string } = {},
 ): Promise<ChatResult> {
   let ep = endpoint, mdl = model, origin: string | null = null;
   for (;;) {
@@ -66,18 +66,21 @@ async function chatOnceAttempt(
   endpoint: Endpoint,
   model: string,
   messages: any[],
-  opts: { signal?: AbortSignal; tools?: { type: string; function: { name: string; description?: string; parameters?: object } }[]; toolChoice?: string | object } = {},
+  opts: { signal?: AbortSignal; tools?: { type: string; function: { name: string; description?: string; parameters?: object } }[]; toolChoice?: string | object; reasoningEffort?: string } = {},
 ): Promise<ChatResult> {
   // kind별 어댑터 디스패치 — responses(codex OAuth) / gemini(OAuth) / cli(로컬 브릿지)
   switch (endpoint.kind) {
-    case "responses": return responsesChatOnce(endpoint, model, messages, { signal: opts.signal, tools: opts.tools, toolChoice: opts.toolChoice });
+    case "responses": return responsesChatOnce(endpoint, model, messages, { signal: opts.signal, tools: opts.tools, toolChoice: opts.toolChoice, reasoningEffort: opts.reasoningEffort });
     case "gemini": return geminiChatOnce(endpoint, model, messages, { signal: opts.signal, tools: opts.tools });
     case "cli": return cliChatOnce(endpoint, model, messages, { signal: opts.signal });
   }
   // tool_choice 객체 형식은 프록시마다 다름 — airoute는 Responses식 폴백 형식만 받아 nested 형식을 400으로 거부.
   // 거부되면 tool_choice 없이 재시도 (호출 지시는 프롬프트·서버 폴백이 커버)
   let toolChoice: unknown = opts.toolChoice ?? "auto";
-  const makeBody = () => JSON.stringify({ model, messages, stream: false, ...(opts.tools?.length ? { tools: opts.tools, tool_choice: toolChoice } : {}) });
+  // 추론 강도 — 추론 모델이 매 호출 생성하는 숨은 thinking 토큰을 줄여 지연을 줄인다.
+  // 지원 안 하는 프로바이더는 무시하거나 400이므로 실패 시 파라미터를 빼고 재시도한다.
+  let effort: string | undefined = opts.reasoningEffort;
+  const makeBody = () => JSON.stringify({ model, messages, stream: false, ...(opts.tools?.length ? { tools: opts.tools, tool_choice: toolChoice } : {}), ...(effort ? { reasoning_effort: effort } : {}) });
   let lastErr: Error | null = null;
   const BACKOFF = [1000, 4000, 10_000]; // C9 — 지수 백오프
   let pendingWait: number | undefined; // Retry-After 헤더가 지정한 대기
@@ -107,6 +110,8 @@ async function chatOnceAttempt(
       const err = new Error(`오류 ${res.status}: ${txt}`);
       // tool_choice 형식 거부 → 형식을 빼고 재시도
       if (res.status === 400 && /tool_choice/i.test(txt) && toolChoice !== "auto") { toolChoice = "auto"; continue; }
+      // reasoning_effort 미지원 → 파라미터를 빼고 재시도 (한 번만)
+      if (res.status === 400 && effort && /reasoning|effort/i.test(txt)) { effort = undefined; continue; }
       if (res.status >= 500 || res.status === 429) {
         lastErr = err;
         // C9 — Retry-After 헤더 준수 (지정 없으면 위 백오프 적용)
@@ -141,7 +146,7 @@ export async function* streamChat(
   endpoint: Endpoint,
   model: string,
   messages: ChatMessage[],
-  opts: { signal?: AbortSignal; temperature?: number; maxTokens?: number } = {},
+  opts: { signal?: AbortSignal; temperature?: number; maxTokens?: number; reasoningEffort?: string } = {},
 ): AsyncGenerator<StreamEvent> {
   let ep = endpoint, mdl = model, origin: string | null = null;
   for (;;) {
@@ -175,14 +180,16 @@ async function* streamChatOnce(
   endpoint: Endpoint,
   model: string,
   messages: ChatMessage[],
-  opts: { signal?: AbortSignal; temperature?: number; maxTokens?: number } = {},
+  opts: { signal?: AbortSignal; temperature?: number; maxTokens?: number; reasoningEffort?: string } = {},
 ): AsyncGenerator<StreamEvent> {
   // kind별 어댑터 디스패치
-  if (endpoint.kind === "responses") { yield* responsesStream(endpoint, model, messages, { signal: opts.signal }); return; }
+  if (endpoint.kind === "responses") { yield* responsesStream(endpoint, model, messages, { signal: opts.signal, reasoningEffort: opts.reasoningEffort }); return; }
   if (endpoint.kind === "gemini") { yield* geminiStream(endpoint, model, messages, { signal: opts.signal }); return; }
   if (endpoint.kind === "cli") { yield* cliStream(endpoint, model, messages, { signal: opts.signal }); return; }
 
-  const res = await fetch(`${endpoint.baseUrl}/chat/completions`, {
+  // 추론 강도 — 미지원 프로바이더는 400으로 거부하므로 실패 시 파라미터를 빼고 한 번 재시도
+  let effort: string | undefined = opts.reasoningEffort;
+  const doFetch = () => fetch(`${endpoint.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -194,11 +201,17 @@ async function* streamChatOnce(
       stream: true,
       ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
       ...(opts.maxTokens ? { max_tokens: opts.maxTokens } : {}),
+      ...(effort ? { reasoning_effort: effort } : {}),
       stream_options: { include_usage: true },
     }),
     // 호출별 상한은 외부 signal과 무관하게 항상 적용 — 무응답 프로바이더 hang 방지
     signal: opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(300_000)]) : AbortSignal.timeout(300_000),
   });
+  let res = await doFetch();
+  if (!res.ok && res.status === 400 && effort && /reasoning|effort/i.test(await res.text().catch(() => ""))) {
+    effort = undefined;
+    res = await doFetch();
+  }
 
   if (!res.ok || !res.body) {
     const body = await res.text().catch(() => "");

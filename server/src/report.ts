@@ -74,7 +74,7 @@ export async function normalizeReport(agentName: string, task: string, result: s
 (이어서 할 일 또는 권고. 없으면 '없음')`,
       },
       { role: "user", content: `봇: ${agentName}\n지시: ${task.slice(0, 400)}\n실행된 도구: ${tools?.length ? tools.join(", ") : "(없음 — 도구 미사용)"}\n\n원본 결과:\n${cleaned.slice(0, 6000)}` },
-    ], { signal: AbortSignal.timeout(45_000) });
+    ], { signal: AbortSignal.timeout(45_000), reasoningEffort: "low" });
     const out = (res.content ?? "").trim();
     if (out.length > 30) return cleanOutput(out);
   } catch {}

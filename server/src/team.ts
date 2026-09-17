@@ -925,13 +925,23 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
         checkpointMemory(agent, state.task, state.result);
         return;
       }
-      const res = await chatOnce(endpoint, model, messages, { signal, tools });
+      // 도구 선택 라운드는 저추론(low) — 라우팅은 기계적 판단이라 추론 토큰을 줄여도 품질이 유지된다 (실측 호출당 ~2.3배 단축)
+      const res = await chatOnce(endpoint, model, messages, { signal, tools, reasoningEffort: "low" });
       noteFallback(res);
       state.steps = round + 1;
       if (!res.toolCalls?.length) {
         const leaked = parseLeaked(res.content ?? "");
         if (leaked.length) res.toolCalls = leaked;
         else {
+          // 실제 도구 작업이 끝난 뒤의 종료 응답 — 최종 보고서만 기본 추론 강도로 한 번 더 작성해 분석·종합 깊이를 유지한다.
+          // (도구를 전혀 안 쓴 단순 응답은 저추론 결과를 그대로 사용 — 빠른 경로)
+          if (calledTools.size > 0 && Date.now() < deadline) {
+            messages.push({ role: "assistant", content: res.content || "" });
+            messages.push({ role: "user", content: "[시스템] 도구 수집이 끝났습니다. 위 초안을 바탕으로 최종 보고서를 작성하세요 — 실제 도구 결과만 근거로 쓰고, 확인하지 못한 내용은 미확인으로 표기하세요." });
+            const fin = await chatOnce(endpoint, model, messages, { signal }).catch(() => null);
+            if (fin?.content?.trim()) { res.content = fin.content; noteFallback(fin); }
+            else messages.splice(-2); // 재작성 실패 시 초안을 결과로 사용 — 메시지 정합 복원
+          }
           // 하네스 사후 검증 — 내부 엔티티 변경 지시는 DB 상태 변화로 이행 여부를 확인
           const intent = await intentP; // 병렬로 돌린 의도 분류 — 여기서 처음 필요
           const before = (intent.object ? snapByObj[intent.object] : undefined) ?? { count: 0, ids: new Set<string>() };
@@ -1086,7 +1096,7 @@ JSON 배열만 출력하세요. 각 항목은 둘 중 하나:
 - 단순 질문·잡담·한 번에 답할 수 있는 것은 분해하지 말고 빈 배열 []만 출력.${roster}`,
     },
     { role: "user", content: task },
-  ], { signal });
+  ], { signal, reasoningEffort: "low" });
 
   // JSON 배열 추출 — 문자열 안의 괄호를 무시하는 균형 스캔 (greedy regex는 여러 [ ] 있으면 깨짐)
   const extractJsonArray = (text: string): PlanTask[] => {

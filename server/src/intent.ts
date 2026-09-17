@@ -81,7 +81,7 @@ export async function classifyIntent(text: string, endpoint: Endpoint, model: st
 - "루틴은 삭제하지 마" → {"verb":null,"object":"routines","imperative":false,"negated":true}
 
 출력: {"verb":...,"object":...,"all":bool,"imperative":bool,"negated":bool}`,
-    }], { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000) });
+    }], { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000), reasoningEffort: "low" });
     const m = (res.content ?? "").match(/\{[\s\S]*\}/);
     if (!m) return { verb: null, object: null, all: false };
     const j = JSON.parse(m[0]);

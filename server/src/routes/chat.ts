@@ -197,7 +197,7 @@ async function compactHistory(convId: string, path: Msg[]): Promise<{ summary: s
     let out = "";
     for await (const ev of streamChat(endpoint, model, [
       { role: "user", content: `이전 대화 요약과 새 대화를 하나로 합쳐, 대화를 이어가는 데 필요한 사실·결정·진행 상태·미완료 요청만 남긴 요약을 작성하세요 (12줄 이내, 불필요한 수사 제외).\n\n[이전 요약]\n${summary ?? "(없음)"}\n\n[추가 대화]\n${transcript.slice(0, 20000)}` },
-    ], { signal: AbortSignal.timeout(30000) })) {
+    ], { signal: AbortSignal.timeout(30000), reasoningEffort: "low" })) {
       if (ev.type === "content") out += ev.text ?? "";
     }
     if (out.trim()) summary = out.trim();
@@ -218,7 +218,7 @@ async function extractMemories(userText: string, assistantText: string, agentId?
     let out = "";
     for await (const ev of streamChat(endpoint, model, [
       { role: "user", content: `아래 대화 조각에서 나중 대화에 도움될 사실(사용자 정보, 프로젝트 상태, 진행 중인 업무, 결정 사항, 선호 등)만 JSON 배열로 추출. 없으면 []. 각 항목은 한 줄 요약.\n제외할 것: 일회성 작업 결과·그날 조회한 데이터(메일 내용, 결재 현황, 수치 등 — 순간 상태라 나중에 바뀜), 실패·오류·시뮬레이션이라고 언급된 내용, '확인 필요' 등 미검증 주장. 시간이 지나면 틀린 정보가 되는 내용은 절대 저장하지 마세요.\n\n사용자: ${userText.slice(0, 500)}\nAI: ${assistantText.slice(0, 500)}` },
-    ])) {
+    ], { reasoningEffort: "low" })) {
       if (ev.type === "content") out += ev.text ?? "";
     }
     const m = out.match(/\[[\s\S]*\]/);
@@ -240,7 +240,7 @@ async function autoTitle(convId: string, userText: string) {
     let title = "";
     for await (const ev of streamChat(endpoint, model, [
       { role: "user", content: `다음 사용자 메시지를 대표하는 대화 제목을 15자 이내 한국어 명사구로만 출력. 따옴표 없이.\n\n${userText.slice(0, 300)}` },
-    ])) {
+    ], { reasoningEffort: "low" })) {
       if (ev.type === "content") title += ev.text;
     }
     title = title.trim().replace(/['".]/g, "").slice(0, 40);
@@ -604,7 +604,8 @@ export const chatRoute = new Hono()
             const maxRounds = Number(getSetting("tool_rounds")) || 12;
             for (let round = 0; round < maxRounds; round++) {
               if (Date.now() > deadline) break;
-              const res = await chatOnce(endpoint, realModel, history, { signal, tools: openaiTools });
+              // 도구 선택 라운드는 저추론(low) — Think 모드에서는 깊은 추론을 유지한다
+              const res = await chatOnce(endpoint, realModel, history, { signal, tools: openaiTools, reasoningEffort: mode === "think" ? undefined : "low" });
               if (res.fallbackFrom) emitTool(`모델 폴백: ${res.fallbackFrom} → ${res.model}`); // A4 — 전환 사실 화면 표기
               if (!res.toolCalls?.length) {
                 const leaked = parseLeaked(res.content ?? "");

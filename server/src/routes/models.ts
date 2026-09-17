@@ -73,7 +73,7 @@ export const modelsRoute = new Hono()
         return c.json({ ok: true, ms: Date.now() - t0, detail: `${def.cmd} 실행 파일 확인됨 — 로그인은 CLI 자체 세션 사용` });
       }
       const { chatOnce } = await import("../providers/openaiCompat");
-      const res = await chatOnce(ep, def.models?.[0] ?? "gpt-5", [{ role: "user", content: "hi" }], { signal: AbortSignal.timeout(30_000) });
+      const res = await chatOnce(ep, def.models?.[0] ?? "gpt-5", [{ role: "user", content: "hi" }], { signal: AbortSignal.timeout(30_000), reasoningEffort: "low" });
       return c.json({ ok: true, ms: Date.now() - t0, detail: `응답 수신 (${(res.content ?? "").length}자)` });
     } catch (e) {
       return c.json({ ok: false, ms: Date.now() - t0, error: (e as Error).message.slice(0, 300) });
