@@ -751,10 +751,16 @@ export const chatRoute = new Hono()
           }
           // 메모리 추출 (비차단) — 담당 봇의 장기기억으로 저장
           if (userMsg && content) extractMemories(userMsg.content, content, conv?.agent_id, conv?.workspace_id).catch(() => {});
-          // 설정된 알림 채널로 결과 발송 (기본은 채팅창만)
+          // 설정된 알림 채널로 결과 발송 (기본은 채팅창만) — dedupeKey로 같은 메시지의 재발송 차단
           if (content) {
             const { notifyResult } = await import("../notify");
-            notifyResult(conv?.title ?? "MyBot", content, conv?.agent_name ?? "MyBot");
+            notifyResult({
+              title: conv?.title ?? "MyBot",
+              agents: [conv?.agent_name ?? "MyBot"],
+              request: userMsg?.content,
+              content,
+              dedupeKey: `msg:${asstMsgId}`,
+            });
           }
         } catch (e: any) {
           runErr = String(e?.message ?? e);

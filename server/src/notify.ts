@@ -22,14 +22,20 @@ export async function sendTelegram(text: string): Promise<string | null> {
 
 // 마크다운 보고서를 텔레그램 HTML 메시지로 정돈해 전송 — 메시지 자체가 HTML 포맷
 // 별도 문서 파일을 만들지 않음. 길면 메시지를 나눠서 보내고, HTML 파싱 실패 시 평문 폴백
-export async function sendTelegramReport(title: string, mdReport: string): Promise<string | null> {
+// meta가 있으면 제목 아래 "관련 봇/요청" 헤더를 붙여 제목·관련봇·요청·결과 포맷을 완성한다
+export async function sendTelegramReport(title: string, mdReport: string, meta?: { agents?: string[]; request?: string }): Promise<string | null> {
   const token = getSetting("telegram_bot_token");
   const chatId = getSetting("telegram_chat_id");
   if (!token || !chatId) return "봇 토큰/채팅 ID 미설정";
   try {
     const { mdToTelegramHtml, cleanOutput } = await import("./report");
     const clean = cleanOutput(mdReport);
-    const html = `<b>■ ${title.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</b>\n\n` + mdToTelegramHtml(clean);
+    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+    let html = `<b>■ ${esc(title)}</b>`;
+    if (meta?.agents?.length) html += `\n관련 봇: ${esc(meta.agents.join(", "))}`;
+    if (meta?.request) html += `\n요청: ${esc(meta.request.slice(0, 300))}`;
+    if (meta?.agents?.length || meta?.request) html += "\n────────────\n";
+    html += "\n" + mdToTelegramHtml(clean);
     // 텔레그램 메시지 한도 4096자 — 줄 단위로 나눠 여러 메시지로 전송
     const chunks: string[] = [];
     let buf = "";
@@ -47,7 +53,11 @@ export async function sendTelegramReport(title: string, mdReport: string): Promi
       if (!res.ok) {
         // HTML 파싱 실패 시 실패한 청크부터 평문으로 폴백 — 보고서 후반부가 유실되지 않게 청크 단위로 전송
         const plain = clean.split("\n");
-        let buf2 = ci === 0 ? `[MyBot] ${title}\n\n` : "";
+        let buf2 = ci === 0
+          ? `[MyBot] ${title}\n` +
+            (meta?.agents?.length ? `관련 봇: ${meta.agents.join(", ")}\n` : "") +
+            (meta?.request ? `요청: ${meta.request.slice(0, 300)}\n` : "") + "\n"
+          : "";
         for (const line of plain) {
           if (buf2.length + line.length + 1 > 3900) { await sendTelegram(buf2); buf2 = ""; }
           buf2 += (buf2 ? "\n" : "") + line;
@@ -84,17 +94,40 @@ export async function sendEmail(subject: string, text: string): Promise<string |
 
 // 답변 완성 후 설정된 채널로 발송 (기본은 채팅창만 — 설정 켠 채널에 추가 발송)
 // 텔레그램은 정규화된 보고서 형식으로 발송 — 모델과 무관하게 정돈된 포맷 보장
-export function notifyResult(title: string, content: string, agentName = "MyBot") {
+// 포맷: ■ 제목 / 관련 봇 / 요청 / ──── / 결과. dedupeKey로 같은 결과의 중복 발송 차단
+// (위임 중간 응답 + 최종 보고, 루틴 발송 + 대화 완료 발송 등 같은 결과가 2경로로 오는 경우)
+const sentKeys = new Map<string, number>(); // dedupeKey → 발송 시각
+const DEDUPE_MS = 10 * 60 * 1000;
+
+export interface NotifyResultOpts {
+  title: string;                    // 제목 — 대화 제목 / 루틴 라벨 등
+  content: string;                  // 결과 내용
+  agents?: string[];                // 관련 봇 이름들
+  request?: string;                 // 요청 내용 (원본 지시)
+  dedupeKey?: string;               // 중복 방지 키 — msgId/runId. 없으면 내용 해시
+}
+
+export function notifyResult(o: NotifyResultOpts) {
+  const key = o.dedupeKey ?? `${o.title}:${o.content.slice(0, 200)}`;
+  const now = Date.now();
+  for (const [k, t] of sentKeys) if (now - t > DEDUPE_MS) sentKeys.delete(k);
+  if (sentKeys.has(key)) return;
+  sentKeys.set(key, now);
+
+  const agentName = o.agents?.join(", ") ?? "MyBot";
+  const meta = { agents: o.agents, request: o.request };
   if (getSetting("notify_telegram") === "1") {
     void (async () => {
       const { normalizeReport } = await import("./report");
-      const report = await normalizeReport(agentName, title, content);
-      const e = await sendTelegramReport(title, report);
+      const report = await normalizeReport(agentName, o.request ?? o.title, o.content);
+      const e = await sendTelegramReport(o.title, report, meta);
       if (e) console.error("[notify]", e);
     })();
   }
   if (getSetting("notify_email") === "1") {
-    sendEmail(`[MyBot] ${title}`, content).then((e) => e && console.error("[notify]", e));
+    const subject = `[MyBot] ${o.title}${o.agents?.length ? ` — ${o.agents.join(", ")}` : ""}`;
+    const body = (o.request ? `요청: ${o.request}\n\n` : "") + o.content;
+    sendEmail(subject, body).then((e) => e && console.error("[notify]", e));
   }
 }
 
@@ -135,7 +168,7 @@ async function handleTelegramText(text: string): Promise<string> {
   const { normalizeReport } = await import("./report");
   const report = await normalizeReport(boss.name, text, out);
   appendToAgentSession(convId, `[텔레그램] ${text}`, report, boss.model);
-  const err = await sendTelegramReport(boss.name, report);
+  const err = await sendTelegramReport(boss.name, report, { agents: [boss.name], request: text });
   if (err) console.error("[telegram]", err);
   return report;
 }

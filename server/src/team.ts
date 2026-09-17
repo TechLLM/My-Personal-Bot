@@ -1093,7 +1093,7 @@ export function runAgentDetached(agent: Agent, o: DetachedRunOpts): { runId: str
     if (o.replyTo)
       appendToAgentSession(agentSessionConvId(o.replyTo.id), `[${agent.name} 회신 도착] ${(o.sessionTask ?? o.label).slice(0, 100)}`, report, o.replyTo.model, meta);
     await o.onDone?.(state);
-    if (o.notifyTitle) { const { notifyResult } = await import("./notify"); notifyResult(o.notifyTitle, state.result ?? "(결과 없음)"); }
+    if (o.notifyTitle) { const { notifyResult } = await import("./notify"); notifyResult({ title: o.notifyTitle, agents: [agent.name], request: o.sessionTask ?? o.label, content: state.result ?? "(결과 없음)", dedupeKey: `run:${runId}` }); }
     return state;
   })();
   done.catch((e) => console.error(`[mybot] 분리 실행 실패 (${o.label.slice(0, 60)}):`, (e as Error).message));
@@ -1149,8 +1149,11 @@ export const teamRoute = new Hono()
               .map((m) => ({ role: m.role, content: m.content })),
           ];
           const report = states.map((a) => `## ${a.avatar} ${a.name} — ${a.status === "done" ? "완료" : "실패"}\n작업: ${a.task}\n\n${a.result ?? "(결과 없음)"}`).join("\n\n");
+          let userRequest = "";
           for (let i = history.length - 1; i >= 0; i--) {
             if (history[i].role === "user") {
+              const uc = history[i].content; // 결과 덧붙이기 전 원본 지시 캡처 — 알림의 '요청' 항목
+              userRequest = typeof uc === "string" ? uc : (uc as any[]).filter((p) => p.type === "text").map((p) => p.text).join(" ");
               history[i] = {
                 role: "user",
                 content: `${history[i].content}\n\n[팀 에이전트 실행 결과 — 각 전문 봇이 완료한 보고서]\n\n${report}\n\n---\n위 결과를 종합해 사용자에게 최종 답변을 작성하세요. 어떤 봇이 무엇을 담당했는지 간략히 언급하고, 실패한 봇이 있으면 그 한계도 솔직히 밝히세요.`,
@@ -1178,7 +1181,13 @@ export const teamRoute = new Hono()
           const sibs = db.prepare("SELECT * FROM messages WHERE parent_id IS ?").all(msg.parent_id) as any[];
           const idx = sibs.findIndex((s) => s.id === msgId);
           send("done", { message: { ...(db.prepare("SELECT * FROM messages WHERE id = ?").get(msgId) as any), sibling_count: sibs.length, sibling_index: idx } });
-          if (content) notifyResult(conv.title, content);
+          if (content) notifyResult({
+            title: conv.title,
+            agents: states.map((a) => a.name),
+            request: userRequest,
+            content,
+            dedupeKey: `msg:${msgId}`,
+          });
         } catch (e: any) {
           if (e?.name !== "AbortError") send("error", { message: String(e?.message ?? e) });
         } finally {
