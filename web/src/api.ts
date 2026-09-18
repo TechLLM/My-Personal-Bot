@@ -75,8 +75,11 @@ export function mybotFetch(input: string, init: RequestInit = {}): Promise<Respo
   });
 }
 
-const j = (r: Response) => {
-  if (!r.ok) throw new Error(`${r.status}`);
+const j = async (r: Response) => {
+  if (!r.ok) {
+    const body = (await r.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `HTTP ${r.status}`);
+  }
   return r.json();
 };
 

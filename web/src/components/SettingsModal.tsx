@@ -144,6 +144,8 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   const [skills, setSkills] = useState<any[]>([]);
   const [routines, setRoutines] = useState<any[]>([]);
   const [updates, setUpdates] = useState<any[]>([]);
+  const [updProg, setUpdProg] = useState<{ id: string; pct: number } | null>(null); // 적용 중인 업데이트의 진행 표시
+  const [updErr, setUpdErr] = useState<Record<string, string>>({}); // 카드별 오류 메시지 — 실패를 조용히 삼키지 않는다
   const [appVersion, setAppVersion] = useState(0);
   const [updBusy, setUpdBusy] = useState(false);
   const [wName, setWName] = useState(""); const [wInst, setWInst] = useState("");
@@ -212,7 +214,30 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   useEffect(() => { if (section === "audit") loadAudit(); }, [section, auditAgent, auditDays]);
   const loadUpdates = () => api.evolveUpdates().then((d) => { setUpdates(d.updates); setAppVersion(d.appVersion); }).catch(() => {});
   useEffect(() => { if (section === "updates") loadUpdates(); }, [section]);
-  const updAct = (fn: () => Promise<unknown>) => { setUpdBusy(true); fn().then(loadUpdates).catch(() => {}).finally(() => setUpdBusy(false)); };
+  // 업데이트 동작 실행 — 적용은 진행 바를 보여주고, 실패는 서버 오류 메시지를 카드에 표시한다
+  const updAct = (id: string, fn: () => Promise<unknown>, withProgress = false) => {
+    setUpdBusy(true);
+    setUpdErr((m) => { const n = { ...m }; delete n[id]; return n; });
+    let tick: ReturnType<typeof setInterval> | undefined;
+    if (withProgress) {
+      setUpdProg({ id, pct: 10 });
+      // 서버 확정 전에는 92%까지만 진행 — 응답이 오면 100%로 완료한다
+      tick = setInterval(() => setUpdProg((p) => (p && p.id === id ? { id, pct: Math.min(92, p.pct + Math.max(2, (92 - p.pct) * 0.3)) } : p)), 200);
+    }
+    fn()
+      .then(async () => {
+        if (tick) clearInterval(tick);
+        if (withProgress) setUpdProg({ id, pct: 100 });
+        await loadUpdates();
+        if (withProgress) setTimeout(() => setUpdProg((p) => (p?.id === id ? null : p)), 1400);
+      })
+      .catch((e) => {
+        if (tick) clearInterval(tick);
+        setUpdProg(null);
+        setUpdErr((m) => ({ ...m, [id]: (e as Error).message || "요청 실패" }));
+      })
+      .finally(() => setUpdBusy(false));
+  };
 
   // 녹화 중 상태 폴링 — 10분 자동 종료도 UI에 반영
   useEffect(() => {
@@ -891,6 +916,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                 <div className="space-y-2">
                   {updates.map((u) => {
                     const m = u.payload?.measurement;
+                    const prog = updProg && updProg.id === u.id ? updProg : null;
                     const gain = m?.baseline && m?.candidate
                       ? `통과율 ${Math.round(m.baseline.passRate * 100)}%→${Math.round(m.candidate.passRate * 100)}% · 지연 ${Math.round(m.baseline.avgLatencyMs / 1000)}s→${Math.round(m.candidate.avgLatencyMs / 1000)}s`
                       : m?.reason ?? "";
@@ -908,17 +934,26 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                         <div className="mt-2 flex gap-1.5">
                           {u.status === "pending" && (
                             <>
-                              <button disabled={updBusy} onClick={() => updAct(() => api.applyUpdate(u.id))}
+                              <button disabled={updBusy} onClick={() => updAct(u.id, () => api.applyUpdate(u.id), true)}
                                 className="rounded-md bg-stone-900 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-stone-700 disabled:opacity-40">업데이트 적용</button>
-                              <button disabled={updBusy} onClick={() => updAct(() => api.rejectUpdate(u.id))}
+                              <button disabled={updBusy} onClick={() => updAct(u.id, () => api.rejectUpdate(u.id))}
                                 className="rounded-md bg-stone-200 px-2.5 py-1 text-[11px] text-stone-600 hover:bg-stone-300 disabled:opacity-40">거부</button>
                             </>
                           )}
                           {u.status === "applied" && (
-                            <button disabled={updBusy} onClick={() => updAct(() => api.revertUpdate(u.id))}
+                            <button disabled={updBusy} onClick={() => updAct(u.id, () => api.revertUpdate(u.id))}
                               className="rounded-md bg-stone-200 px-2.5 py-1 text-[11px] text-stone-600 hover:bg-stone-300 disabled:opacity-40">이 버전 되돌리기</button>
                           )}
                         </div>
+                        {prog && (
+                          <div className="mt-2">
+                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-stone-200">
+                              <div className={`h-full rounded-full transition-all duration-200 ${prog.pct >= 100 ? "bg-emerald-500" : "bg-stone-700"}`} style={{ width: `${prog.pct}%` }} />
+                            </div>
+                            <div className="mt-1 text-[10px] text-stone-500">{prog.pct >= 100 ? "적용 완료" : "업데이트 적용 중…"}</div>
+                          </div>
+                        )}
+                        {!!updErr[u.id] && <div className="mt-1.5 text-[11px] font-medium text-red-600">{updErr[u.id]}</div>}
                       </div>
                     );
                   })}

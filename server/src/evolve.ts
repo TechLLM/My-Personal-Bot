@@ -476,9 +476,10 @@ async function publishUpdate(candidate: Candidate, baseline: BenchResult, candBe
 // 서비스 인스턴스 — 패키지 ops를 실제 적용하고 되돌림 ops를 만든다 (사용자 버전 업데이트 경로)
 export function applyUpdateOps(ops: UpdateOp[]): { revertOps: UpdateOp[]; restartRequired: boolean } {
   const surfaces = loadSurfaces();
-  const revertOps: UpdateOp[] = [];
-  let restartRequired = false;
-  for (const op of ops) {
+  // 1단계: 모든 op를 먼저 검증하고 되돌림 정보를 수집한다 — 하나라도 실패하면 아무것도 바꾸지 않는다.
+  // (중간 실패 시 앞선 변경만 남는 부분 적용 사고를 차단 — 파일 쓰기는 트랜잭션으로 못 되돌리므로 사전 검증이 유일한 원자성 보장)
+  type Surf = Surfaces["surfaces"][number];
+  const plan: { op: UpdateOp; surf: Surf; col?: string; rowid?: number; abs?: string; revert: UpdateOp }[] = ops.map((op) => {
     const surf = surfaces.surfaces.find((s) => s.id === op.surface);
     if (!surf) throw new Error(`미등록 표면: ${op.surface}`);
     if (op.kind === "db") {
@@ -487,16 +488,24 @@ export function applyUpdateOps(ops: UpdateOp[]): { revertOps: UpdateOp[]; restar
       if (!/^[a-z_]+$/.test(col)) throw new Error(`컬럼명 불가: ${col}`);
       const row = db.prepare(`SELECT rowid, ${col} FROM ${surf.table} WHERE name = ? OR id = ?`).get(op.target, op.target) as any;
       if (!row) throw new Error(`대상 없음: ${surf.table}.${op.target}`);
-      revertOps.push({ ...op, newValue: row[col] ?? "" });
-      db.prepare(`UPDATE ${surf.table} SET ${col} = ? WHERE rowid = ?`).run(op.newValue ?? "", row.rowid);
+      return { op, surf, col, rowid: row.rowid as number, revert: { ...op, newValue: row[col] ?? "" } as UpdateOp };
+    }
+    const path = op.target;
+    if (isProtectedPath(path)) throw new Error(`보호 경로는 업데이트 불가: ${path}`);
+    const abs = join(ROOT, path);
+    if (!existsSync(abs)) throw new Error(`파일 없음: ${path}`);
+    return { op, surf, abs, revert: { ...op, newContent: readFileSync(abs, "utf8") } as UpdateOp };
+  });
+  // 2단계: 검증을 통과한 op만 실제 반영한다
+  const revertOps: UpdateOp[] = [];
+  let restartRequired = false;
+  for (const p of plan) {
+    revertOps.push(p.revert);
+    if (p.op.kind === "db") {
+      db.prepare(`UPDATE ${p.surf.table} SET ${p.col!} = ? WHERE rowid = ?`).run(p.op.newValue ?? "", p.rowid!);
     } else {
-      const path = op.target;
-      if (isProtectedPath(path)) throw new Error(`보호 경로는 업데이트 불가: ${path}`);
-      const abs = join(ROOT, path);
-      if (!existsSync(abs)) throw new Error(`파일 없음: ${path}`);
-      revertOps.push({ ...op, newContent: readFileSync(abs, "utf8") });
       const { writeFileSync } = require("node:fs") as typeof import("node:fs");
-      writeFileSync(abs, op.newContent ?? "");
+      writeFileSync(p.abs!, p.op.newContent ?? "");
       restartRequired = true; // 코드 변경은 실행 중 프로세스에 반영되지 않음 — 재시작 필요
     }
   }
