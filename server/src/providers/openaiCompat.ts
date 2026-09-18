@@ -46,13 +46,14 @@ export function friendlyProviderError(msg: string): string {
   return msg;
 }
 
-// 속도 제한(429)에 걸린 모델은 잠시 건너뛴다 — 예전엔 호출마다 같은 모델에서 백오프 재시도(1초·4초)를
+// 폴백을 부른 모델은 잠시 건너뛴다 — 예전엔 호출마다 같은 모델에서 백오프 재시도(1초·4초)를
 // 반복한 뒤에야 폴백해, 봇 호출 하나하나가 수 초씩 늦어지고 제한도 더 오래 풀리지 않았다.
+// 처음엔 429만 대상이었는데, 2026-09-18 devin 미로그인 모델이 호출마다 502를 맞고 폴백해 같은 실패가
+// 18회 반복됐다 — 폴백이 일어났다는 것 자체가 "이 모델은 지금 못 쓴다"는 신호라 실패 종류를 가리지 않는다.
 // 폴백할 다음 모델이 없으면 건너뛰지 않고 그대로 시도한다.
-const RATE_LIMIT_COOLDOWN_MS = 120_000;
-const rateLimitedUntil = new Map<string, number>();
-const isRateLimited = (e: unknown) => /\b429\b|rate.?limit|\b1302\b/i.test(String((e as Error)?.message ?? e));
-const coolingDown = (key: string) => (rateLimitedUntil.get(key) ?? 0) > Date.now();
+const FAIL_COOLDOWN_MS = 120_000;
+const skipUntil = new Map<string, number>();
+const coolingDown = (key: string) => (skipUntil.get(key) ?? 0) > Date.now();
 
 // 폴백 체인에서 실제로 쓸 수 있는 다음 모델 — 해석 불가 항목과, 도구가 필요할 때 도구 미지원(CLI) 모델은 건너뛴다
 function nextUsable(key: string, needsTools: boolean): Resolved | null {
@@ -80,7 +81,7 @@ export async function chatOnce(
     let next: Resolved | null = null;
     let failure: unknown;
     if (coolingDown(key) && (next = nextUsable(key, needsTools))) {
-      failure = new Error("최근 속도 제한(429) — 대기 없이 다음 모델로");
+      failure = new Error("최근 실패로 건너뜀 — 대기 없이 다음 모델로");
     } else {
       try {
         const r = await chatOnceAttempt(ep, mdl, messages, opts);
@@ -89,7 +90,7 @@ export async function chatOnce(
         return r;
       } catch (e) {
         if (opts.signal?.aborted || !shouldFallback(e)) throw e;
-        if (isRateLimited(e)) rateLimitedUntil.set(key, Date.now() + RATE_LIMIT_COOLDOWN_MS);
+        skipUntil.set(key, Date.now() + FAIL_COOLDOWN_MS);
         next = nextUsable(key, needsTools);
         if (!next) throw e;
         failure = e;
@@ -193,7 +194,7 @@ export async function* streamChat(
     let failMsg: string | null = null;
     let next: Resolved | null = null;
     if (coolingDown(key) && (next = nextUsable(key, false))) {
-      failMsg = "최근 속도 제한(429) — 대기 없이 다음 모델로";
+      failMsg = "최근 실패로 건너뜀 — 대기 없이 다음 모델로";
     } else {
       let produced = false;
       let noted = !origin;
@@ -209,7 +210,7 @@ export async function* streamChat(
         failMsg = String((e as Error).message);
       }
       if (!failMsg) return;
-      if (isRateLimited(failMsg)) rateLimitedUntil.set(key, Date.now() + RATE_LIMIT_COOLDOWN_MS);
+      skipUntil.set(key, Date.now() + FAIL_COOLDOWN_MS);
       next = nextUsable(key, false);
       if (!next) { yield { type: "error", error: failMsg }; return; }
     }

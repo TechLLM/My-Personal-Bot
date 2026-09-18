@@ -77,3 +77,36 @@ test("프로바이더 인증·한도 오류는 원인과 조치가 보이는 안
   expect(friendlyProviderError('오류 429: {"error":{"code":"1302","message":"Rate limit reached"}}')).toContain("요청 한도");
   expect(friendlyProviderError("도구 실행 시간 초과(120초)")).toBe("도구 실행 시간 초과(120초)");
 });
+
+// 2026-09-18 사고: devin 미로그인 모델(airoute/devin/swe-2-max)이 호출마다 502를 맞고 폴백해
+// 같은 실패가 18회 반복됐다 — 쿨다운 대상이 429뿐이라 죽은 모델을 매번 다시 두드렸다
+test("429가 아닌 실패로 폴백한 모델도 쿨다운돼 다시 두드리지 않는다", async () => {
+  setSetting("custom_providers", JSON.stringify([
+    { id: "t-dead", baseUrl: "http://dead.test/v1", apiKey: "k", models: ["m"] },
+    { id: "t-alive", baseUrl: "http://alive.test/v1", apiKey: "k", models: ["m"] },
+  ]));
+  setSetting("fallback_chain", "t-dead → t-alive");
+  const calls = { dead: 0, alive: 0 };
+  const saved = globalThis.fetch;
+  globalThis.fetch = (async (url: unknown) => {
+    if (String(url).includes("dead.test")) {
+      calls.dead++;
+      return new Response('{"error":{"message":"devin exited 1: Error: Not logged in."}}', { status: 502, headers: { "retry-after": "0.01" } });
+    }
+    calls.alive++;
+    return new Response(JSON.stringify({ choices: [{ message: { content: "살아있는 응답" } }] }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as unknown as typeof fetch;
+  try {
+    const { endpoint, model } = resolveModel("t-dead/m");
+    const first = await chatOnce(endpoint, model, [{ role: "user", content: "안녕" }]);
+    expect(first.content).toBe("살아있는 응답");
+    const deadAfterFirst = calls.dead;
+    expect(deadAfterFirst).toBeGreaterThanOrEqual(1);
+
+    const second = await chatOnce(endpoint, model, [{ role: "user", content: "다시" }]);
+    expect(second.content).toBe("살아있는 응답");
+    expect(calls.dead).toBe(deadAfterFirst); // 쿨다운 중 — 죽은 모델을 다시 부르지 않는다
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
