@@ -12,3 +12,4 @@ data/workspace
 server/data/workspace
 server/data/*.key
 server/.certs/
+evolve/candidates/
