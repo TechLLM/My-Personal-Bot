@@ -30,13 +30,14 @@ export function searchCriteria(args: { since?: unknown; unseen?: unknown; from?:
 }
 
 // 본문으로 읽을 파트 — text/plain 우선, 없으면 text/html
-export function pickTextPart(node: any): { part: string; type: string; charset?: string } | null {
+export interface TextPart { part: string; type: string; charset?: string; encoding?: string }
+export function pickTextPart(node: any): TextPart | null {
   if (!node) return null;
   const type = String(node.type ?? "").toLowerCase();
   if (type === "text/plain" || type === "text/html") {
-    return { part: String(node.part || "1"), type, charset: node.parameters?.charset };
+    return { part: String(node.part || "1"), type, charset: node.parameters?.charset, encoding: node.encoding };
   }
-  let html: { part: string; type: string; charset?: string } | null = null;
+  let html: TextPart | null = null;
   for (const kid of node.childNodes ?? []) {
     const r = pickTextPart(kid);
     if (r?.type === "text/plain") return r;
@@ -52,6 +53,30 @@ export function attachmentNames(node: any, out: string[] = []): string[] {
   if (name && String(node.disposition ?? "").toLowerCase() === "attachment") out.push(String(name));
   for (const kid of node.childNodes ?? []) attachmentNames(kid, out);
   return out;
+}
+
+// fetch(bodyParts)로 받은 조각을 디코딩한다 — download와 달리 전송 인코딩이 풀리지 않은 raw다.
+// 전송 인코딩(base64·quoted-printable)은 반드시 **바이트 단계에서 먼저** 풀고 그 다음 charset을 적용한다.
+// 순서를 바꾸면 =ED=95=9C 같은 한글 바이트가 개별 문자로 해석돼 깨진다
+export function decodeBodyChunk(raw: Buffer, part: TextPart): string {
+  const enc = String(part.encoding ?? "").toLowerCase();
+  let buf = raw;
+  if (enc === "base64") {
+    try { buf = Buffer.from(raw.toString("ascii").replace(/\s+/g, ""), "base64"); } catch {}
+  } else if (enc === "quoted-printable") {
+    const ascii = raw.toString("ascii").replace(/=\r?\n/g, ""); // soft line break
+    const bytes: number[] = [];
+    for (let i = 0; i < ascii.length; i++) {
+      const hex = ascii.slice(i + 1, i + 3);
+      if (ascii[i] === "=" && /^[0-9A-Fa-f]{2}$/.test(hex)) { bytes.push(parseInt(hex, 16)); i += 2; }
+      else bytes.push(ascii.charCodeAt(i));
+    }
+    buf = Buffer.from(bytes);
+  }
+  let text: string;
+  try { text = new TextDecoder(part.charset || "utf-8").decode(buf); } catch { text = buf.toString("utf8"); }
+  if (part.type === "text/html") text = htmlToText(text);
+  return text.replace(/\s+/g, " ").trim();
 }
 
 export function htmlToText(html: string): string {
@@ -89,9 +114,9 @@ async function withMailbox<T>(mailbox: string, fn: (client: any) => Promise<T>):
 export async function mailList(args: Record<string, unknown>): Promise<string> {
   const mailbox = String(args.mailbox || "INBOX");
   const limit = Math.min(Math.max(Number(args.limit) || 30, 1), 100);
+  const preview = args.preview !== false && args.preview !== "false";
   return (await withMailbox(mailbox, async (client) => {
     const crit = searchCriteria(args);
-    const rows: string[] = [];
     let range: string | number[];
     let total: number;
     let byUid = true;
@@ -108,14 +133,44 @@ export async function mailList(args: Record<string, unknown>): Promise<string> {
       range = `${Math.max(1, total - limit + 1)}:${total}`;
       byUid = false;
     }
-    for await (const m of client.fetch(range, { envelope: true, flags: true }, { uid: byUid })) {
+    const metas: { uid: number; line: string; part: TextPart | null }[] = [];
+    for await (const m of client.fetch(range, { envelope: true, flags: true, bodyStructure: preview }, { uid: byUid })) {
       const e = m.envelope ?? {};
       const f = e.from?.[0];
       const seen = m.flags?.has?.("\\Seen");
-      rows.push(`- uid ${m.uid} | ${fmtDate(e.date)} | ${f?.name || f?.address || "?"}${f?.address ? ` <${f.address}>` : ""} | ${e.subject || "(제목 없음)"}${seen ? "" : " | 안읽음"}`);
+      metas.push({
+        uid: Number(m.uid),
+        line: `- uid ${m.uid} | ${fmtDate(e.date)} | ${f?.name || f?.address || "?"}${f?.address ? ` <${f.address}>` : ""} | ${e.subject || "(제목 없음)"}${seen ? "" : " | 안읽음"}`,
+        part: preview ? pickTextPart(m.bodyStructure) : null,
+      });
     }
-    rows.reverse(); // 최신이 위로
-    return `${mailbox} — ${Object.keys(crit).length ? `조건 일치 ${total}건` : `전체 ${total}건`} 중 최근 ${rows.length}건 (제목만으로 요약하지 말 것 — 본문이 필요하면 uid들을 쉼표로 묶어 mail_read를 한 번 호출하세요)\n${rows.join("\n")}`;
+    metas.reverse(); // 최신이 위로
+
+    // 본문 앞부분을 같은 연결에서 함께 받아 각 줄에 붙인다 —
+    // 목록에 제목만 있으면 봇이 제목으로만 요약하고 광고·업무 분류도 틀린다 (2026-09-18 실측)
+    if (preview && metas.length) {
+      const byPart = new Map<string, number[]>();
+      for (const m of metas) if (m.part) byPart.set(m.part.part, [...(byPart.get(m.part.part) ?? []), m.uid]);
+      const got = new Map<number, string>();
+      for (const [part, uids] of byPart) {
+        try {
+          for await (const r of client.fetch(uids, { bodyParts: [{ key: part, start: 0, maxLength: 700 }] }, { uid: true })) {
+            const raw = r.bodyParts?.get?.(part) as Buffer | undefined;
+            const meta = metas.find((x) => x.uid === Number(r.uid));
+            if (raw?.length && meta?.part) got.set(Number(r.uid), decodeBodyChunk(raw, meta.part));
+          }
+        } catch {} // 미리보기는 부가 정보 — 실패해도 목록은 돌려준다
+      }
+      for (const m of metas) {
+        const t = got.get(m.uid);
+        if (t) m.line += `\n    ↳ ${t.slice(0, 200)}${t.length > 200 ? "…" : ""}`;
+      }
+    }
+    const head = `${mailbox} — ${Object.keys(crit).length ? `조건 일치 ${total}건` : `전체 ${total}건`} 중 최근 ${metas.length}건`;
+    const guide = preview
+      ? `\n\n[↳ 는 본문 앞부분입니다] 분류·개요는 이것으로 판단하고, 요청사항·기한·첨부처럼 정확한 내용이 필요한 메일만 골라 본문을 읽으세요.\n[본문 읽기] mail_read(uid: "${metas.slice(0, 15).map((m) => m.uid).join(",")}") — 이렇게 여러 통을 한 번에 넣으세요. 한 통씩 나눠 부르지 마세요`
+      : `\n\n(제목만으로 요약하지 말 것 — 본문이 필요하면 uid들을 쉼표로 묶어 mail_read를 한 번 호출하세요)`;
+    return `${head}${guide}\n${metas.map((m) => m.line).join("\n")}`;
   })) as string;
 }
 

@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { db } from "./db";
-import { searchCriteria, pickTextPart, attachmentNames, htmlToText, parseUids } from "./mail";
+import { searchCriteria, pickTextPart, attachmentNames, htmlToText, parseUids, decodeBodyChunk } from "./mail";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
 
@@ -55,4 +55,15 @@ test("uid는 쉼표·공백·배열로 여러 통을 받는다 — 한 연결로
   expect(parseUids({ id: "42" })).toEqual(["42"]);
   expect(parseUids({ uid: "abc, 12" })).toEqual(["12"]); // 숫자가 아닌 값은 버린다
   expect(parseUids({})).toEqual([]);
+});
+
+test("부분 수신 본문 조각 디코딩 — 전송 인코딩을 바이트 단계에서 먼저 푼다", () => {
+  // quoted-printable로 실린 UTF-8 한글 ("한글 = test")
+  const qp = Buffer.from("=ED=95=9C=EA=B8=80 =3D test", "ascii");
+  expect(decodeBodyChunk(qp, { part: "1", type: "text/plain", encoding: "quoted-printable", charset: "utf-8" })).toBe("한글 = test");
+  // base64 + html
+  const b64 = Buffer.from(Buffer.from("<p>제주항공 <b>견적</b></p>", "utf8").toString("base64"), "ascii");
+  expect(decodeBodyChunk(b64, { part: "1", type: "text/html", encoding: "base64", charset: "utf-8" })).toBe("제주항공 견적");
+  // 인코딩 없음 — 공백만 정리
+  expect(decodeBodyChunk(Buffer.from("줄1\n\n줄2  끝", "utf8"), { part: "1", type: "text/plain" })).toBe("줄1 줄2 끝");
 });
