@@ -3,7 +3,7 @@ import { api, type ProviderCard, type Agent, type Model, type SiteLogin, mybotFe
 import {
   X, Crown, AlarmClock, Trash2, Folder, Cpu, Search, Image as ImageIcon, Bot,
   Clock, Wrench, Globe, Bell, Brain, Settings2, Loader2, ScrollText,
-  ChevronDown, ChevronUp, Plus, Zap, KeyRound,
+  ChevronDown, ChevronUp, Plus, Zap, KeyRound, LogIn,
 } from "lucide-react";
 import { AgentIcon } from "./icons";
 
@@ -30,6 +30,16 @@ function ProviderRow({ p, onChanged }: { p: ProviderCard; onChanged: () => void 
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [keyOpen, setKeyOpen] = useState(false);
+  const [reauthing, setReauthing] = useState(false);
+  const [waiting, setWaiting] = useState(false); // 브라우저 로그인 완료 대기 — 인증 반영까지 폴링
+
+  // 브라우저 로그인 진행 중 인증이 반영될 때까지 5초 간격으로 카드 상태를 갱신 (최대 ~2분)
+  useEffect(() => {
+    if (!waiting) return;
+    let n = 0;
+    const t = setInterval(() => { n++; onChanged(); if (p.authed || n >= 24) { setWaiting(false); clearInterval(t); } }, 5000);
+    return () => clearInterval(t);
+  }, [waiting, p.authed]);
 
   const test = async () => {
     setTesting(true); setResult(null);
@@ -38,6 +48,21 @@ function ProviderRow({ p, onChanged }: { p: ProviderCard; onChanged: () => void 
       setResult(r.ok ? `✓ 연결 성공 (${r.ms}ms)${r.detail ? ` — ${r.detail}` : ""}` : `✗ ${r.error}`);
     } catch (e) { setResult(`✗ ${(e as Error).message}`); }
     setTesting(false);
+  };
+  const reauth = async () => {
+    setReauthing(true); setResult(null);
+    try {
+      const r = await api.reauthProvider(p.id);
+      if (r.ok) {
+        setResult(`✓ ${r.detail ?? "인증됐습니다"}`);
+        if (r.method === "login") setWaiting(true); // 브라우저 로그인 완료를 기다리며 상태 폴링
+        onChanged();
+      } else {
+        setResult(`✗ ${r.error ?? "재인증 실패"}`);
+        if (r.needsKey) setKeyOpen(true);
+      }
+    } catch (e) { setResult(`✗ ${(e as Error).message}`); }
+    setReauthing(false);
   };
   const saveKey = async () => {
     if (!key.trim()) return;
@@ -72,6 +97,11 @@ function ProviderRow({ p, onChanged }: { p: ProviderCard; onChanged: () => void 
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
+          {(p.authType === "oauth" || p.authType === "cli") && (!p.authed || p.expired) && (
+            <button onClick={reauth} disabled={reauthing || !p.enabled} className="rounded-lg p-1.5 text-amber-600 hover:bg-amber-100 hover:text-amber-700 disabled:opacity-40" title={p.expired ? "토큰 만료 — 재인증" : "로그인 / 재인증"}>
+              {reauthing || waiting ? <Loader2 size={13} className="animate-spin" /> : <LogIn size={13} />}
+            </button>
+          )}
           {p.authType === "apikey" && (
             <button onClick={() => setKeyOpen(!keyOpen)} className="rounded-lg p-1.5 text-stone-500 hover:bg-stone-200 hover:text-stone-800" title={p.hasManualKey ? "키 교체" : "API 키 입력"}>
               <KeyRound size={13} />

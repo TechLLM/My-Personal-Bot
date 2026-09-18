@@ -2,7 +2,7 @@
 // 각각 MyBot의 chatOnce/streamChat 인터페이스로 변환
 import { spawn } from "node:child_process";
 import type { Endpoint } from "./index";
-import { CLI_PATH_PREFIX, refreshCodexAuth } from "./registry";
+import { CLI_PATH_PREFIX, refreshCodexAuth, refreshGeminiAuth } from "./registry";
 import type { ChatResult, ToolCall, StreamEvent } from "./openaiCompat";
 
 // 호출별 상한 — 외부 signal이 있어도 개별 호출은 이 상한 안에서 끝나야 한다.
@@ -303,6 +303,7 @@ function fromGemini(j: any): ChatResult {
 
 export async function geminiChatOnce(endpoint: Endpoint, model: string, messages: Msg[], opts: { signal?: AbortSignal; tools?: any[] } = {}): Promise<ChatResult> {
   let lastErr: Error | null = null;
+  let refreshed = false; // 401 → OAuth 갱신 후 재시도는 한 번
   for (let attempt = 0; attempt < 3; attempt++) {
     if (opts.signal?.aborted) break;
     if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
@@ -320,6 +321,11 @@ export async function geminiChatOnce(endpoint: Endpoint, model: string, messages
     if (!res.ok) {
       const txt = (await res.text()).slice(0, 300);
       const err = new Error(`오류 ${res.status}: ${txt}`);
+      if (res.status === 401 && !refreshed) {
+        refreshed = true;
+        const fresh = await refreshGeminiAuth();
+        if (fresh) { endpoint.accessToken = fresh; continue; }
+      }
       if (res.status >= 500 || res.status === 429) { lastErr = err; continue; }
       throw err;
     }
@@ -329,11 +335,23 @@ export async function geminiChatOnce(endpoint: Endpoint, model: string, messages
 }
 
 export async function* geminiStream(endpoint: Endpoint, model: string, messages: Msg[], opts: { signal?: AbortSignal; tools?: any[] } = {}): AsyncGenerator<StreamEvent> {
-  const res = await fetch(geminiUrl(endpoint, model, true), {
+  let res = await fetch(geminiUrl(endpoint, model, true), {
     method: "POST", headers: geminiHeaders(endpoint),
     body: JSON.stringify(geminiBody(endpoint, model, messages, opts.tools ?? [])),
     signal: callSignal(opts.signal, 300_000),
   });
+  // 구독 OAuth 토큰 만료(401) — refresh_token으로 갱신 후 한 번 재시도
+  if (!res.ok && res.status === 401) {
+    const fresh = await refreshGeminiAuth();
+    if (fresh) {
+      endpoint.accessToken = fresh;
+      res = await fetch(geminiUrl(endpoint, model, true), {
+        method: "POST", headers: geminiHeaders(endpoint),
+        body: JSON.stringify(geminiBody(endpoint, model, messages, opts.tools ?? [])),
+        signal: callSignal(opts.signal, 300_000),
+      });
+    }
+  }
   if (!res.ok || !res.body) {
     const body = await res.text().catch(() => "");
     yield { type: "error", error: `${endpoint.name} ${res.status}: ${body.slice(0, 300)}` };

@@ -1,8 +1,8 @@
 // 프로바이더 레지스트리 — 프록시 없이 각 AI 서비스에 직접 연결
 // 자격증명은 로컬 저장소에서 자동 해석: 설정값 → opencode auth.json → codex/gemini OAuth 파일 → airoute 키체인 → 환경변수
 import { getSetting, setSetting } from "../db";
-import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync, renameSync, readdirSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
 import { join } from "node:path";
 
 export type ProviderKind = "openai" | "responses" | "gemini" | "cli";
@@ -211,6 +211,89 @@ export function refreshCodexAuth(): Promise<string | null> {
   return codexRefreshInflight;
 }
 
+// ─── Gemini(Code Assist 구독) OAuth 토큰 갱신 ───
+// 클라이언트 정보는 설치된 gemini-cli 패키지에서 읽는다 — 저장소에 박지 않는다.
+let geminiRefreshInflight: Promise<string | null> | null = null;
+
+function geminiClientCreds(): { clientId: string; clientSecret: string } | null {
+  const dirs = [
+    join(HOME, ".npm-global", "lib", "node_modules", "@google", "gemini-cli"),
+    "/opt/homebrew/lib/node_modules/@google/gemini-cli",
+    "/usr/local/lib/node_modules/@google/gemini-cli",
+  ];
+  for (const dir of dirs) {
+    try {
+      const bundle = join(dir, "bundle");
+      for (const f of readdirSync(bundle).filter((n) => n.endsWith(".js"))) {
+        const src = readFileSync(join(bundle, f), "utf8");
+        const id = src.match(/OAUTH_CLIENT_ID = "([^"]+)"/)?.[1];
+        const sec = src.match(/OAUTH_CLIENT_SECRET = "([^"]+)"/)?.[1];
+        if (id && sec) return { clientId: id, clientSecret: sec };
+      }
+    } catch {}
+  }
+  return null;
+}
+
+export function refreshGeminiAuth(): Promise<string | null> {
+  geminiRefreshInflight ??= (async () => {
+    try {
+      const c = readJson(GEMINI_AUTH);
+      const rt = c?.refresh_token;
+      const creds = geminiClientCreds();
+      if (!rt || !creds) return null;
+      const res = await fetch("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ client_id: creds.clientId, client_secret: creds.clientSecret, grant_type: "refresh_token", refresh_token: rt }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) return null;
+      const j = (await res.json()) as any;
+      if (!j.access_token) return null;
+      Object.assign(c, { access_token: j.access_token, expires_in: j.expires_in, expiry_date: Date.now() + (j.expires_in ?? 3600) * 1000 });
+      const tmp = `${GEMINI_AUTH}.tmp-${process.pid}`;
+      writeFileSync(tmp, JSON.stringify(c));
+      renameSync(tmp, GEMINI_AUTH);
+      authCache.delete("gemini");
+      console.log("[mybot] gemini OAuth 토큰 갱신 완료");
+      return j.access_token as string;
+    } catch (e) {
+      console.warn(`[mybot] gemini OAuth 토큰 갱신 실패: ${(e as Error).message}`);
+      return null;
+    } finally {
+      geminiRefreshInflight = null;
+    }
+  })();
+  return geminiRefreshInflight;
+}
+
+// ─── 프로바이더 재로그인 — CLI의 브라우저 로그인을 백그라운드로 실행 ───
+// 완료되면 각 CLI가 자체 자격증명 파일을 갱신하고, 다음 resolveAuth가 새 토큰을 읽는다.
+const loginInFlight = new Map<string, number>();
+export function startProviderLogin(providerId: string): { ok: boolean; error?: string } {
+  const cmds: Record<string, { cmd: string; args: string[] }> = {
+    openai: { cmd: "codex", args: ["login"] },
+    grok: { cmd: "grok", args: ["login"] },
+    cursor: { cmd: "cursor-agent", args: ["login"] },
+  };
+  const spec = cmds[providerId];
+  if (!spec) return { ok: false, error: "이 프로바이더는 자동 재로그인을 지원하지 않습니다" };
+  const bin = findCli(spec.cmd);
+  if (!bin) return { ok: false, error: `${spec.cmd} CLI가 설치돼 있지 않습니다` };
+  const last = loginInFlight.get(providerId) ?? 0;
+  if (Date.now() - last < 60_000) return { ok: true }; // 이미 로그인 창이 열려 있음 — 중복 실행 방지
+  loginInFlight.set(providerId, Date.now());
+  try {
+    const child = spawn(bin, spec.args, { detached: true, stdio: "ignore", env: { ...process.env, PATH: `${CLI_PATH_PREFIX}:${process.env.PATH}` } });
+    child.unref();
+    console.log(`[mybot] ${providerId} 재로그인 프로세스 시작 (pid ${child.pid})`);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
 function resolveAuthUncached(def: ProviderDef): ResolvedAuth {
   // 0. 커스텀 프로바이더 저장 키
   if (def.apiKey) return { apiKey: def.apiKey, source: "설정" };
@@ -238,7 +321,11 @@ function resolveAuthUncached(def: ProviderDef): ResolvedAuth {
     }
     if (def.id === "gemini") {
       const g = readJson(GEMINI_AUTH);
-      if (g?.access_token) return { accessToken: g.access_token, source: "gemini", expired: !!(g.expiry_date && g.expiry_date < Date.now()) };
+      if (g?.access_token) {
+        const expired = !!(g.expiry_date && g.expiry_date < Date.now());
+        if (expired) void refreshGeminiAuth();
+        return { accessToken: g.access_token, source: "gemini", expired };
+      }
       const oc = readJson(OPENCODE_AUTH)?.google;
       if (oc?.access) return { accessToken: oc.access, source: "opencode", expired: !!(oc.expires && oc.expires < Date.now()) };
       return {};

@@ -86,6 +86,7 @@ export const api = {
   providers: () => mybotFetch("/api/models/providers").then(j) as Promise<{ providers: ProviderCard[] }>,
   testProvider: (id: string) => mybotFetch(`/api/models/providers/${id}/test`, { method: "POST" }).then(j) as Promise<{ ok: boolean; ms?: number; detail?: string; error?: string }>,
   setProviderKey: (id: string, key: string) => mybotFetch(`/api/models/providers/${id}/key`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key }) }).then(j),
+  reauthProvider: (id: string) => mybotFetch(`/api/models/providers/${id}/reauth`, { method: "POST" }).then(j) as Promise<{ ok: boolean; method?: string; detail?: string; error?: string; needsKey?: boolean }>,
   toggleProvider: (id: string) => mybotFetch(`/api/models/providers/${id}/toggle`, { method: "POST" }).then(j),
   addCustomProvider: (p: { id: string; name?: string; baseUrl: string; apiKey?: string; models?: string[] }) =>
     mybotFetch("/api/models/providers/custom", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) }).then(j),

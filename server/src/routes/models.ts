@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { getEndpoints, listRemoteModels, guessCapabilities, endpointFor } from "../providers";
 import {
   allProviders, findProvider, resolveAuth, providerEnabled, setProviderEnabled,
-  setManualKey, clearAuthCache, customProviders, type ProviderDef,
+  setManualKey, clearAuthCache, customProviders, refreshCodexAuth, refreshGeminiAuth, startProviderLogin, type ProviderDef,
 } from "../providers/registry";
 import { getSetting, setSetting } from "../db";
 
@@ -88,6 +88,34 @@ export const modelsRoute = new Hono()
     setManualKey(id, key?.trim() || null);
     clearAuthCache();
     return c.json({ ok: true });
+  })
+
+  // 재인증 — OAuth는 토큰 갱신을 먼저 시도(사용자 작업 없이 복구), 실패 시 해당 CLI의 로그인 프로세스를 연다
+  .post("/providers/:id/reauth", async (c) => {
+    const id = c.req.param("id");
+    const def = findProvider(id);
+    if (!def) return c.json({ ok: false, error: "알 수 없는 프로바이더" }, 404);
+    if (def.authType === "oauth") {
+      const fresh = def.id === "openai" ? await refreshCodexAuth()
+        : def.id === "gemini" ? await refreshGeminiAuth()
+        : null;
+      if (fresh) return c.json({ ok: true, method: "refresh", detail: "토큰을 자동으로 갱신했습니다" });
+      if (def.id === "openai") {
+        const r = startProviderLogin("openai");
+        return r.ok
+          ? c.json({ ok: true, method: "login", detail: "codex 로그인이 시작됐습니다 — 열린 브라우저에서 로그인을 완료하세요. 완료되면 자동으로 연결됩니다." })
+          : c.json({ ok: false, error: r.error });
+      }
+      return c.json({ ok: false, error: "자동 갱신에 실패했습니다 — 터미널에서 gemini를 실행해 /auth로 다시 로그인하세요" });
+    }
+    if (def.authType === "cli") {
+      const r = startProviderLogin(def.id);
+      return r.ok
+        ? c.json({ ok: true, method: "login", detail: `${def.cmd} 로그인이 시작됐습니다 — 열린 창에서 로그인을 완료하세요.` })
+        : c.json({ ok: false, error: r.error });
+    }
+    if (def.authType === "apikey") return c.json({ ok: false, error: "API 키 프로바이더입니다 — 키 입력으로 갱신하세요", needsKey: true });
+    return c.json({ ok: false, error: "인증이 필요 없는 프로바이더입니다" });
   })
 
   // 활성/비활성
