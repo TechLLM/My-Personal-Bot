@@ -74,4 +74,6 @@ test("HTML 조각은 head·style을 버리고 본문 영역만 남긴다", () =>
   // 잘려서 </style>이 없는 조각 — 끝까지 잘라내야 CSS가 미리보기를 채우지 않는다
   const cut = `<html><head><style>@media not all and (min-resolution: 0.001dpcm) { img { top: -1px; }`;
   expect(htmlToText(htmlBodyFragment(cut))).toBe("");
+  // 끝이 잘린 태그가 그대로 남으면 미리보기에 마크업이 보인다
+  expect(htmlToText(htmlBodyFragment('<body><p>점검 안내</p><td height="26" style="heig'))).toBe("점검 안내");
 });

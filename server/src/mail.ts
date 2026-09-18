@@ -84,7 +84,9 @@ export function decodeBodyChunk(raw: Buffer, part: TextPart): string {
 export function htmlBodyFragment(html: string): string {
   const b = html.search(/<body[^>]*>/i);
   const t = b >= 0 ? html.slice(html.indexOf(">", b) + 1) : html;
-  return t.replace(/<(style|script|head)\b[\s\S]*?(?:<\/\1\s*>|$)/gi, "");
+  return t
+    .replace(/<(style|script|head)\b[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
+    .replace(/<[^>]*$/, ""); // 조각 끝에서 잘린 태그 — 남기면 <td height="26" 같은 게 미리보기에 보인다
 }
 
 export function htmlToText(html: string): string {
