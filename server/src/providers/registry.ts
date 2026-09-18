@@ -1,7 +1,7 @@
 // 프로바이더 레지스트리 — 프록시 없이 각 AI 서비스에 직접 연결
 // 자격증명은 로컬 저장소에서 자동 해석: 설정값 → opencode auth.json → codex/gemini OAuth 파일 → airoute 키체인 → 환경변수
 import { getSetting, setSetting } from "../db";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
@@ -161,6 +161,56 @@ export function resolveAuth(def: ProviderDef): ResolvedAuth {
   return v;
 }
 
+// ─── codex(ChatGPT 구독) OAuth 토큰 갱신 ───
+// access_token은 JWT로 만료가 있고 refresh_token으로 갱신해야 한다 — 미갱신 시
+// 만료 경계에서 401 token_expired가 나고 실행이 통째로 error로 끝났다.
+// codex CLI와 같은 파일을 쓰므로 임시 파일 + rename으로 원자적으로 갱신한다.
+const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+let codexRefreshInflight: Promise<string | null> | null = null;
+
+// JWT의 exp 클레임(초)을 ms로 — access_token의 실제 만료 시각. 파일의 last_refresh는 발급 시각이라 만료 판정에 못 쓴다
+function jwtExp(token: string): number | undefined {
+  try {
+    const p = token.split(".")[1];
+    if (!p) return undefined;
+    const exp = JSON.parse(Buffer.from(p, "base64url").toString("utf8"))?.exp;
+    return typeof exp === "number" ? exp * 1000 : undefined;
+  } catch { return undefined; }
+}
+
+export function refreshCodexAuth(): Promise<string | null> {
+  codexRefreshInflight ??= (async () => {
+    try {
+      const c = readJson(CODEX_AUTH);
+      const rt = c?.tokens?.refresh_token;
+      if (!rt) return null;
+      const res = await fetch("https://auth.openai.com/oauth/token", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ client_id: CODEX_CLIENT_ID, grant_type: "refresh_token", refresh_token: rt }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) return null;
+      const j = (await res.json()) as any;
+      if (!j.access_token) return null;
+      c.tokens = { ...c.tokens, access_token: j.access_token, id_token: j.id_token ?? c.tokens.id_token, refresh_token: j.refresh_token ?? rt };
+      c.last_refresh = new Date().toISOString();
+      const tmp = `${CODEX_AUTH}.tmp-${process.pid}`;
+      writeFileSync(tmp, JSON.stringify(c));
+      renameSync(tmp, CODEX_AUTH);
+      authCache.delete("openai");
+      console.log("[mybot] codex OAuth 토큰 갱신 완료");
+      return j.access_token as string;
+    } catch (e) {
+      console.warn(`[mybot] codex OAuth 토큰 갱신 실패: ${(e as Error).message}`);
+      return null;
+    } finally {
+      codexRefreshInflight = null;
+    }
+  })();
+  return codexRefreshInflight;
+}
+
 function resolveAuthUncached(def: ProviderDef): ResolvedAuth {
   // 0. 커스텀 프로바이더 저장 키
   if (def.apiKey) return { apiKey: def.apiKey, source: "설정" };
@@ -177,8 +227,10 @@ function resolveAuthUncached(def: ProviderDef): ResolvedAuth {
     if (def.id === "openai") {
       const c = readJson(CODEX_AUTH);
       if (c?.tokens?.access_token) {
-        const exp = Number(c.tokens?.expires_at ?? c.last_refresh ?? 0) || undefined;
-        return { accessToken: c.tokens.access_token, accountId: c.tokens.account_id, source: "codex", expired: !!(exp && exp < Date.now()) };
+        const exp = jwtExp(c.tokens.access_token);
+        const expired = !!(exp && exp < Date.now());
+        if (expired) void refreshCodexAuth(); // 만료 토큰을 미리 갱신해 다음 호출이 401로 죽지 않게 한다
+        return { accessToken: c.tokens.access_token, accountId: c.tokens.account_id, source: "codex", expired };
       }
       const oc = readJson(OPENCODE_AUTH)?.openai;
       if (oc?.access) return { accessToken: oc.access, accountId: oc.accountId, source: "opencode", expired: !!(oc.expires && oc.expires < Date.now()) };

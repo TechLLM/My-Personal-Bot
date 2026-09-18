@@ -2,7 +2,7 @@
 // 각각 MyBot의 chatOnce/streamChat 인터페이스로 변환
 import { spawn } from "node:child_process";
 import type { Endpoint } from "./index";
-import { CLI_PATH_PREFIX } from "./registry";
+import { CLI_PATH_PREFIX, refreshCodexAuth } from "./registry";
 import type { ChatResult, ToolCall, StreamEvent } from "./openaiCompat";
 
 // 호출별 상한 — 외부 signal이 있어도 개별 호출은 이 상한 안에서 끝나야 한다.
@@ -98,6 +98,7 @@ export async function responsesChatOnce(endpoint: Endpoint, model: string, messa
   const base = (endpoint.baseUrl ?? "https://api.openai.com/v1").replace(/\/$/, "");
   let lastErr: Error | null = null;
   let effort: string | undefined = opts.reasoningEffort;
+  let refreshed = false; // 401 token_expired → OAuth 갱신 후 재시도는 한 번
   for (let attempt = 0; attempt < 3; attempt++) {
     if (opts.signal?.aborted) break;
     if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
@@ -117,6 +118,12 @@ export async function responsesChatOnce(endpoint: Endpoint, model: string, messa
       const err = new Error(`오류 ${res.status}: ${txt}`);
       // reasoning effort 미지원 → 파라미터를 빼고 재시도 (한 번)
       if (res.status === 400 && effort && /reasoning|effort/i.test(txt)) { effort = undefined; continue; }
+      // 구독 OAuth 토큰 만료 — refresh_token으로 갱신한 뒤 같은 요청을 재시도한다
+      if (res.status === 401 && /token_expired|unauthorized|invalid.*token/i.test(txt) && !refreshed) {
+        refreshed = true;
+        const fresh = await refreshCodexAuth();
+        if (fresh) { endpoint.accessToken = fresh; continue; }
+      }
       if (res.status >= 500 || res.status === 429) { lastErr = err; continue; }
       throw err;
     }
@@ -151,8 +158,14 @@ export async function* responsesStream(endpoint: Endpoint, model: string, messag
     effort = undefined;
     res = await doFetch();
   }
+  // 구독 OAuth 토큰 만료(401) — refresh_token으로 갱신 후 한 번 재시도
+  let errBody = "";
+  if (!res.ok && res.status === 401 && /token_expired|unauthorized|invalid.*token/i.test((errBody = await res.text().catch(() => "")))) {
+    const fresh = await refreshCodexAuth();
+    if (fresh) { endpoint.accessToken = fresh; res = await doFetch(); errBody = ""; }
+  }
   if (!res.ok || !res.body) {
-    const body = await res.text().catch(() => "");
+    const body = errBody || await res.text().catch(() => "");
     yield { type: "error", error: `${endpoint.name} ${res.status}: ${body.slice(0, 300)}` };
     return;
   }
