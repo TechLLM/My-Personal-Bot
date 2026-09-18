@@ -302,6 +302,19 @@ try { db.exec(`CREATE TABLE IF NOT EXISTS experiments (
   created_at INTEGER NOT NULL,
   finished_at INTEGER
 )`); } catch {}
+
+// 개발 인스턴스가 검증을 마친 개선 패키지 — 서비스는 저장만 하고 사용자의 버전 업데이트로만 적용된다
+try { db.exec(`CREATE TABLE IF NOT EXISTS evolve_updates (
+  id TEXT PRIMARY KEY,
+  version INTEGER,                   -- 적용 시 부여되는 서비스 버전 번호
+  payload TEXT NOT NULL,             -- 패키지 JSON {summary, measurement{baseline,candidate,verdict,reason}, ops[]}
+  status TEXT NOT NULL DEFAULT 'pending', -- pending | applied | rejected | reverted
+  revert TEXT,                       -- 적용 전 상태로 되돌리는 ops JSON
+  restart_required INTEGER NOT NULL DEFAULT 0, -- 코드 표면 포함 — 적용·되돌리기 후 재시작 필요
+  source TEXT,                       -- 출처 (개발 인스턴스 실험 id)
+  created_at INTEGER NOT NULL,
+  applied_at INTEGER
+)`); } catch {}
 try { db.exec("CREATE INDEX IF NOT EXISTS idx_experiments_created ON experiments(created_at)"); } catch {}
 // 봇 아바타를 선형 얼굴 시드로 통일 — 기존 이모지 아바타도 전환
 db.exec("UPDATE agents SET avatar = 'face:' || id WHERE avatar IS NULL OR avatar NOT LIKE 'face:%'");

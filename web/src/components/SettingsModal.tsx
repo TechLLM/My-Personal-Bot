@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import { AgentIcon } from "./icons";
 
-type Section = "providers" | "search" | "image" | "agents" | "audit" | "routines" | "tools" | "browser" | "notify" | "memory" | "general";
+type Section = "providers" | "search" | "image" | "agents" | "audit" | "routines" | "tools" | "browser" | "notify" | "memory" | "updates" | "general";
 
 const SECTIONS: { id: Section; label: string; icon: any }[] = [
   { id: "providers", label: "모델 · 프로바이더", icon: Cpu },
@@ -20,6 +20,7 @@ const SECTIONS: { id: Section; label: string; icon: any }[] = [
   { id: "browser", label: "브라우저·계정", icon: Globe },
   { id: "notify", label: "알림", icon: Bell },
   { id: "memory", label: "메모리", icon: Brain },
+  { id: "updates", label: "업데이트", icon: Zap },
   { id: "general", label: "일반", icon: Settings2 },
 ];
 
@@ -112,6 +113,9 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   const [workspaces, setWorkspaces] = useState<any[]>([]);
   const [skills, setSkills] = useState<any[]>([]);
   const [routines, setRoutines] = useState<any[]>([]);
+  const [updates, setUpdates] = useState<any[]>([]);
+  const [appVersion, setAppVersion] = useState(0);
+  const [updBusy, setUpdBusy] = useState(false);
   const [wName, setWName] = useState(""); const [wInst, setWInst] = useState("");
   const [skName, setSkName] = useState(""); const [skPrompt, setSkPrompt] = useState("");
   const [rName, setRName] = useState(""); const [rPrompt, setRPrompt] = useState("");
@@ -176,6 +180,9 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
     mybotFetch(`/api/approvals/activity?${qs}`).then((r) => r.json()).then(setAudit).catch(() => {});
   };
   useEffect(() => { if (section === "audit") loadAudit(); }, [section, auditAgent, auditDays]);
+  const loadUpdates = () => api.evolveUpdates().then((d) => { setUpdates(d.updates); setAppVersion(d.appVersion); }).catch(() => {});
+  useEffect(() => { if (section === "updates") loadUpdates(); }, [section]);
+  const updAct = (fn: () => Promise<unknown>) => { setUpdBusy(true); fn().then(loadUpdates).catch(() => {}).finally(() => setUpdBusy(false)); };
 
   // 녹화 중 상태 폴링 — 10분 자동 종료도 UI에 반영
   useEffect(() => {
@@ -844,6 +851,49 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     {memOpen ? "접기" : `${memories.length - 5}개 더 보기`}
                   </button>
                 )}
+              </div>
+            )}
+
+            {section === "updates" && (
+              <div>
+                <H>버전 업데이트 <span className="ml-1 text-xs font-normal text-stone-500">현재 v{appVersion}</span></H>
+                <p className="mb-3 text-caption text-stone-500">개발 인스턴스가 검증을 마친 개선 패키지입니다. 적용은 여기서 수동으로만 이뤄집니다.</p>
+                <div className="space-y-2">
+                  {updates.map((u) => {
+                    const m = u.payload?.measurement;
+                    const gain = m?.baseline && m?.candidate
+                      ? `통과율 ${Math.round(m.baseline.passRate * 100)}%→${Math.round(m.candidate.passRate * 100)}% · 지연 ${Math.round(m.baseline.avgLatencyMs / 1000)}s→${Math.round(m.candidate.avgLatencyMs / 1000)}s`
+                      : m?.reason ?? "";
+                    return (
+                      <div key={u.id} className="rounded-lg bg-white px-3 py-2.5 text-xs">
+                        <div className="flex items-center gap-2">
+                          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${{ pending: "bg-amber-100 text-amber-700", applied: "bg-emerald-100 text-emerald-700", rejected: "bg-stone-200 text-stone-500", reverted: "bg-stone-200 text-stone-500" }[u.status as string] ?? "bg-stone-200 text-stone-500"}`}>
+                            {{ pending: "대기", applied: `v${u.version} 적용됨`, rejected: "거부됨", reverted: "되돌림" }[u.status as string] ?? u.status}
+                          </span>
+                          <span className="flex-1 font-medium text-stone-800">{u.payload?.summary}</span>
+                        </div>
+                        {gain && <div className="mt-1 text-caption text-stone-500">{gain}</div>}
+                        <div className="mt-1 text-caption text-stone-400">{u.payload?.ops?.map((o: any) => `${o.kind === "db" ? "설정" : "코드"}:${o.target}`).join(" · ")}</div>
+                        {!!u.restart_required && <div className="mt-1 text-caption text-amber-600">코드 변경 포함 — 서버 재시작 후 반영됩니다</div>}
+                        <div className="mt-2 flex gap-1.5">
+                          {u.status === "pending" && (
+                            <>
+                              <button disabled={updBusy} onClick={() => updAct(() => api.applyUpdate(u.id))}
+                                className="rounded-md bg-stone-900 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-stone-700 disabled:opacity-40">업데이트 적용</button>
+                              <button disabled={updBusy} onClick={() => updAct(() => api.rejectUpdate(u.id))}
+                                className="rounded-md bg-stone-200 px-2.5 py-1 text-[11px] text-stone-600 hover:bg-stone-300 disabled:opacity-40">거부</button>
+                            </>
+                          )}
+                          {u.status === "applied" && (
+                            <button disabled={updBusy} onClick={() => updAct(() => api.revertUpdate(u.id))}
+                              className="rounded-md bg-stone-200 px-2.5 py-1 text-[11px] text-stone-600 hover:bg-stone-300 disabled:opacity-40">이 버전 되돌리기</button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {!updates.length && <p className="text-xs text-stone-400">수신된 업데이트가 없습니다 — 개발 인스턴스에서 검증된 개선이 생기면 여기에 표시됩니다</p>}
+                </div>
               </div>
             )}
 

@@ -136,7 +136,18 @@ export const api = {
   deleteGroup: (id: string) => mybotFetch(`/api/groups/${id}`, { method: "DELETE" }).then(j),
   groupConversation: (id: string) => mybotFetch(`/api/groups/${id}/conversation`, { method: "POST" }).then(j) as Promise<{ conversation_id: string }>,
   duplicateAgent: (id: string) => mybotFetch(`/api/agents/${id}/duplicate`, { method: "POST" }).then(j),
+  // 자기개선 업데이트 센터 — 개발 인스턴스가 검증한 개선 패키지를 사용자가 버전 업데이트로 적용
+  evolveUpdates: () => mybotFetch("/api/evolve/updates").then(j) as Promise<{ appVersion: number; updates: EvolveUpdate[] }>,
+  applyUpdate: (id: string) => mybotFetch(`/api/evolve/updates/${id}/apply`, { method: "POST" }).then(j),
+  revertUpdate: (id: string) => mybotFetch(`/api/evolve/updates/${id}/revert`, { method: "POST" }).then(j),
+  rejectUpdate: (id: string) => mybotFetch(`/api/evolve/updates/${id}/reject`, { method: "POST" }).then(j),
 };
+
+export interface EvolveUpdate {
+  id: string; version: number | null; status: "pending" | "applied" | "rejected" | "reverted";
+  restart_required: number; source: string | null; created_at: number; applied_at: number | null;
+  payload: { summary: string; measurement: { verdict: string; reason: string; baseline?: { passRate: number; avgLatencyMs: number }; candidate?: { passRate: number; avgLatencyMs: number } }; ops: { kind: string; surface: string; target: string }[] };
+}
 
 export interface ApprovalRequest {
   id: string;

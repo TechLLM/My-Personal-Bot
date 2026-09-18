@@ -271,8 +271,7 @@ export async function executeApproved(req: any) {
   const args = JSON.parse(req.args ?? "{}");
   let result: string;
   try {
-    if (req.tool === "evolve_apply") result = await (await import("./evolve")).applyApprovedExperiment(JSON.parse(req.args ?? "{}").experimentId);
-    else if (req.tool.startsWith("computer_")) result = await (await import("./computer")).computerTool(req.tool, args);
+    if (req.tool.startsWith("computer_")) result = await (await import("./computer")).computerTool(req.tool, args);
     else if (BROWSER_TOOLS.some((t: any) => t.function.name === req.tool)) result = await browserTool(req.id, req.tool, args);
     else {
       const mcpNames = (await mcpTools().catch(() => [] as any[])).map((t: any) => t.function?.name ?? t.name);

@@ -43,6 +43,7 @@ export default function App() {
   const [liveViewKey, setLiveViewKey] = useState<string | null>(null); // 직접 대화 봇의 브라우저 run 키 (A3)
   const [viewKey, setViewKey] = useState<string | null>(null); // 열려 있는 컴퓨터 뷰 패널의 run 키
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]); // 봇의 위험 액션 승인 대기열
+  const [pendingUpdates, setPendingUpdates] = useState(0); // 개발이 보낸 미적용 버전 업데이트 수
   const [groups, setGroups] = useState<Group[]>([]); // 그룹채팅 목록
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null); // 현재 열린 그룹 대화
   const [runningInfo, setRunningInfo] = useState<Record<string, string | null>>({}); // 서버에서 실행 중인 봇: id → 현재 도구 — 사이드바 실시간 작업 표시용
@@ -126,6 +127,14 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
+  // 버전 업데이트 대기 수 — 설정 배지 + SSE 'evolve' 이벤트로도 갱신
+  useEffect(() => {
+    const poll = () => api.evolveUpdates().then((d) => setPendingUpdates(d.updates.filter((u) => u.status === "pending").length)).catch(() => {});
+    poll();
+    const t = setInterval(poll, 30000);
+    return () => clearInterval(t);
+  }, []);
+
   // 테이크오버 — 봇이 2FA·CAPTCHA 등 사람 단계를 만나면 인계 대기열에 올라온다
   useEffect(() => {
     const poll = () => api.handoffs().then((d) => setHandoffs(d.requests)).catch(() => {});
@@ -188,6 +197,9 @@ export default function App() {
   useEffect(() => {
     const key = localStorage.getItem("mybot_key");
     const es = new EventSource("/api/events" + (key ? `?key=${encodeURIComponent(key)}` : ""));
+    es.addEventListener("evolve", () => {
+      api.evolveUpdates().then((d) => setPendingUpdates(d.updates.filter((u) => u.status === "pending").length)).catch(() => {});
+    });
     es.addEventListener("agents", () => {
       refreshAgents();
       // 봇 삭제는 그 봇의 세션 대화도 함께 지운다 — 대화 목록도 갱신하고,
@@ -491,6 +503,7 @@ export default function App() {
         workingId={streaming ? activeAgent?.id ?? null : null}
         working={runningInfo}
         onStopAll={stopAll}
+        updateCount={pendingUpdates}
       />
       <main className="relative flex min-w-0 flex-1 flex-col">
         <header className="flex min-h-14 items-center gap-1.5 border-b border-stone-200/60 px-2 pt-[env(safe-area-inset-top)] md:min-h-[52px] md:px-3">

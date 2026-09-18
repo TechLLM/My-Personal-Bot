@@ -22,6 +22,7 @@ export function Sidebar({
   workingId,
   working,
   onStopAll,
+  updateCount,
 }: {
   agents: Agent[];
   groups: Group[];
@@ -39,6 +40,8 @@ export function Sidebar({
   working?: Record<string, string | null>;
   // 모든 봇 실행 중지 — 봇 간 위임·회신이 연쇄로 번질 때 한 번에 끊는다
   onStopAll?: () => void;
+  // 대기 중인 버전 업데이트 수 — 설정 버튼 배지
+  updateCount?: number;
 }) {
   const [showHidden, setShowHidden] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
@@ -203,7 +206,9 @@ export function Sidebar({
         <button
           onClick={onOpenSettings}
           className="flex h-11 w-full items-center gap-2.5 rounded-xl px-3 text-left text-sm text-stone-600 hover:bg-white/60 hover:text-stone-900 md:h-10"
-        ><Settings size={17} strokeWidth={1.8} /> 설정 · 엔드포인트 · 검색</button>
+        ><Settings size={17} strokeWidth={1.8} /> 설정 · 엔드포인트 · 검색
+          {!!updateCount && <span className="ml-auto grid size-5 place-items-center rounded-full bg-amber-500 text-[10px] font-bold text-white">{updateCount}</span>}
+        </button>
       </div>
       </aside>
     </>

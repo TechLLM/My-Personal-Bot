@@ -92,7 +92,8 @@ startTelegramBot();
 startMaintenance(); // 보존 정리 — 실행이력·승인·브라우저 캐시 (업무지침서 C16)
 // 재시작으로 끊긴 자기개선 사이클 잠금 해제 — finished_at NULL은 crash로 확정
 db.prepare("UPDATE experiments SET verdict = 'crash', reason = '서버 재시작으로 사이클 중단', finished_at = ? WHERE finished_at IS NULL").run(now());
-startEvolveLoop(); // 자기개선학습 — 매일 evolve_hour(기본 03시)에 실패 분석→후보→계측→판정
+// 자기개선학습 사이클은 개발 인스턴스(MYBOT_ENV=dev)에서만 돈다 — 서비스는 검증된 패키지를 버전 업데이트로만 수령
+if (process.env.MYBOT_ENV === "dev") startEvolveLoop();
 
 app.route("/api", api);
 

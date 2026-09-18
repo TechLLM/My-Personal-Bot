@@ -1,13 +1,17 @@
 // 자기개선학습 루프 — tasks/self-improvement-contract.md가 결속하는 계측·판정 기반
 // 이 파일은 보호 경로다 — 루프가 스스로 수정할 수 없다 (surfaces.json protected).
 import { Hono } from "hono";
-import { db, uid, now } from "./db";
+import { db, uid, now, getSetting, setSetting } from "./db";
 import { emitUI } from "./events";
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const EVOLVE_DIR = join(ROOT, "evolve");
+// 두 환경 분리 — 개발 인스턴스에서만 후보 생성·계측·판정을 실행하고,
+// 서비스 인스턴스는 검증된 개선 패키지를 받아 사용자의 버전 업데이트로만 적용한다.
+export const IS_DEV = process.env.MYBOT_ENV === "dev";
+const SERVICE_URL = process.env.MYBOT_SERVICE_URL ?? "http://127.0.0.1:5274";
 
 // ---------- 등록부·골든 과제 로더 ----------
 
@@ -363,6 +367,7 @@ const CAND_DIR = join(EVOLVE_DIR, "candidates");
 export interface CycleResult { experimentId: string; verdict: string; reason: string }
 
 export async function runCycle(candidate: Candidate, opts: { baseline?: BenchResult; samples?: number } = {}): Promise<CycleResult> {
+  if (!IS_DEV) return { experimentId: "", verdict: "crash", reason: "서비스 인스턴스에서는 사이클을 실행할 수 없습니다 — 개발 인스턴스 전용" };
   const surfaces = loadSurfaces();
   if (cycleLockHeld()) return { experimentId: "", verdict: "crash", reason: "다른 사이클 실행 중 — 잠금" };
   if (todayCycleCount() >= surfaces.limits.cyclesPerDay)
@@ -393,16 +398,15 @@ export async function runCycle(candidate: Candidate, opts: { baseline?: BenchRes
 
     const j = judge(baseline, candBench);
     if (j.verdict === "keep") {
-      // 후보 본문을 파일로 보존 — 승인 시 이 파일로 다시 적용한다
+      // 후보 본문을 파일로 보존하고 검증된 개선 패키지를 서비스 인스턴스로 발송한다
+      // — 서비스는 패키지를 받아두기만 하고, 실제 반영은 사용자의 버전 업데이트로만 이뤄진다
       const { mkdirSync, writeFileSync } = await import("node:fs");
       mkdirSync(CAND_DIR, { recursive: true });
       const cpath = join(CAND_DIR, `${lockId}.json`);
       writeFileSync(cpath, JSON.stringify(candidate, null, 2));
       db.prepare("UPDATE experiments SET candidate_path = ? WHERE id = ?").run(cpath, lockId);
-      // 기존 승인 시스템을 그대로 탄다 — keep의 실제 적용은 소유자 승인 팝업 뒤
-      db.prepare("INSERT INTO approval_requests (id, tool, args, summary, agent_id, resume, status, created_at) VALUES (?, 'evolve_apply', ?, ?, NULL, NULL, 'pending', ?)")
-        .run(uid(), JSON.stringify({ experimentId: lockId }),
-          `자기개선 후보 채택 — ${candidate.summary} [통과율 ${(baseline.passRate * 100).toFixed(0)}%→${(candBench.passRate * 100).toFixed(0)}%, 지연 ${Math.round(baseline.avgLatencyMs / 1000)}s→${Math.round(candBench.avgLatencyMs / 1000)}s]`, now());
+      const pub = await publishUpdate(candidate, baseline, candBench, j.reason, lockId);
+      console.log(`[mybot] 자기개선 패키지 발송 — ${pub}`);
     }
     finish(j.verdict, j.reason, { baseline, result: candBench });
     return { experimentId: lockId, verdict: j.verdict, reason: j.reason };
@@ -412,18 +416,84 @@ export async function runCycle(candidate: Candidate, opts: { baseline?: BenchRes
   }
 }
 
-// 승인된 keep 후보를 실제 적용 — executeApproved의 evolve_apply 분기에서 호출
-export async function applyApprovedExperiment(experimentId: string): Promise<string> {
-  const exp = db.prepare("SELECT * FROM experiments WHERE id = ?").get(experimentId) as any;
-  if (!exp) return "실험 없음: " + experimentId;
-  if (exp.verdict !== "keep") return `keep 판정이 아닌 실험(${exp.verdict})은 적용 불가`;
-  if (exp.applied) return "이미 적용된 실험입니다";
-  const candidate = JSON.parse(readFileSync(exp.candidate_path, "utf8")) as Candidate;
-  const applied = applyCandidate(candidate); // 되돌림 함수는 보존 — 적용이 목적이라 호출하지 않음
-  void applied;
-  db.prepare("UPDATE experiments SET applied = 1 WHERE id = ?").run(experimentId);
-  emitUI("agents"); // 조직 표면 변경이면 열린 탭에 즉시 반영
-  return `자기개선 후보 적용 완료: ${candidate.summary} (${candidate.surface} → ${candidate.target})`;
+// ---------- 업데이트 패키지 — 개발이 검증한 개선을 서비스가 버전 업데이트로 수령 ----------
+
+export interface UpdateOp {
+  kind: "db" | "code";
+  surface: string;
+  target: string;              // db: 봇·스킬 이름 / code: 파일 경로
+  column?: string;
+  newValue?: string;
+  newContent?: string;
+}
+
+export interface UpdatePackage {
+  summary: string;
+  measurement: { baseline: unknown; candidate: unknown; verdict: string; reason: string };
+  ops: UpdateOp[];
+  source: string;              // 개발 인스턴스 실험 id
+}
+
+// 후보를 패키지 ops로 변환 — 표면과 무관하게 서비스가 그대로 적용할 수 있는 형태
+function candidateToOps(c: Candidate): UpdateOp[] {
+  const surf = loadSurfaces().surfaces.find((s) => s.id === c.surface);
+  if (surf?.kind === "db") return [{ kind: "db", surface: c.surface, target: c.target, column: c.column ?? surf.column, newValue: c.newValue ?? "" }];
+  return [{ kind: "code", surface: c.surface, target: c.filePath ?? c.target, newContent: c.newContent ?? "" }];
+}
+
+// 개발 인스턴스 — keep 판정 패키지를 서비스 API로 발송. 실패 시 outbox에 남겨 다음에 재시도할 수 있게 한다
+async function publishUpdate(candidate: Candidate, baseline: BenchResult, candBench: BenchResult, reason: string, expId: string): Promise<string> {
+  const pkg: UpdatePackage = {
+    summary: candidate.summary,
+    measurement: { baseline, candidate: candBench, verdict: "keep", reason },
+    ops: candidateToOps(candidate),
+    source: expId,
+  };
+  try {
+    const r = await fetch(`${SERVICE_URL}/api/evolve/updates`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(pkg),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!r.ok) throw new Error(`서비스 응답 ${r.status}`);
+    const d = await r.json() as any;
+    return `서비스 수령 완료 — 업데이트 ${d.id} (사용자 버전 업데이트 대기)`;
+  } catch (e) {
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const outbox = join(EVOLVE_DIR, "updates-outbox");
+    mkdirSync(outbox, { recursive: true });
+    writeFileSync(join(outbox, `${expId}.json`), JSON.stringify(pkg, null, 2));
+    return `서비스 발송 실패(${(e as Error).message}) — outbox에 보관: ${expId}.json`;
+  }
+}
+
+// 서비스 인스턴스 — 패키지 ops를 실제 적용하고 되돌림 ops를 만든다 (사용자 버전 업데이트 경로)
+export function applyUpdateOps(ops: UpdateOp[]): { revertOps: UpdateOp[]; restartRequired: boolean } {
+  const surfaces = loadSurfaces();
+  const revertOps: UpdateOp[] = [];
+  let restartRequired = false;
+  for (const op of ops) {
+    const surf = surfaces.surfaces.find((s) => s.id === op.surface);
+    if (!surf) throw new Error(`미등록 표면: ${op.surface}`);
+    if (op.kind === "db") {
+      const col = op.column ?? surf.column;
+      if (!col || col === "*") throw new Error("db 표면은 column 지정 필요");
+      if (!/^[a-z_]+$/.test(col)) throw new Error(`컬럼명 불가: ${col}`);
+      const row = db.prepare(`SELECT rowid, ${col} FROM ${surf.table} WHERE name = ? OR id = ?`).get(op.target, op.target) as any;
+      if (!row) throw new Error(`대상 없음: ${surf.table}.${op.target}`);
+      revertOps.push({ ...op, newValue: row[col] ?? "" });
+      db.prepare(`UPDATE ${surf.table} SET ${col} = ? WHERE rowid = ?`).run(op.newValue ?? "", row.rowid);
+    } else {
+      const path = op.target;
+      if (isProtectedPath(path)) throw new Error(`보호 경로는 업데이트 불가: ${path}`);
+      const abs = join(ROOT, path);
+      if (!existsSync(abs)) throw new Error(`파일 없음: ${path}`);
+      revertOps.push({ ...op, newContent: readFileSync(abs, "utf8") });
+      const { writeFileSync } = require("node:fs") as typeof import("node:fs");
+      writeFileSync(abs, op.newContent ?? "");
+      restartRequired = true; // 코드 변경은 실행 중 프로세스에 반영되지 않음 — 재시작 필요
+    }
+  }
+  return { revertOps, restartRequired };
 }
 
 // ---------- S5: 능동 탐색 — 실패 분석 → 개선 후보 발굴 → 사이클 진입 ----------
@@ -509,6 +579,7 @@ export async function materializeCandidate(p: Proposal): Promise<Candidate | nul
 
 // 매일 루틴 진입점 — 실패 분석 → 후보 탐색 → 구체화 → 사이클 (기준선은 하루 1회 측정해 재사용)
 export async function dailyEvolveTick(): Promise<string> {
+  if (!IS_DEV) return "건너뜀 — 서비스 인스턴스는 사이클을 실행하지 않습니다 (개발 인스턴스 전용)";
   const surfaces = loadSurfaces();
   if (cycleLockHeld()) return "건너뜀 — 사이클 실행 중";
   if (todayCycleCount() >= surfaces.limits.cyclesPerDay) return `건너뜀 — 일일 상한(${surfaces.limits.cyclesPerDay})`;
@@ -537,7 +608,7 @@ export function startEvolveLoop() {
   evolveTimer = setInterval(tick, 3_600_000); // 1시간마다 시각 확인 — 설정 시각에만 실행
 }
 
-// ---------- API — 원장 조회·수동 사이클 ----------
+// ---------- API — 원장 조회·수동 사이클(개발 전용)·업데이트 센터 ----------
 
 export const evolveRoute = new Hono()
   .get("/experiments", (c) => c.json({ experiments: db.prepare("SELECT * FROM experiments ORDER BY created_at DESC LIMIT 100").all() }))
@@ -551,5 +622,57 @@ export const evolveRoute = new Hono()
     if (b.dry) return c.json({ preflight: await preflightCandidate(b.candidate) });
     const r = await runCycle(b.candidate);
     return c.json(r);
+  })
+  // 개발 인스턴스가 보내는 검증 완료 패키지 수신 — 서비스는 보관만 하고 적용하지 않는다
+  .post("/updates", async (c) => {
+    const pkg = await c.req.json().catch(() => null) as UpdatePackage | null;
+    if (!pkg?.summary || !Array.isArray(pkg.ops) || !pkg.ops.length) return c.json({ error: "패키지 형식 오류 — {summary, ops[]} 필요" }, 400);
+    for (const op of pkg.ops) {
+      if (op.kind !== "db" && op.kind !== "code") return c.json({ error: `op.kind 불가: ${op.kind}` }, 400);
+      if (op.kind === "code" && isProtectedPath(op.target)) return c.json({ error: `보호 경로는 업데이트 불가: ${op.target}` }, 400);
+    }
+    const id = uid();
+    db.prepare("INSERT INTO evolve_updates (id, payload, status, source, created_at) VALUES (?, ?, 'pending', ?, ?)")
+      .run(id, JSON.stringify(pkg), pkg.source ?? null, now());
+    emitUI("evolve"); // 열린 탭에 새 업데이트 도착 푸시
+    return c.json({ ok: true, id });
+  })
+  .get("/updates", (c) => c.json({
+    appVersion: Number(getSetting("app_version")) || 0,
+    updates: db.prepare("SELECT id, version, status, restart_required, source, created_at, applied_at, payload FROM evolve_updates ORDER BY created_at DESC LIMIT 50").all()
+      .map((r: any) => ({ ...r, payload: JSON.parse(r.payload) })),
+  }))
+  // 사용자의 버전 업데이트 — pending 패키지를 실제 반영하고 되돌림 정보를 보존한다
+  .post("/updates/:id/apply", (c) => {
+    const row = db.prepare("SELECT * FROM evolve_updates WHERE id = ? AND status = 'pending'").get(c.req.param("id")) as any;
+    if (!row) return c.json({ error: "대기 중인 업데이트가 아닙니다" }, 404);
+    const pkg = JSON.parse(row.payload) as UpdatePackage;
+    try {
+      const { revertOps, restartRequired } = applyUpdateOps(pkg.ops);
+      const version = (Number(getSetting("app_version")) || 0) + 1;
+      setSetting("app_version", String(version));
+      db.prepare("UPDATE evolve_updates SET status = 'applied', version = ?, revert = ?, restart_required = ?, applied_at = ? WHERE id = ?")
+        .run(version, JSON.stringify(revertOps), restartRequired ? 1 : 0, now(), row.id);
+      emitUI("agents"); emitUI("evolve");
+      return c.json({ ok: true, version, restartRequired, summary: pkg.summary });
+    } catch (e) { return c.json({ error: `적용 실패: ${(e as Error).message}` }, 400); }
+  })
+  // 적용된 버전 되돌리기 — 보존된 revert ops를 실행한다
+  .post("/updates/:id/revert", (c) => {
+    const row = db.prepare("SELECT * FROM evolve_updates WHERE id = ? AND status = 'applied'").get(c.req.param("id")) as any;
+    if (!row) return c.json({ error: "적용된 업데이트가 아닙니다" }, 404);
+    const revertOps = JSON.parse(row.revert ?? "[]") as UpdateOp[];
+    try {
+      const { restartRequired } = applyUpdateOps(revertOps);
+      db.prepare("UPDATE evolve_updates SET status = 'reverted', restart_required = ? WHERE id = ?").run(restartRequired ? 1 : 0, row.id);
+      emitUI("agents"); emitUI("evolve");
+      return c.json({ ok: true, restartRequired });
+    } catch (e) { return c.json({ error: `되돌리기 실패: ${(e as Error).message}` }, 400); }
+  })
+  .post("/updates/:id/reject", (c) => {
+    const r = db.prepare("UPDATE evolve_updates SET status = 'rejected' WHERE id = ? AND status = 'pending'").run(c.req.param("id"));
+    if (!r.changes) return c.json({ error: "대기 중인 업데이트가 아닙니다" }, 404);
+    emitUI("evolve");
+    return c.json({ ok: true });
   })
   .post("/tick", async (c) => c.json({ result: await dailyEvolveTick() }));
