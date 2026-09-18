@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { db } from "./db";
-import { searchCriteria, pickTextPart, attachmentNames, htmlToText, parseUids, decodeBodyChunk } from "./mail";
+import { searchCriteria, pickTextPart, attachmentNames, htmlToText, parseUids, decodeBodyChunk, htmlBodyFragment } from "./mail";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
 
@@ -66,4 +66,12 @@ test("부분 수신 본문 조각 디코딩 — 전송 인코딩을 바이트 �
   expect(decodeBodyChunk(b64, { part: "1", type: "text/html", encoding: "base64", charset: "utf-8" })).toBe("제주항공 견적");
   // 인코딩 없음 — 공백만 정리
   expect(decodeBodyChunk(Buffer.from("줄1\n\n줄2  끝", "utf8"), { part: "1", type: "text/plain" })).toBe("줄1 줄2 끝");
+});
+
+test("HTML 조각은 head·style을 버리고 본문 영역만 남긴다", () => {
+  const frag = `<html><head><style>.a{color:red}</style></head><body><p>제주항공 견적 요청</p>`;
+  expect(htmlToText(htmlBodyFragment(frag))).toBe("제주항공 견적 요청");
+  // 잘려서 </style>이 없는 조각 — 끝까지 잘라내야 CSS가 미리보기를 채우지 않는다
+  const cut = `<html><head><style>@media not all and (min-resolution: 0.001dpcm) { img { top: -1px; }`;
+  expect(htmlToText(htmlBodyFragment(cut))).toBe("");
 });

@@ -75,8 +75,16 @@ export function decodeBodyChunk(raw: Buffer, part: TextPart): string {
   }
   let text: string;
   try { text = new TextDecoder(part.charset || "utf-8").decode(buf); } catch { text = buf.toString("utf8"); }
-  if (part.type === "text/html") text = htmlToText(text);
+  if (part.type === "text/html") text = htmlToText(htmlBodyFragment(text));
   return text.replace(/\s+/g, " ").trim();
+}
+
+// 잘라온 HTML 조각은 앞부분이 <head>·CSS다 — body 이후만 보고, 닫히지 않은 style/script/head도 끝까지 잘라낸다
+// (실측 2026-09-18: 미리보기가 "@media not all and (min-resolution…"처럼 CSS로 채워졌다)
+export function htmlBodyFragment(html: string): string {
+  const b = html.search(/<body[^>]*>/i);
+  const t = b >= 0 ? html.slice(html.indexOf(">", b) + 1) : html;
+  return t.replace(/<(style|script|head)\b[\s\S]*?(?:<\/\1\s*>|$)/gi, "");
 }
 
 export function htmlToText(html: string): string {
@@ -154,7 +162,7 @@ export async function mailList(args: Record<string, unknown>): Promise<string> {
       const got = new Map<number, string>();
       for (const [part, uids] of byPart) {
         try {
-          for await (const r of client.fetch(uids, { bodyParts: [{ key: part, start: 0, maxLength: 700 }] }, { uid: true })) {
+          for await (const r of client.fetch(uids, { bodyParts: [{ key: part, start: 0, maxLength: 6000 }] }, { uid: true })) {
             const raw = r.bodyParts?.get?.(part) as Buffer | undefined;
             const meta = metas.find((x) => x.uid === Number(r.uid));
             if (raw?.length && meta?.part) got.set(Number(r.uid), decodeBodyChunk(raw, meta.part));
