@@ -9,7 +9,10 @@ export interface MailCfg { host: string; port: number; user: string; pass: strin
 export function mailConfig(): MailCfg | null {
   const host = getSetting("imap_host"), user = getSetting("imap_user"), pass = getSetting("imap_pass");
   if (!host || !user || !pass) return null;
-  return { host, port: Number(getSetting("imap_port")) || 993, user, pass, secure: getSetting("imap_tls") !== "0" };
+  const port = Number(getSetting("imap_port")) || 993;
+  // 993은 암시적 TLS 전용 포트다 — 체크박스가 꺼져 있어도 TLS로 붙는다.
+  // (실측 2026-09-18: 993 + 평문은 "Failed to receive greeting from server. Maybe should use TLS?"로 연결 자체가 실패했다)
+  return { host, port, user, pass, secure: port === 993 || getSetting("imap_tls") !== "0" };
 }
 
 // IMAP 검색 조건 — SINCE는 날짜 단위라 시각은 무시된다(당일 메일을 받으려면 오늘 0시)
@@ -23,7 +26,7 @@ export function searchCriteria(args: { since?: unknown; unseen?: unknown; from?:
   if (args.unseen === true || args.unseen === "true") c.seen = false;
   if (args.from) c.from = String(args.from);
   if (args.subject) c.subject = String(args.subject);
-  return Object.keys(c).length ? c : { all: true };
+  return c; // 조건이 없으면 빈 객체 — 호출부가 "최근 N건" 경로로 처리한다
 }
 
 // 본문으로 읽을 파트 — text/plain 우선, 없으면 text/html
@@ -87,16 +90,32 @@ export async function mailList(args: Record<string, unknown>): Promise<string> {
   const mailbox = String(args.mailbox || "INBOX");
   const limit = Math.min(Math.max(Number(args.limit) || 30, 1), 100);
   return (await withMailbox(mailbox, async (client) => {
-    const uids = (await client.search(searchCriteria(args), { uid: true })) as number[] | false;
-    if (!uids || !uids.length) return `${mailbox}: 조건에 맞는 메일이 없습니다`;
+    const crit = searchCriteria(args);
     const rows: string[] = [];
-    for await (const m of client.fetch(uids.slice(-limit), { envelope: true, flags: true }, { uid: true })) {
+    let range: string | number[];
+    let total: number;
+    let byUid = true;
+    if (Object.keys(crit).length) {
+      const uids = (await client.search(crit, { uid: true })) as number[] | false;
+      if (!uids || !uids.length) return `${mailbox}: 조건에 맞는 메일이 없습니다`;
+      total = uids.length;
+      range = uids.slice(-limit);
+    } else {
+      // 조건이 없을 때 ALL 검색에 기대지 않는다 — 0건을 돌려주는 서버가 있다(DOPMAIL 실측).
+      // 사서함이 알려주는 전체 개수에서 끝의 limit건을 시퀀스로 직접 가져온다
+      total = (client.mailbox as { exists?: number })?.exists ?? 0;
+      if (!total) return `${mailbox}: 메일이 없습니다`;
+      range = `${Math.max(1, total - limit + 1)}:${total}`;
+      byUid = false;
+    }
+    for await (const m of client.fetch(range, { envelope: true, flags: true }, { uid: byUid })) {
       const e = m.envelope ?? {};
       const f = e.from?.[0];
       const seen = m.flags?.has?.("\\Seen");
       rows.push(`- uid ${m.uid} | ${fmtDate(e.date)} | ${f?.name || f?.address || "?"}${f?.address ? ` <${f.address}>` : ""} | ${e.subject || "(제목 없음)"}${seen ? "" : " | 안읽음"}`);
     }
-    return `${mailbox} — 조건 일치 ${uids.length}건 중 최근 ${rows.length}건 (제목만으로 요약하지 말 것 — 본문이 필요하면 uid들을 쉼표로 묶어 mail_read를 한 번 호출하세요)\n${rows.join("\n")}`;
+    rows.reverse(); // 최신이 위로
+    return `${mailbox} — ${Object.keys(crit).length ? `조건 일치 ${total}건` : `전체 ${total}건`} 중 최근 ${rows.length}건 (제목만으로 요약하지 말 것 — 본문이 필요하면 uid들을 쉼표로 묶어 mail_read를 한 번 호출하세요)\n${rows.join("\n")}`;
   })) as string;
 }
 
@@ -155,10 +174,6 @@ export async function mailRead(args: Record<string, unknown>): Promise<string> {
 export async function testImap(): Promise<string | null> {
   const cfg = mailConfig();
   if (!cfg) return "IMAP 호스트·계정·비밀번호를 먼저 입력하세요";
-  const r = await withMailbox("INBOX", async (client) => {
-    const uids = (await client.search({ all: true }, { uid: true })) as number[] | false;
-    return `ok:${uids ? uids.length : 0}`;
-  });
-  if (typeof r === "string" && r.startsWith("ok:")) return null;
-  return String(r);
+  const r = await withMailbox("INBOX", async (client) => `ok:${(client.mailbox as { exists?: number })?.exists ?? 0}`);
+  return typeof r === "string" && r.startsWith("ok:") ? null : String(r);
 }

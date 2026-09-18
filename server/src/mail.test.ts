@@ -10,8 +10,9 @@ test("검색 조건 — today는 오늘 0시부터, 안읽음·발신자·제목
   expect(today.since.getTime()).toBe(midnight.getTime());
   expect(searchCriteria({ since: "2026-09-18", unseen: true })).toMatchObject({ seen: false });
   expect(searchCriteria({ from: "boss@kcc.co.kr", subject: "견적" })).toEqual({ from: "boss@kcc.co.kr", subject: "견적" });
-  expect(searchCriteria({})).toEqual({ all: true }); // 조건이 없으면 사서함 전체
-  expect(searchCriteria({ since: "말도 안 되는 날짜" })).toEqual({ all: true });
+  // 조건이 없으면 빈 객체 — ALL 검색에 0건을 돌려주는 서버가 있어(DOPMAIL 실측) 호출부가 "최근 N건"으로 처리한다
+  expect(searchCriteria({})).toEqual({});
+  expect(searchCriteria({ since: "말도 안 되는 날짜" })).toEqual({});
 });
 
 test("본문 파트 — text/plain을 먼저 고르고 없으면 html을 고른다", () => {
