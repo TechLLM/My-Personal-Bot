@@ -129,6 +129,22 @@ function ProviderRow({ p, onChanged }: { p: ProviderCard; onChanged: () => void 
   );
 }
 
+// 입력 컴포넌트는 반드시 모듈 스코프에 둔다 — 컴포넌트 안에서 정의하면 렌더마다 새 타입이 만들어져
+// React가 input을 통째로 리마운트한다. 그러면 한 글자 칠 때마다 포커스가 빠져 다시 클릭해야 했다
+// (2026-09-18 실측: 입력 직후 해당 input이 DOM에서 사라지고 document.activeElement가 body로 갔다)
+function Field({ k, label, ph, s, update }: { k: string; label: string; ph?: string; s: Record<string, string>; update: (patch: Record<string, string>) => void }) {
+  return (
+    <label className="block">
+      <span className="text-xs text-stone-600">{label}</span>
+      <input className="mt-1 w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none" value={s[k] ?? ""} placeholder={ph} onChange={(e) => update({ [k]: e.target.value })} />
+    </label>
+  );
+}
+
+function H({ children }: { children: React.ReactNode }) {
+  return <h3 className="mb-3 font-display text-[15px] font-semibold text-stone-900">{children}</h3>;
+}
+
 export function SettingsModal({ models: initialModels, onClose }: { models: Model[]; onClose: () => void }) {
   const [section, setSection] = useState<Section>("providers");
   const [models, setModels] = useState<Model[]>(initialModels); // 모달 내부 모델 목록 — 프로바이더 변경 시 즉시 갱신
@@ -254,16 +270,9 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
       .then((r) => { if (r.ok) { setDirty(false); setSavedMsg("✓ 저장됨"); setTimeout(() => setSavedMsg(""), 1500); } else setSavedMsg("저장 실패"); });
   };
 
-  const Field = ({ k, label, ph }: { k: string; label: string; ph?: string }) => (
-    <label className="block">
-      <span className="text-xs text-stone-600">{label}</span>
-      <input className="mt-1 w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none" value={s[k] ?? ""} placeholder={ph} onChange={(e) => update({ [k]: e.target.value })} />
-    </label>
-  );
   const Input = "w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none";
   const Btn = "rounded-lg bg-stone-900 px-3 py-2 text-xs font-medium text-white hover:bg-stone-700 md:px-2.5 md:py-1";
   const Sub = "rounded-lg bg-stone-200 px-3 py-2 text-xs text-stone-700 hover:bg-stone-300 md:px-2.5 md:py-1";
-  const H = ({ children }: { children: React.ReactNode }) => <h3 className="mb-3 font-display text-[15px] font-semibold text-stone-900">{children}</h3>;
 
   const authed = providers.filter((p) => p.enabled && p.authed);
   const shownMemories = memOpen ? memories : memories.slice(0, 5);
@@ -343,10 +352,10 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                 </label>
 
                 <div className="mt-3 grid grid-cols-2 gap-2">
-                  <Field k="run_deadline_sec" label="봇 작업 상한(초)" ph="480" />
-                  <Field k="tool_rounds" label="도구 단계 상한" ph="12" />
-                  <Field k="delegate_cap_sec" label="위임 상한(초)" ph="540" />
-                  <Field k="run_total_cap_sec" label="실행 총 상한(초)" ph="900" />
+                  <Field s={s} update={update} k="run_deadline_sec" label="봇 작업 상한(초)" ph="480" />
+                  <Field s={s} update={update} k="tool_rounds" label="도구 단계 상한" ph="12" />
+                  <Field s={s} update={update} k="delegate_cap_sec" label="위임 상한(초)" ph="540" />
+                  <Field s={s} update={update} k="run_total_cap_sec" label="실행 총 상한(초)" ph="900" />
                 </div>
               </div>
             )}
@@ -419,7 +428,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   </label>
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2">
-                  <Field k="agent_cap_total" label="전체 봇 정원(초과 시 승인 필요)" ph="20" />
+                  <Field s={s} update={update} k="agent_cap_total" label="전체 봇 정원(초과 시 승인 필요)" ph="20" />
                 </div>
               </div>
             )}
@@ -598,11 +607,11 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   <option value="ddg">DuckDuckGo (차단 빈번)</option>
                 </select>
                 <div className="space-y-2.5">
-                  <Field k="searxng_url" label="SearXNG URL" ph="http://127.0.0.1:8080" />
-                  <Field k="tavily_key" label="Tavily API 키" />
-                  <Field k="brave_key" label="Brave API 키" />
-                  <Field k="exa_key" label="Exa API 키" ph="exa.ai — 무료 크레딧" />
-                  <Field k="jina_key" label="Jina API 키" ph="jina.ai — 무료 10M 토큰" />
+                  <Field s={s} update={update} k="searxng_url" label="SearXNG URL" ph="http://127.0.0.1:8080" />
+                  <Field s={s} update={update} k="tavily_key" label="Tavily API 키" />
+                  <Field s={s} update={update} k="brave_key" label="Brave API 키" />
+                  <Field s={s} update={update} k="exa_key" label="Exa API 키" ph="exa.ai — 무료 크레딧" />
+                  <Field s={s} update={update} k="jina_key" label="Jina API 키" ph="jina.ai — 무료 10M 토큰" />
                 </div>
               </div>
             )}
@@ -611,9 +620,9 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
               <div>
                 <H>이미지 생성</H>
                 <div className="space-y-2.5">
-                  <Field k="image_endpoint" label="Images API 엔드포인트" ph="http://127.0.0.1:11441/v1 또는 Draw Things http://127.0.0.1:7888" />
-                  <Field k="image_key" label="이미지 API 키(선택)" />
-                  <Field k="image_model" label="이미지 모델" ph="dall-e-3 / flux 등" />
+                  <Field s={s} update={update} k="image_endpoint" label="Images API 엔드포인트" ph="http://127.0.0.1:11441/v1 또는 Draw Things http://127.0.0.1:7888" />
+                  <Field s={s} update={update} k="image_key" label="이미지 API 키(선택)" />
+                  <Field s={s} update={update} k="image_model" label="이미지 모델" ph="dall-e-3 / flux 등" />
                 </div>
               </div>
             )}
@@ -856,8 +865,8 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     <input type="checkbox" checked={s.notify_telegram === "1"} onChange={(e) => update({ notify_telegram: e.target.checked ? "1" : "0" })} />
                     답변을 텔레그램으로도 받기
                   </label>
-                  <Field k="telegram_bot_token" label="텔레그램 봇 토큰" ph="@BotFather에서 발급 (123456:ABC…)" />
-                  <Field k="telegram_chat_id" label="텔레그램 채팅 ID" ph="봇에게 말 건 뒤 getUpdates로 확인" />
+                  <Field s={s} update={update} k="telegram_bot_token" label="텔레그램 봇 토큰" ph="@BotFather에서 발급 (123456:ABC…)" />
+                  <Field s={s} update={update} k="telegram_chat_id" label="텔레그램 채팅 ID" ph="봇에게 말 건 뒤 getUpdates로 확인" />
                   <label className="flex items-center gap-2 text-xs text-stone-600">
                     <input type="checkbox" checked={s.telegram_listen === "1"} onChange={(e) => update({ telegram_listen: e.target.checked ? "1" : "0" })} />
                     텔레그램으로 대장봇에게 업무 지시 받기 — 봇이 읽고 실행한 뒤 회신
@@ -867,20 +876,20 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     답변을 이메일로도 받기
                   </label>
                   <div className="grid grid-cols-2 gap-1.5">
-                    <Field k="smtp_host" label="SMTP 호스트" ph="smtp.gmail.com" />
-                    <Field k="smtp_port" label="포트" ph="587 (465는 SSL)" />
-                    <Field k="smtp_user" label="SMTP 계정" />
-                    <Field k="smtp_pass" label="SMTP 비밀번호/앱 비밀번호" />
-                    <Field k="smtp_from" label="보내는 주소(선택)" />
-                    <Field k="email_to" label="받는 주소" />
+                    <Field s={s} update={update} k="smtp_host" label="SMTP 호스트" ph="smtp.gmail.com" />
+                    <Field s={s} update={update} k="smtp_port" label="포트" ph="587 (465는 SSL)" />
+                    <Field s={s} update={update} k="smtp_user" label="SMTP 계정" />
+                    <Field s={s} update={update} k="smtp_pass" label="SMTP 비밀번호/앱 비밀번호" />
+                    <Field s={s} update={update} k="smtp_from" label="보내는 주소(선택)" />
+                    <Field s={s} update={update} k="email_to" label="받는 주소" />
                   </div>
                   <div className="pt-2 text-xs font-medium text-stone-600">메일 읽기 (IMAP)</div>
                   <p className="text-2xs text-stone-400">봇이 메일 목록·본문을 직접 읽습니다 — 그룹웨어 화면을 브라우저로 여는 것보다 빠르고 정확합니다. 메일 도착 트리거 루틴에도 쓰입니다.</p>
                   <div className="grid grid-cols-2 gap-1.5">
-                    <Field k="imap_host" label="IMAP 호스트" ph="imap.gmail.com / 사내 메일 서버" />
-                    <Field k="imap_port" label="포트" ph="993 (SSL)" />
-                    <Field k="imap_user" label="IMAP 계정" ph="name@company.com" />
-                    <Field k="imap_pass" label="IMAP 비밀번호/앱 비밀번호" />
+                    <Field s={s} update={update} k="imap_host" label="IMAP 호스트" ph="imap.gmail.com / 사내 메일 서버" />
+                    <Field s={s} update={update} k="imap_port" label="포트" ph="993 (SSL)" />
+                    <Field s={s} update={update} k="imap_user" label="IMAP 계정" ph="name@company.com" />
+                    <Field s={s} update={update} k="imap_pass" label="IMAP 비밀번호/앱 비밀번호" />
                   </div>
                   <label className="flex items-center gap-2 text-xs text-stone-600">
                     <input type="checkbox" checked={s.imap_tls !== "0"} onChange={(e) => update({ imap_tls: e.target.checked ? "1" : "0" })} />
@@ -983,7 +992,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                 </div>
                 <div>
                   <H>보안</H>
-                  <Field k="access_code" label="접속 암호 (설정 시 API 전체에 필요)" ph="비워두면 LAN 개방" />
+                  <Field s={s} update={update} k="access_code" label="접속 암호 (설정 시 API 전체에 필요)" ph="비워두면 LAN 개방" />
                 </div>
               </div>
             )}
