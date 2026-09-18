@@ -186,6 +186,10 @@ test("CEO·Eggbot은 브라우저·데스크톱 도구와 안내 없이, 실무 
     expect(worker.system).toContain("[브라우저 도구 선택]");
     for (const r of [ceo, egg, worker]) expect(r.system).not.toContain("비서실장");
     expect(ceo.system).toContain("agent_direct로 직접 배정");
+    // 2026-09-18: "검증"만 요구하고 방법이 없어 CEO가 "원출력을 직접 검증한 결과는 아님"만 적고 끝냈다
+    expect(ceo.system).toContain("검증은 말이 아니라 도구로");
+    expect(ceo.system).toContain("mail_list로 건수");
+    expect(systemPrompt("auto", null, null, "t-ceo")).toContain("검증은 말이 아니라 도구로");
     expect(ceo.system).not.toContain("상향 보고");
     // 채팅 경로의 시스템 프롬프트도 비서실장 경유 규칙이 없어야 한다
     expect(systemPrompt("auto", null, null, "t-ceo")).not.toContain("비서실장");

@@ -141,7 +141,7 @@ export function systemPrompt(mode: string, personaId?: string | null, workspaceI
       const amems = recallMemories(agentId, queryText, workspaceId); // C19 — 봇 기억 + 프로젝트 공유 기억
       if (amems.length) p += "\n\n[이 봇이 기억하는 업무 맥락]\n" + amems.map((m) => `- ${m}`).join("\n");
       const orgRule = agent.is_boss
-        ? "당신은 관리자(CEO)입니다 — 사용자의 업무 지시를 분석해 적합한 팀장봇(또는 팀 없는 전문 봇)에게 agent_direct로 직접 배정하고, 돌아온 결과를 검증·취합해 사용자에게 보고합니다. 팀장 소속 봇의 업무는 그 팀장에게 맡기세요. 브라우저·데스크톱을 직접 조작하는 실무는 담당 봇에게 배정하세요. 봇 생성·수정·삭제 등 조직 변경은 Eggbot(조직관리 전담)에게 지시하세요 — 당신은 권한을 갖지만 실행은 Eggbot이 담당하고, Eggbot 삭제는 불가입니다."
+        ? "당신은 관리자(CEO)입니다 — 사용자의 업무 지시를 분석해 적합한 팀장봇(또는 팀 없는 전문 봇)에게 agent_direct로 직접 배정하고, 돌아온 결과를 검증·취합해 사용자에게 보고합니다. 검증은 말이 아니라 도구로 합니다 — 보고에 건수·목록·수치가 있으면 조회 도구를 직접 한 번 호출해 대조하고(예: 메일 보고는 mail_list로 건수·uid 확인), 대조하지 못했으면 '미검증'이라고 밝히세요. 팀장 소속 봇의 업무는 그 팀장에게 맡기세요. 브라우저·데스크톱을 직접 조작하는 실무는 담당 봇에게 배정하세요. 봇 생성·수정·삭제 등 조직 변경은 Eggbot(조직관리 전담)에게 지시하세요 — 당신은 권한을 갖지만 실행은 Eggbot이 담당하고, Eggbot 삭제는 불가입니다."
         : agent.special_role === "org_admin"
           ? "당신은 조직관리 전담(Eggbot)입니다 — 봇 생성·수정·삭제·배치 변경은 당신만 수행합니다. 다른 봇이나 CEO의 조직 변경 요청을 받아 처리하고 결과를 보고합니다. agent_create의 parent 인자로 팀장 소속 배정이 가능하고, agent_update의 lead 옵션으로 팀장 지정·해제가 가능합니다."
           : agent.is_lead
