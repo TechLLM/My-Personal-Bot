@@ -42,6 +42,32 @@ const OPENCODE_AUTH = join(HOME, ".local", "share", "opencode", "auth.json");
 const CODEX_AUTH = join(HOME, ".codex", "auth.json");
 const GEMINI_AUTH = join(HOME, ".gemini", "oauth_creds.json");
 
+// ─── airoute (로컬 AI 프록시) ───
+// 실행 중이면 자기 설정 디렉터리에 포트(airoute.port)와 토큰(config.json)을 둔다.
+// 포트는 실행마다 바뀔 수 있으므로 airoute.port를 config.json의 port보다 우선한다.
+const AIROUTE_DIR = join(HOME, ".config", "airoute");
+export const AIROUTE_DEFAULT_PORT = 11441;
+export function airouteLocal(dir = AIROUTE_DIR): { port: number; token?: string } | null {
+  const cfg = readJson(join(dir, "config.json"));
+  if (!cfg) return null;
+  let port = Number(cfg.port) || 0;
+  try { port = Number(readFileSync(join(dir, "airoute.port"), "utf8").trim()) || port; } catch {}
+  return { port: port || AIROUTE_DEFAULT_PORT, token: cfg.token ? String(cfg.token) : undefined };
+}
+
+// airoute는 같은 모델을 `제공자/모델`과 짧은 이름으로 모두 내보낸다(237개 중 114개가 중복) —
+// 짧은 쪽을 접어 모델 선택기를 정리한다. 역할 별칭(main·fast·code…)은 대응하는 `제공자/모델`이 없어 그대로 남는다
+export function dedupeAirouteModels<T extends { id: string }>(models: T[]): T[] {
+  const qualified = new Set(models.filter((m) => m.id.includes("/")).map((m) => m.id.slice(m.id.indexOf("/") + 1)));
+  const seen = new Set<string>();
+  return models.filter((m) => {
+    if (seen.has(m.id)) return false; // 같은 id를 두 번 주는 경우
+    if (!m.id.includes("/") && qualified.has(m.id)) return false;
+    seen.add(m.id);
+    return true;
+  });
+}
+
 // ─── 기본 프로바이더 프리셋 ───
 export const PROVIDER_PRESETS: ProviderDef[] = [
   {
@@ -115,6 +141,13 @@ export const PROVIDER_PRESETS: ProviderDef[] = [
     id: "ollama", name: "Ollama · 로컬", kind: "openai", baseUrl: "http://localhost:11434/v1",
     authType: "none", authLabel: "로컬 — 키 불필요",
   },
+  {
+    // 로컬 AI 프록시 — 여러 제공자를 한 엔드포인트로 묶고 별칭(main·fast·code…) 라우팅과 자체 폴백을 갖는다.
+    // 포트·토큰을 airoute 자기 설정에서 읽으므로 사용자가 키를 입력할 필요가 없다 (미실행이면 미인증으로 표시)
+    id: "airoute", name: "airoute · 로컬 프록시", kind: "openai",
+    baseUrl: `http://127.0.0.1:${AIROUTE_DEFAULT_PORT}/v1`, authType: "apikey",
+    authLabel: "로컬 설정 자동 인식", doc: "`airoute start`로 띄워 두면 포트와 토큰을 ~/.config/airoute에서 자동으로 읽습니다",
+  },
 ];
 
 // ─── 자격증명 해석 ───
@@ -134,7 +167,7 @@ export interface ResolvedAuth {
   apiKey?: string;
   accessToken?: string;
   accountId?: string;
-  source?: string;   // UI 표시: "설정" | "opencode" | "codex" | "gemini" | "keychain" | "env" | "cli"
+  source?: string;   // UI 표시: "설정" | "opencode" | "codex" | "gemini" | "airoute" | "keychain" | "env" | "cli"
   expired?: boolean;
 }
 
@@ -335,18 +368,24 @@ function resolveAuthUncached(def: ProviderDef): ResolvedAuth {
 
   if (def.authType === "none") return { source: "로컬" };
 
-  // 2. opencode auth.json — <id> / <id>-coding-plan 항목의 api 키
+  // 2. airoute — 로컬 프록시는 자기 설정 파일에 토큰을 둔다 (사용자가 키를 옮겨 적을 필요 없음)
+  if (def.id === "airoute") {
+    const t = airouteLocal()?.token;
+    return t ? { apiKey: t, source: "airoute" } : {};
+  }
+
+  // 3. opencode auth.json — <id> / <id>-coding-plan 항목의 api 키
   const oc = readJson(OPENCODE_AUTH);
   for (const k of def.ocKeys ?? [def.id]) {
     const ent = oc?.[k];
     if (ent?.type === "api" && ent.key) return { apiKey: ent.key, source: "opencode" };
   }
-  // 3. airoute 키체인
+  // 4. airoute 키체인
   if (def.keychain) {
     const k = keychainGet(def.keychain);
     if (k) return { apiKey: k, source: "keychain" };
   }
-  // 4. 환경변수
+  // 5. 환경변수
   if (def.env && process.env[def.env]) return { apiKey: process.env[def.env], source: "env" };
   return {};
 }
@@ -364,7 +403,12 @@ export function customProviders(): ProviderDef[] {
 }
 
 export function allProviders(): ProviderDef[] {
-  return [...PROVIDER_PRESETS, ...customProviders()];
+  // airoute는 실행마다 포트가 달라질 수 있어 프리셋의 기본 포트를 현재 값으로 덮어쓴다
+  const port = airouteLocal()?.port;
+  const presets = port && port !== AIROUTE_DEFAULT_PORT
+    ? PROVIDER_PRESETS.map((p) => (p.id === "airoute" ? { ...p, baseUrl: `http://127.0.0.1:${port}/v1` } : p))
+    : PROVIDER_PRESETS;
+  return [...presets, ...customProviders()];
 }
 
 export function findProvider(id: string): ProviderDef | undefined {
