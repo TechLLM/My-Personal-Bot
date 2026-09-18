@@ -12,6 +12,7 @@ import { COMPUTER_TOOLS } from "./computer";
 import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { parseLeaked, execToolBatch } from "./toolloop";
+import { emitUI } from "./events";
 import type { Intent } from "./intent";
 
 // 에이전트 공용 작업 디렉터리 — 파일 도구는 여기로 샌드박스
@@ -65,6 +66,7 @@ export function ensureBossAgent(): Agent {
     db.prepare("UPDATE agents SET role_prompt = ? WHERE id = ?").run(role, a.id);
     a.role_prompt = role;
   }
+  invalidateListCache();
   return a;
 }
 
@@ -128,6 +130,7 @@ export function deleteAgentRow(id: string) {
   }
   db.prepare("DELETE FROM conversations WHERE agent_id = ?").run(id); // 봇 세션 정리 — messages는 FK cascade로 함께 삭제됨
   db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+  invalidateListCache();
 }
 
 // 도구 호출별 타임아웃 — 브라우저·MCP 호출이 행 걸려도 run이 영원히 멈추지 않게
@@ -269,8 +272,9 @@ const pickTargets = (args: Record<string, unknown>): string[] => {
 };
 
 // agent_list 30초 캐시 — 같은 실행 안에서 조직도를 반복 조회하는 낭비 차단 (실측 730회)
+// 무효화 = 봇 목록 변경 신호 — 열린 탭에 SSE로도 즉시 푸시해 사이드바가 실시간으로 따라오게 한다
 const agentListCache = new Map<string, { at: number; text: string }>();
-const invalidateListCache = () => agentListCache.clear();
+const invalidateListCache = () => { agentListCache.clear(); emitUI("agents"); };
 
 // 스킬 실행 통계 — 런이 끝나면 참조된 스킬들에 실제 결과를 귀속하고 성공률 미달을 비활성화한다 (A8 후속)
 export function closeSkillRuns(runKey: string, ok: boolean, reason?: string) {
@@ -1388,6 +1392,7 @@ export const agentsRoute = new Hono()
       : rawRole;
     db.prepare("INSERT INTO agents (id, name, role_prompt, model, avatar, tools, persistent, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .run(id, String(b.name).slice(0, 30), rolePrompt, b.model ?? defaultModel(), avatar, b.tools ? JSON.stringify(b.tools) : null, b.persistent === false ? 0 : 1, maxOrder + 1, now());
+    invalidateListCache();
     return c.json({ agent: withAgentMeta(db.prepare("SELECT * FROM agents WHERE id = ?").get(id)) });
   })
   .patch("/:id", async (c) => {
@@ -1404,6 +1409,7 @@ export const agentsRoute = new Hono()
     db.prepare("UPDATE agents SET name = ?, role_prompt = ?, model = ?, avatar = ?, pinned = ?, hidden = ? WHERE id = ?")
       .run(b.name ?? a.name, b.role_prompt ?? a.role_prompt, b.model ?? a.model, b.avatar ?? a.avatar,
         b.pinned === undefined ? a.pinned : (b.pinned ? 1 : 0), b.hidden === undefined ? a.hidden : (b.hidden ? 1 : 0), a.id);
+    invalidateListCache();
     return c.json({ agent: withAgentMeta(db.prepare("SELECT * FROM agents WHERE id = ?").get(a.id)) });
   })
   // 봇 복제 — 프로필·역할·모델·스킬 배정만 복사, 대화 기록·장기기억은 복사하지 않음 (그록과 동일)
@@ -1424,6 +1430,7 @@ export const agentsRoute = new Hono()
     for (const r of routines) {
       try { db.prepare("INSERT INTO routines (id, name, schedule, prompt, agent_id, enabled, trigger_type, email_filter, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(uid(), `${r.name} (사본)`, r.schedule, r.prompt, id, r.enabled, r.trigger_type ?? "schedule", r.email_filter ?? null, now()); } catch {}
     }
+    invalidateListCache();
     return c.json({ agent: withAgentMeta(db.prepare("SELECT * FROM agents WHERE id = ?").get(id)) });
   })
   // CEO 지정: 이 봇이 모든 봇의 관리자가 됨 (기존 CEO는 해제)
@@ -1435,6 +1442,7 @@ export const agentsRoute = new Hono()
     db.prepare("UPDATE agents SET is_boss = 0").run();
     // 새 CEO는 트리 최상위 — 소속·팀장 지위를 해제한다 (하위 봇이 승격되면 parent가 남아 트리가 깨졌다)
     db.prepare("UPDATE agents SET is_boss = 1, parent_id = NULL, is_lead = 0 WHERE id = ?").run(a.id);
+    invalidateListCache();
     return c.json({ ok: true, agent: withAgentMeta(db.prepare("SELECT * FROM agents WHERE id = ?").get(a.id)) });
   })
   // 봇 구성보내기/가져오기 — 그록봇 "봇 공유"의 셀프호스팅 대응 (Phase 23)
@@ -1466,6 +1474,7 @@ export const agentsRoute = new Hono()
       try { db.prepare("INSERT INTO routines (id, name, schedule, prompt, agent_id, enabled, trigger_type, email_filter, match_rule, created_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)").run(uid(), String(r.name ?? "루틴").slice(0, 50), r.schedule ?? "daily:09:00", r.prompt ?? "", id, r.trigger_type === "webhook" ? "schedule" : (r.trigger_type ?? "schedule"), r.email_filter ?? null, r.match_rule ?? null, now()); rtN++; } catch {}
       // 웹훅 루틴은 토큰 없이 schedule로 내려온다 — 필요하면 UI에서 webhook으로 재생성
     }
+    invalidateListCache();
     return c.json({ agent: withAgentMeta(db.prepare("SELECT * FROM agents WHERE id = ?").get(id)), imported: { skills: skN, routines: rtN } });
   })
   .delete("/:id", (c) => {

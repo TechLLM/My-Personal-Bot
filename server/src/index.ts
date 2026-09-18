@@ -14,6 +14,7 @@ import { agentsRoute, teamRoute, ensureBossAgent } from "./team";
 import { browserRoute, sitesRoute } from "./browser";
 import { notifyRoute, startTelegramBot } from "./notify";
 import { approvalsRoute } from "./approvals";
+import { eventsRoute } from "./events";
 import { groupsRoute } from "./routes/groups";
 import { startMaintenance } from "./maintenance";
 
@@ -49,6 +50,7 @@ api.route("/sites", sitesRoute);
 api.route("/team", teamRoute);
 api.route("/notify", notifyRoute);
 api.route("/approvals", approvalsRoute);
+api.route("/events", eventsRoute);
 api.route("/groups", groupsRoute);
 seedPersonas();
 // 구형 평문 비밀번호를 AES-256-GCM으로 일괄 암호화 (1회성 마이그레이션)

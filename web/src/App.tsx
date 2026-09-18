@@ -134,18 +134,9 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
-  // 실행 중인 봇 폴링 — 위임·루틴 등 백그라운드 작업도 사이드바에 표시.
-  // 봇 목록도 함께 갱신한다 — 봇이 다른 봇을 생성·삭제해도 새로고침 없이 반영되게
-  // (목록 시그니처가 같으면 setState를 건너뛰어 불필요한 리렌더를 막는다)
+  // 실행 중인 봇 폴링 — 위임·루틴 등 백그라운드 작업도 사이드바에 표시
   useEffect(() => {
-    let lastSig = "";
-    const poll = () => {
-      api.agentsRunning().then((d) => setRunningInfo(Object.fromEntries(d.running.map((r) => [r.id, r.tool])))).catch(() => {});
-      api.agents().then((d) => {
-        const sig = d.agents.map((a) => `${a.id}:${a.name}:${a.model ?? ""}`).join("|");
-        if (sig !== lastSig) { lastSig = sig; setAgents(d.agents); setAgentsLoaded(true); }
-      }).catch(() => {});
-    };
+    const poll = () => api.agentsRunning().then((d) => setRunningInfo(Object.fromEntries(d.running.map((r) => [r.id, r.tool])))).catch(() => {});
     poll();
     const t = setInterval(poll, 4000);
     return () => clearInterval(t);
@@ -191,6 +182,23 @@ export default function App() {
     setTeamEvents([]);
     setLiveViewKey(null); setViewKey(null);
   }, []);
+
+  // 서버 푸시(SSE)로 봇 목록 실시간 갱신 — 봇이 다른 봇을 생성·삭제·수정하면
+  // 서버가 'agents' 이벤트를 쏘고, 열린 탭이 즉시 목록을 다시 가져온다 (새로고침 불필요)
+  useEffect(() => {
+    const key = localStorage.getItem("mybot_key");
+    const es = new EventSource("/api/events" + (key ? `?key=${encodeURIComponent(key)}` : ""));
+    es.addEventListener("agents", () => {
+      refreshAgents();
+      // 봇 삭제는 그 봇의 세션 대화도 함께 지운다 — 대화 목록도 갱신하고,
+      // 지금 보고 있는 대화가 지워졌으면 로비로 돌린다
+      api.conversations().then((d) => {
+        setConversations(d.conversations);
+        if (convIdRef.current && !d.conversations.some((cv) => cv.id === convIdRef.current)) newConversation();
+      }).catch(() => {});
+    });
+    return () => es.close();
+  }, [refreshAgents, newConversation]);
 
   // 봇 선택 = 그 봇의 메인 세션으로 진입 — 루틴 단발 대화가 아닌 메인 세션(위임·루틴 작업 내역이 쌓이는 곳)
   const selectBot = useCallback((a: Agent) => {
