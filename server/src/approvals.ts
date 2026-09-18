@@ -8,7 +8,9 @@ import { db, uid, now, getSetting } from "./db";
 // 기본 위험 패턴 — 규칙이 없어도 이름만으로 승인 요구 (파괴적·외부 영향 액션)
 // skill_save — 스킬은 전 봇이 재사용하는 조직 자산이라 저장 전 사용자 승인
 // agent_create/update/reorder/delete — 봇 설정 변경은 사용자 승인 후 반영 (조직 관리 채널)
-const DEFAULT_RISKY = /send_email|send_telegram|delete|publish|purchase|payment|pay_|_pay|submit_form|drop|execute_sql|shell_run|skill_save|agent_(create|update|reorder)|computer_/i;
+// shell_run 제외(2026-09-18 소유자 결정) — 작업 디렉터리 샌드박스·30초 상한 안에서만 돌고,
+// ls·find 같은 조회까지 팝업을 띄워 승인 51건이 만료되고 업무가 통째로 멈췄다
+const DEFAULT_RISKY = /send_email|send_telegram|delete|publish|purchase|payment|pay_|_pay|submit_form|drop|execute_sql|skill_save|agent_(create|update|reorder)|computer_/i;
 // 승인 면제 — 이름에 위험 단어가 있어도 실제로는 안전한 도구
 const DEFAULT_SAFE = /routine_list|agent_list|read_|list_|_list|search|lookup/i;
 

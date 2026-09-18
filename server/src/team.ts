@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { db, uid, now, getSetting } from "./db";
 import type { Endpoint } from "./providers";
 import { resolveModel, modelLabel, listAllModelIds, defaultModelId } from "./providers";
-import { chatOnce, streamChat, type ChatMessage } from "./providers/openaiCompat";
+import { chatOnce, streamChat, friendlyProviderError, type ChatMessage } from "./providers/openaiCompat";
 import { systemPrompt, activeRuns, recallMemories } from "./routes/chat";
 import { notifyResult } from "./notify";
 import { webSearch } from "./search";
@@ -11,7 +11,7 @@ import { BROWSER_TOOLS, browserTool, closeAgentPage, closeAgentEgoSpace } from "
 import { COMPUTER_TOOLS } from "./computer";
 import { join } from "node:path";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { parseLeaked, execToolBatch } from "./toolloop";
+import { parseLeaked, execToolBatch, isBrowserish } from "./toolloop";
 import { emitUI } from "./events";
 import type { Intent } from "./intent";
 
@@ -294,6 +294,14 @@ function orgNoticeFor(caller: Agent | null): string {
   return caller?.is_boss ? " [알림] 조직 관리는 Eggbot 전담이 표준입니다 — 다음부터는 Eggbot에게 지시하세요." : "";
 }
 
+// 조직 변경 결과에 붙는 최신 조직 한 줄 — 변경 직후 agent_list로 다시 확인하던 왕복을 없앤다
+// (실측: 단계 상한에 걸린 실행 114건의 도구 호출 1336회 중 agent_list가 219회였다)
+function orgSnapshot(): string {
+  const rows = db.prepare("SELECT a.name, a.is_boss, a.is_lead, a.special_role, p.name parent_name FROM agents a LEFT JOIN agents p ON p.id = a.parent_id ORDER BY a.is_boss DESC, COALESCE(a.sort_order, a.created_at)").all() as any[];
+  const line = rows.map((a) => `${a.name}${a.is_boss ? "[CEO]" : a.special_role === "org_admin" ? "[조직관리]" : a.is_lead ? "[팀장]" : ""}${a.parent_name ? `(소속: ${a.parent_name})` : ""}`).join(", ");
+  return `\n[현재 조직] ${line || "등록된 봇 없음"} — 방금 반영된 최신 상태입니다. agent_list로 다시 확인하지 마세요.`;
+}
+
 // 순환 차단 안내 — 위임·메시지 사슬의 상위 봇에게 되돌아가는 호출 (보고-회신 핑퐁의 구조적 원인)
 const cycleNotice = (target: Agent) => `순환 차단: ${target.name}은(는) 이 작업을 지시한 상위 봇입니다 — 결과는 최종 답변으로 작성하면 자동으로 전달됩니다. 보고·확인을 위해 상위 봇에게 지시나 메시지를 보내지 마세요.`;
 
@@ -303,7 +311,9 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
   if (name === "agent_list") {
     const ck = agentId ?? "global";
     const hit = agentListCache.get(ck);
-    if (hit && Date.now() - hit.at < 30_000) return hit.text;
+    // 캐시 히트 = 같은 실행에서의 재조회 — 결과만 돌려주면 또 부른다. 다음 단계로 가라고 명시한다
+    if (hit && Date.now() - hit.at < 30_000)
+      return `[재조회 불필요 — 30초 안에 같은 조회를 이미 했고 그 사이 조직 변경이 없었습니다. 아래 결과로 다음 단계를 진행하세요]\n${hit.text}`;
     const rows = db.prepare("SELECT a.*, (SELECT COUNT(*) FROM agent_runs r WHERE r.agent_id = a.id) run_count, p.name parent_name FROM agents a LEFT JOIN agents p ON p.id = a.parent_id ORDER BY a.is_boss DESC, a.pinned DESC, COALESCE(CASE WHEN p.id IS NOT NULL AND p.is_boss = 0 THEN p.sort_order END, a.sort_order, a.created_at), CASE WHEN p.id IS NOT NULL AND p.is_boss = 0 THEN 1 ELSE 0 END, COALESCE(a.sort_order, a.created_at)").all() as any[];
     const busyIds = new Set((db.prepare("SELECT DISTINCT agent_id FROM routines WHERE enabled = 1 AND agent_id IS NOT NULL").all() as any[]).map((r) => r.agent_id));
     const text = rows.length
@@ -377,7 +387,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
       results.push(`봇 생성됨: ${created.name} (모델: ${modelLabel(created.model ?? defaultModel())}, 상위: ${parentName})`);
     }
     invalidateListCache();
-    return `${results.join("\n")} — agent_direct로 즉시 업무를 지시하세요.${orgNoticeFor(caller)}`;
+    return `${results.join("\n")} — agent_direct로 즉시 업무를 지시하세요.${orgNoticeFor(caller)}${orgSnapshot()}`;
   }
   if (name === "agent_direct") {
     // names 배열로 여러 봇에 동시 지시 가능 (병렬 팬아웃 — 그록 멀티에이전트 대응)
@@ -599,7 +609,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
       ? (newParentId ? ` — ${getAgent(newParentId)?.name ?? "?"} 소속으로 배정` : " — CEO 직속으로 이동")
       : "";
     invalidateListCache();
-    return `봇 수정됨: ${target.name}${renamed && renamed !== target.name ? ` → ${renamed}` : ""}${args.lead !== undefined && (!caller || caller.is_boss || isOrgAdmin) ? (args.lead ? " — 팀장 지정" : " — 팀장 해제") : ""}${args.max_children !== undefined && (!caller || caller.is_boss || isOrgAdmin) ? ` — 하위 봇 한도 ${mc}개` : ""}${parentNote}${folderNote}${orgNoticeFor(caller)}`;
+    return `봇 수정됨: ${target.name}${renamed && renamed !== target.name ? ` → ${renamed}` : ""}${args.lead !== undefined && (!caller || caller.is_boss || isOrgAdmin) ? (args.lead ? " — 팀장 지정" : " — 팀장 해제") : ""}${args.max_children !== undefined && (!caller || caller.is_boss || isOrgAdmin) ? ` — 하위 봇 한도 ${mc}개` : ""}${parentNote}${folderNote}${orgNoticeFor(caller)}${orgSnapshot()}`;
   }
   if (name === "agent_delete") {
     const target = findAgentByName(pickStr(args, "name", "to", "agent", "target", "bot"));
@@ -612,7 +622,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
       return "권한 없음: 봇 삭제는 Eggbot(조직관리 전담)만 수행합니다 — Eggbot에게 요청하세요";
     deleteAgentRow(target.id);
     invalidateListCache();
-    return `봇 삭제됨: ${target.name}${orgNoticeFor(caller)}`;
+    return `봇 삭제됨: ${target.name}${orgNoticeFor(caller)}${orgSnapshot()}`;
   }
   if (name === "agent_reorder") {
     const caller = agentId ? getAgent(agentId) : null;
@@ -788,6 +798,10 @@ export function stopAllRuns(): { runs: number; chats: number; messages: number }
 // 설정값 (기본값은 기존 하드코딩과 동일 — 데드라인·라운드·위임 상한)
 const runDeadlineSec = () => Number(getSetting("run_deadline_sec")) || 480;
 const toolRounds = () => Number(getSetting("tool_rounds")) || 12;
+const browserRounds = () => Number(getSetting("tool_rounds_browser")) || 20;
+// 브라우저·데스크톱 조작은 로그인→탐색→클릭→확인으로 단계가 길어 기본 예산으로는 본업 전에 소진된다
+// (실측: 메일 본문 열기 업무가 "도구 단계 상한"으로 반복 중단). 그 도구를 실제로 쓴 실행만 상한을 올린다
+export const roundLimitFor = (used: Set<string>) => ([...used].some(isBrowserish) ? browserRounds() : toolRounds());
 const delegateCapSec = () => Number(getSetting("delegate_cap_sec")) || 540;
 // 하위 위임의 시간 상한 — 위임 잡은 백그라운드로 분리돼 있으므로 하위는 항상 독립 상한을 받는다.
 // 상위의 "시간 초과"는 전파하지 않는다: 상위가 끝나도 하위는 완주해 결과를 세션·이력에 남긴다
@@ -955,7 +969,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
   };
   trackEmit({ type: "agent_phase", agentId: state.id, phase: "exec", label: "작업 실행" });
   try {
-    for (let round = 0; round < toolRounds(); round++) {
+    for (let round = 0; round < roundLimitFor(calledTools); round++) {
       if (Date.now() > deadline) {
         trackEmit({ type: "agent_step", agentId: state.id, tool: "시간 제한 — 결과 정리" });
         messages.push({ role: "user", content: "작업 시간 제한에 도달했습니다. 도구를 더 사용하지 말고, 지금까지 얻은 결과로 최종 보고서를 즉시 작성하세요. 완료하지 못한 작업이 있으면 보고서 끝에 '## 남은 작업' 항목으로 구체적으로 적으세요 — 다음 지시에서 이어서 진행하는 데 사용됩니다." });
@@ -1060,7 +1074,8 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
     checkpointMemory(agent, state.task, state.result);
   } catch (e) {
     state.status = "error";
-    state.result = `에이전트 오류: ${(e as Error).message}`;
+    // 프로바이더 원문(JSON 덩어리)만 남으면 실패 이유를 알 수 없다 — 원인·조치가 보이는 안내로 바꿔 보고한다
+    state.result = `에이전트 오류: ${friendlyProviderError((e as Error).message)}`;
     // 시간 초과로 중단된 경우 — 이미 확보한 도구 결과가 있으면 짧은 추가 시간으로 부분 보고서를 만든다.
     // (사용자 중지 AbortError는 제외 — signal.reason이 TimeoutError일 때만. 결과 전송 실패보다 부분 보고가 낫다)
     // 사용자 중지(AbortError)로 끊긴 실행은 부분 보고를 만들지 않는다 — 만들면 "완료"가 돼 회신 재실행이 다시 번진다

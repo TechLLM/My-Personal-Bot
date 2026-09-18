@@ -30,6 +30,22 @@ function isTransientErr(e: unknown): boolean {
     || (e as Error)?.name === "TimeoutError";
 }
 
+// 인증 실패(401/403·토큰 만료·키 오류)는 재시도로 풀리지 않지만 다른 프로바이더로는 넘어가야 한다
+// 실측 2026-09-18: codex 토큰 만료 401에서 폴백 없이 봇 실행이 통째로 실패했다 (429·잔액부족은 이미 폴백 대상)
+function isAuthErr(e: unknown): boolean {
+  return /\b(401|403)\b|token_expired|invalid.?api.?key|unauthorized|authentication token/i.test(String((e as Error)?.message ?? e));
+}
+const shouldFallback = (e: unknown) => isTransientErr(e) || isAuthErr(e);
+
+// 프로바이더 원문 오류(JSON 덩어리)를 원인과 조치가 보이는 한 줄로 — 폴백까지 모두 실패해 사용자에게 갈 때 쓴다
+// ("에이전트 오류: 오류 401: {"error":{...}}"만 남아 실패 이유를 알 수 없다는 보고가 있었다)
+export function friendlyProviderError(msg: string): string {
+  if (/insufficient|balance|1113|CreditsError/i.test(msg)) return `모델 제공자 잔액이 부족해 호출이 거부됐습니다 — 결제 후 다시 시도하세요 (원문: ${msg.slice(0, 200)})`;
+  if (isAuthErr(msg)) return `모델 제공자 인증이 만료됐습니다 — 설정 > 프로바이더에서 재인증하세요 (원문: ${msg.slice(0, 200)})`;
+  if (/\b429\b|rate.?limit|1302/i.test(msg)) return `모델 제공자 요청 한도에 걸렸습니다 — 잠시 후 다시 시도하거나 다른 모델을 배정하세요 (원문: ${msg.slice(0, 200)})`;
+  return msg;
+}
+
 // 속도 제한(429)에 걸린 모델은 잠시 건너뛴다 — 예전엔 호출마다 같은 모델에서 백오프 재시도(1초·4초)를
 // 반복한 뒤에야 폴백해, 봇 호출 하나하나가 수 초씩 늦어지고 제한도 더 오래 풀리지 않았다.
 // 폴백할 다음 모델이 없으면 건너뛰지 않고 그대로 시도한다.
@@ -72,7 +88,7 @@ export async function chatOnce(
         if (origin) r.fallbackFrom = origin;
         return r;
       } catch (e) {
-        if (opts.signal?.aborted || !isTransientErr(e)) throw e;
+        if (opts.signal?.aborted || !shouldFallback(e)) throw e;
         if (isRateLimited(e)) rateLimitedUntil.set(key, Date.now() + RATE_LIMIT_COOLDOWN_MS);
         next = nextUsable(key, needsTools);
         if (!next) throw e;
@@ -184,12 +200,12 @@ export async function* streamChat(
       try {
         for await (const ev of streamChatOnce(ep, mdl, messages, opts)) {
           if (!noted) { yield { type: "reasoning", text: `⚠️ ${origin} 실패 — ${ep.id}/${mdl}로 폴백했습니다\n` }; noted = true; }
-          if (ev.type === "error" && !produced && isTransientErr(new Error(ev.error ?? ""))) { failMsg = ev.error ?? "오류"; break; }
+          if (ev.type === "error" && !produced && shouldFallback(new Error(ev.error ?? ""))) { failMsg = ev.error ?? "오류"; break; }
           if (ev.type === "content") produced = true;
           yield ev;
         }
       } catch (e) {
-        if (opts.signal?.aborted || produced || !isTransientErr(e)) throw e; // 본문 출력이 시작된 뒤엔 중간 전환 금지
+        if (opts.signal?.aborted || produced || !shouldFallback(e)) throw e; // 본문 출력이 시작된 뒤엔 중간 전환 금지
         failMsg = String((e as Error).message);
       }
       if (!failMsg) return;

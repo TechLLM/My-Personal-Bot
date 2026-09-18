@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import { db, setSetting } from "../db";
 import { resolveModel } from "./index";
-import { chatOnce, streamChat } from "./openaiCompat";
+import { chatOnce, streamChat, friendlyProviderError } from "./openaiCompat";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
 
@@ -46,4 +46,34 @@ test("429를 받은 모델은 쿨다운 동안 재시도 없이 바로 폴백한
     setSetting("custom_providers", "[]");
     setSetting("fallback_chain", "");
   }
+});
+
+// 2026-09-18 실측: codex 토큰 만료 401에서 폴백 없이 봇 실행이 통째로 실패했다(오류 3건).
+// 429·잔액부족은 이미 폴백 대상이었지만 인증 만료만 빠져 있었다
+test("인증 만료(401)도 다음 프로바이더로 폴백한다", async () => {
+  setSetting("custom_providers", JSON.stringify([
+    { id: "t-expired", baseUrl: "http://expired.test/v1", apiKey: "k", models: ["m"] },
+    { id: "t-live", baseUrl: "http://live.test/v1", apiKey: "k", models: ["m"] },
+  ]));
+  setSetting("fallback_chain", "t-expired → t-live");
+  const saved = globalThis.fetch;
+  globalThis.fetch = (async (url: unknown) => String(url).includes("expired.test")
+    ? new Response('{"error":{"message":"Provided authentication token is expired. Please try signing in again.","code":"token_expired"}}', { status: 401 })
+    : new Response(JSON.stringify({ choices: [{ message: { content: "살아있는 모델 응답" } }] }), { status: 200, headers: { "content-type": "application/json" } })
+  ) as unknown as typeof fetch;
+  try {
+    const { endpoint, model } = resolveModel("t-expired/m");
+    const r = await chatOnce(endpoint, model, [{ role: "user", content: "안녕" }]);
+    expect(r.content).toBe("살아있는 모델 응답");
+    expect(r.fallbackFrom).toBe("t-expired/m");
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test("프로바이더 인증·한도 오류는 원인과 조치가 보이는 안내로 바뀐다", () => {
+  expect(friendlyProviderError('오류 401: {"error":{"message":"Provided authentication token is expired.","code":"token_expired"}}')).toContain("재인증");
+  expect(friendlyProviderError('오류 401: {"error":{"type":"CreditsError","message":"Insufficient balance."}}')).toContain("잔액");
+  expect(friendlyProviderError('오류 429: {"error":{"code":"1302","message":"Rate limit reached"}}')).toContain("요청 한도");
+  expect(friendlyProviderError("도구 실행 시간 초과(120초)")).toBe("도구 실행 시간 초과(120초)");
 });
