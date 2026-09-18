@@ -179,7 +179,7 @@ export async function runGoldenTask(task: GoldenTask, timeoutMs = 240_000): Prom
   const { runAgentDetached, getAgent, ensureBossAgent, findAgentByName } = await import("./team");
   const agent = (task.agent ? findAgentByName(task.agent) : null) ?? ensureBossAgent();
   const started = now();
-  const state = await runOnce(agent.id, task.prompt, `[골든 ${task.id}]`, task.approvals === "auto" ? started : 0, timeoutMs);
+  const state = await runOnce(agent.id, task.prompt, `[골든 ${task.id}]`, timeoutMs);
   const out: RunOutcome = {
     content: state.result ?? "", toolLog: state.toolLog ?? [], latencyMs: now() - started,
     tokensIn: 0, tokensOut: 0, runId: state.runId,
@@ -187,7 +187,7 @@ export async function runGoldenTask(task: GoldenTask, timeoutMs = 240_000): Prom
   // 2턴 과제 — 첫 응답을 보존하고 후속 프롬프트의 응답이 최종 content가 된다
   if (task.then) {
     out.content2 = out.content;
-    const s2 = await runOnce(agent.id, task.then, `[골든 ${task.id}-2]`, task.approvals === "auto" ? started : 0, timeoutMs);
+    const s2 = await runOnce(agent.id, task.then, `[골든 ${task.id}-2]`, timeoutMs);
     out.content = s2.result ?? "";
     out.toolLog = [...out.toolLog, ...(s2.toolLog ?? [])];
     out.latencyMs = now() - started;
@@ -195,13 +195,14 @@ export async function runGoldenTask(task: GoldenTask, timeoutMs = 240_000): Prom
   return out;
 }
 
-async function runOnce(agentId: string, task: string, label: string, autoApproveSince: number, timeoutMs: number) {
+async function runOnce(agentId: string, task: string, label: string, timeoutMs: number) {
   const { runAgentDetached, getAgent } = await import("./team");
   const agent = getAgent(agentId)!;
+  // 골든 과제는 개발 샌드박스에서 직렬 실행 — 승인 게이트 도구(shell_run 등)를 쓰는 과제도
+  // 사람 없이 계측돼야 하므로 승인기를 항상 돌린다
+  const since = now();
   const { done } = runAgentDetached(agent, { label, task, verifyIntent: false });
-  const approver = autoApproveSince
-    ? setInterval(() => autoResolveApprovals(agentId, autoApproveSince), 3_000)
-    : null;
+  const approver = setInterval(() => autoResolveApprovals(agentId, since), 3_000);
   try {
     return await Promise.race([
       done,
