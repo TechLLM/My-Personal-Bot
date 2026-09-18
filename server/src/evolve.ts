@@ -550,13 +550,26 @@ ${surfList}
 {"surface":"표면id","target":"대상(스킬명·봇명·파일경로)","column":"db컬럼(db표면이면)","newValue":"새 값(db 표면이면 전체 내용)","filePath":"src 표면이면","intent":"무엇을 왜 바꾸는지","summary":"한 줄 설명"}`;
   const { done } = runAgentDetached(agent, { label: "[자기개선] 개선 후보 탐색", task, verifyIntent: false });
   const state = await done;
-  const m = (state.result ?? "").match(/\{[\s\S]*"surface"[\s\S]*\}/);
-  if (!m) return null;
-  try {
-    const p = JSON.parse(m[0]);
-    if (!p.surface || !p.target) return null;
-    return p as Proposal;
-  } catch { return null; }
+  const text = state.result ?? "";
+  // 1차 — 원시 JSON 블록 추출. 모델이 지시를 따라 JSON만 출력한 경우의 빠른 경로
+  let p: Proposal | null = null;
+  const m = text.match(/\{[\s\S]*"surface"[\s\S]*\}/);
+  try { if (m) p = JSON.parse(m[0]); } catch {}
+  // 2차 — 모델이 보고서 형식(표·문단)으로 제안한 경우 소형 추출 호출로 구조화한다.
+  // 형식 의존 없이 파이프라인이 살아야 한다 — 탐색 산출물이 있으면 후보를 놓치지 않는다
+  if (!p?.surface || !p?.target) {
+    const { resolveModel, defaultModelId } = await import("./providers");
+    const { chatOnce } = await import("./providers/openaiCompat");
+    const { endpoint, model } = resolveModel(defaultModelId());
+    const ex = await chatOnce(endpoint, model, [{
+      role: "user",
+      content: `아래 개선 제안 보고에서 후보를 JSON으로 추출하세요. 실행 가능한 제안이 없으면 null만 출력.\n출력 형식: {"surface":"표면id","target":"대상(스킬명·봇명·파일경로)","column":"db컬럼","newValue":"새 값(db 표면이면)","intent":"무엇을 왜 바꾸는지","summary":"한 줄 설명"} — JSON만.\n표면id는 skill.prompt·agent.role·agent.model·agent.tools·routine.config·src 중 하나.\n\n[보고]\n${text.slice(0, 8000)}`,
+    }], { reasoningEffort: "low", signal: AbortSignal.timeout(60_000) });
+    const em = (ex.content ?? "").match(/\{[\s\S]*"surface"[\s\S]*\}/);
+    try { if (em) p = JSON.parse(em[0]); } catch {}
+  }
+  if (!p?.surface || !p?.target) return null;
+  return p;
 }
 
 // 후보를 실행 가능한 Candidate로 구체화 — code 표면은 하네스가 파일을 읽고 새 본문을 생성
@@ -565,8 +578,23 @@ export async function materializeCandidate(p: Proposal): Promise<Candidate | nul
   const surf = surfaces.surfaces.find((s) => s.id === p.surface);
   if (!surf) return null;
   if (surf.kind === "db") {
-    if (!p.newValue) return null;
-    return { surface: p.surface, target: p.target, column: p.column ?? surf.column, newValue: p.newValue, summary: p.summary ?? p.intent };
+    const col = p.column ?? surf.column;
+    if (p.newValue)
+      return { surface: p.surface, target: p.target, column: col, newValue: p.newValue, summary: p.summary ?? p.intent };
+    // newValue가 없으면 현재 값 + 변경 의도로 하네스가 새 값을 만든다 — 탐색 봇이 의도만 제안해도 구체화가 죽지 않도록
+    if (!col || col === "*") return null;
+    const row = db.prepare(`SELECT rowid, ${col} FROM ${surf.table!} WHERE name = ? OR id = ?`).get(p.target, p.target) as any;
+    if (!row) return null;
+    const { resolveModel, defaultModelId } = await import("./providers");
+    const { chatOnce } = await import("./providers/openaiCompat");
+    const { endpoint, model } = resolveModel(defaultModelId());
+    const res = await chatOnce(endpoint, model, [{
+      role: "user",
+      content: `아래 현재 값을 개선하세요. 변경 의도: ${p.intent}\n요구: 기존 구조·형식·톤 유지, 필요한 부분만 수정, 개선된 전체 값만 출력. 다른 설명 없이.\n\n[현재 값 — ${surf.table}.${col} (${p.target})]\n${String(row[col] ?? "").slice(0, 20000)}`,
+    }], { reasoningEffort: "low", signal: AbortSignal.timeout(90_000) });
+    const newValue = (res.content ?? "").trim();
+    if (!newValue || newValue === String(row[col] ?? "").trim()) return null;
+    return { surface: p.surface, target: p.target, column: col, newValue, summary: p.summary ?? p.intent };
   }
   // code 표면 — 탐색 봇은 의도만 제안하고 실제 파일 재작성은 여기서 한다
   const path = p.filePath ?? p.target;
