@@ -217,6 +217,8 @@ export const BUILTIN_TOOLS = [
   { type: "function", function: { name: "write_file", description: "팀 작업 디렉터리에 파일을 저장합니다 — 스크립트를 만들면 shell_run으로 실행할 수 있습니다", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } } },
   { type: "function", function: { name: "shell_run", description: "작업 디렉터리 안에서 셸 명령을 실행합니다 — CSV 가공·데이터 변환·스크립트 실행에 사용. 샌드박스로 실행됩니다: 네트워크 차단, 작업 디렉터리 외 쓰기 금지, 30초 상한, 출력 8,000자 상한. 첫 명령은 bun·python3·기본 유닉스 유틸만 허용됩니다", parameters: { type: "object", properties: { command: { type: "string", description: "실행할 명령 — 작업 디렉터리가 cwd" } }, required: ["command"] } } },
   { type: "function", function: { name: "list_files", description: "팀 작업 디렉터리의 파일 목록 — path를 주면 하위 디렉터리 안을 봅니다 (디렉터리인지 모를 때 read_file 대신 이걸 먼저 쓰세요)", parameters: { type: "object", properties: { path: { type: "string", description: "하위 디렉터리 경로 (비우면 작업 디렉터리 루트)" } } } } },
+  { type: "function", function: { name: "mail_list", description: "메일함에서 메일 목록을 읽습니다(발신자·제목·수신시각·읽음여부·uid). 그룹웨어 메일 확인·요약은 브라우저로 화면을 여는 것보다 이 도구가 훨씬 빠르고 정확합니다 — IMAP 설정이 있으면 먼저 쓰세요", parameters: { type: "object", properties: { since: { type: "string", description: "이 날짜 이후만 — \"today\" 또는 \"2026-09-18\"" }, unseen: { type: "boolean", description: "안 읽은 메일만" }, from: { type: "string", description: "발신자 주소 일부" }, subject: { type: "string", description: "제목 키워드" }, limit: { type: "number", description: "최대 건수 (기본 30, 최대 100)" }, mailbox: { type: "string", description: "사서함 (기본 INBOX)" } } } } },
+  { type: "function", function: { name: "mail_read", description: "메일 한 통의 본문과 첨부 파일명을 읽습니다. uid는 mail_list가 알려준 값을 씁니다", parameters: { type: "object", properties: { uid: { type: "string", description: "mail_list가 준 uid" }, mailbox: { type: "string", description: "사서함 (기본 INBOX)" } }, required: ["uid"] } } },
   { type: "function", function: { name: "routine_add", description: "예약 작업(루틴)을 등록합니다. 사용자가 반복·정기 작업을 요청할 때 사용하세요. 이 봇의 담당 업무로 등록됩니다. trigger: schedule(시간 기반) 또는 email(메일 도착 기반 — IMAP 설정 필요, email_from/email_subject 필터)", parameters: { type: "object", properties: { name: { type: "string", description: "루틴 이름" }, prompt: { type: "string", description: "매번 실행할 작업 지시" }, schedule: { type: "string", description: "every:30m | every:Nh | daily:HH:MM (trigger=schedule일 때)" }, trigger: { type: "string", description: "schedule | email" }, email_from: { type: "string", description: "트리거할 발신자 이메일 (trigger=email)" }, email_subject: { type: "string", description: "트리거할 제목 키워드 (trigger=email)" } }, required: ["name", "prompt"] } } },
   { type: "function", function: { name: "routine_list", description: "등록된 예약 작업 목록", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "routine_delete", description: "예약 작업 삭제 (id는 routine_list로 확인)", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } },
@@ -725,6 +727,11 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     mkdirSync(join(p, ".."), { recursive: true }); // 하위 디렉터리 자동 생성 — ENOENT 재시도 방지
     writeFileSync(p, String(args.content ?? ""));
     return `저장됨: ${filePath}`;
+  }
+  // 메일 조회 — 그룹웨어 화면을 브라우저로 긁는 것보다 단계·시간이 훨씬 적게 든다
+  if (name === "mail_list" || name === "mail_read") {
+    const { mailList, mailRead } = await import("./mail");
+    return name === "mail_list" ? await mailList(args) : await mailRead(args);
   }
   if (name === "list_files") {
     const sub = pickStr(args, "path", "dir", "directory");

@@ -183,9 +183,10 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   const [recDraft, setRecDraft] = useState<{ name: string; trigger: string; steps: string; notes: string } | null>(null);
 
   const testNotify = (channel: string) => {
-    setTestMsg("발송 중…");
+    const label = channel === "telegram" ? "텔레그램" : channel === "imap" ? "메일 읽기" : "메일 발송";
+    setTestMsg(channel === "imap" ? "메일함 접속 중…" : "발송 중…");
     mybotFetch("/api/notify/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channel }) })
-      .then(async (r) => setTestMsg(r.ok ? `${channel === "telegram" ? "텔레그램" : "메일"} 테스트 발송 성공` : `실패: ${(await r.json()).error}`))
+      .then(async (r) => setTestMsg(r.ok ? `${label} 테스트 성공` : `실패: ${(await r.json()).error}`))
       .catch((e) => setTestMsg(`실패: ${e.message}`));
   };
 
@@ -873,9 +874,22 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     <Field k="smtp_from" label="보내는 주소(선택)" />
                     <Field k="email_to" label="받는 주소" />
                   </div>
+                  <div className="pt-2 text-xs font-medium text-stone-600">메일 읽기 (IMAP)</div>
+                  <p className="text-2xs text-stone-400">봇이 메일 목록·본문을 직접 읽습니다 — 그룹웨어 화면을 브라우저로 여는 것보다 빠르고 정확합니다. 메일 도착 트리거 루틴에도 쓰입니다.</p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <Field k="imap_host" label="IMAP 호스트" ph="imap.gmail.com / 사내 메일 서버" />
+                    <Field k="imap_port" label="포트" ph="993 (SSL)" />
+                    <Field k="imap_user" label="IMAP 계정" ph="name@company.com" />
+                    <Field k="imap_pass" label="IMAP 비밀번호/앱 비밀번호" />
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-stone-600">
+                    <input type="checkbox" checked={s.imap_tls !== "0"} onChange={(e) => update({ imap_tls: e.target.checked ? "1" : "0" })} />
+                    SSL/TLS 사용 (기본 켜짐 — 993 포트)
+                  </label>
                   <div className="flex items-center gap-2 pt-1">
                     <button className={Sub} onClick={() => testNotify("telegram")}>텔레그램 테스트</button>
-                    <button className={Sub} onClick={() => testNotify("email")}>메일 테스트</button>
+                    <button className={Sub} onClick={() => testNotify("email")}>메일 발송 테스트</button>
+                    <button className={Sub} onClick={() => testNotify("imap")}>메일 읽기 테스트</button>
                     {testMsg && <span className="text-caption text-stone-500">{testMsg}</span>}
                   </div>
                 </div>
