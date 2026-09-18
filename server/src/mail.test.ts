@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { db } from "./db";
-import { searchCriteria, pickTextPart, attachmentNames, htmlToText } from "./mail";
+import { searchCriteria, pickTextPart, attachmentNames, htmlToText, parseUids } from "./mail";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
 
@@ -46,4 +46,12 @@ test("html 본문은 읽을 수 있는 텍스트로 정리한다", () => {
   const html = `<style>p{color:red}</style><div>안녕하세요<br/>제주항공 견적 건입니다.</div><p>기한: 9/22</p><script>x()</script>`;
   expect(htmlToText(html)).toBe("안녕하세요\n제주항공 견적 건입니다.\n기한: 9/22");
   expect(htmlToText("<p>A&nbsp;&amp;&nbsp;B</p>")).toBe("A & B");
+});
+
+test("uid는 쉼표·공백·배열로 여러 통을 받는다 — 한 연결로 묶어 읽기 위한 것", () => {
+  expect(parseUids({ uid: "101,102 103" })).toEqual(["101", "102", "103"]);
+  expect(parseUids({ uids: ["7", "7", "9"] })).toEqual(["7", "9"]); // 중복 제거
+  expect(parseUids({ id: "42" })).toEqual(["42"]);
+  expect(parseUids({ uid: "abc, 12" })).toEqual(["12"]); // 숫자가 아닌 값은 버린다
+  expect(parseUids({})).toEqual([]);
 });
