@@ -148,7 +148,7 @@ export function recordExperiment(e: ExperimentRow): string {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(id, cycle, e.surface, e.target ?? null, e.candidate ?? null, e.candidatePath ?? null,
       e.baseline ? JSON.stringify(e.baseline) : null, e.result ? JSON.stringify(e.result) : null,
-      e.verdict, e.reason, e.applied ? 1 : 0, now(), now());
+      e.verdict, e.reason, e.applied ? 1 : 0, now(), null);
   return id;
 }
 
@@ -157,6 +157,10 @@ export function todayCycleCount(): number {
 }
 
 export function cycleLockHeld(): boolean {
+  // 벽시계 상한을 넘긴 미완료 잠금은 좀비 프로세스 잔재 — crash로 마감하고 잠금 해제
+  const staleMs = loadSurfaces().limits.cycleWallClockMin * 60_000;
+  db.prepare("UPDATE experiments SET verdict = 'crash', reason = '벽시계 상한 초과 — 프로세스 소실로 추정', finished_at = ? WHERE finished_at IS NULL AND created_at < ?")
+    .run(now(), now() - staleMs);
   return !!(db.prepare("SELECT 1 FROM experiments WHERE finished_at IS NULL").get());
 }
 
