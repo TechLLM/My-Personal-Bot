@@ -85,7 +85,7 @@ function withSiblings(m: Msg) {
 // 관련성 기반 장기기억 회상 (C15) — FTS5 전문검색으로 전체 기억을 대상으로 하고,
 // 점수는 검색 관련성 + 중요도(weight) + 최근성(90일 반감) 가중합. 아카이브된 기억은 제외.
 // 회상된 기억은 last_seen을 갱신한다 — 90일 미참조 아카이브의 기준.
-function recallMemories(agentId: string | null, queryText: string, workspaceId?: string | null): string[] {
+export function recallMemories(agentId: string | null, queryText: string, workspaceId?: string | null): string[] {
   const keywords = [...new Set(queryText.replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter((w) => w.length >= 2))].slice(0, 12);
   // C19 — 스코프: 봇 기억 + 같은 프로젝트의 공유 기억. 둘 다 없으면(사용자 전역) 프로젝트 기억은 제외
   const scope = workspaceId ? "(agent_id IS ? OR workspace_id IS ?)" : "(agent_id IS ? AND workspace_id IS NULL)";

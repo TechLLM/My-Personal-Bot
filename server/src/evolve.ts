@@ -81,7 +81,10 @@ function checkFileExists(glob: string, freshMinutes: number): CheckResult {
   if (!existsSync(dir)) return { pass: false, detail: "워크스페이스 디렉터리 없음" };
   const exts = glob.replace("*", "");
   const cutoff = Date.now() - freshMinutes * 60_000;
-  const hit = readdirSync(dir).filter((f) => f.endsWith(exts)).some((f) => statSync(join(dir, f)).mtimeMs > cutoff);
+  // reports/ 등 하위 디렉터리까지 재귀 검색 — 봇이 어느 폴더에 저장해도 잡아야 한다
+  const walk = (d: string): string[] =>
+    readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)]));
+  const hit = walk(dir).some((f) => f.endsWith(exts) && statSync(f).mtimeMs > cutoff);
   return { pass: hit, detail: hit ? `${glob} 파일이 ${freshMinutes}분 내 생성됨` : `최근 ${freshMinutes}분 내 ${glob} 파일 없음` };
 }
 
