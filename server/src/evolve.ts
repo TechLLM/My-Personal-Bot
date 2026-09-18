@@ -556,7 +556,8 @@ ${surfList}
 - 코드(src) 표면은 filePath와 intent(무엇을 어떻게 바꿀지)만 적으세요 — 실제 코드 작성은 하네스가 합니다
 
 [출력] JSON만 출력하세요:
-{"surface":"표면id","target":"대상(스킬명·봇명·파일경로)","column":"db컬럼(db표면이면)","newValue":"새 값(db 표면이면 전체 내용)","filePath":"src 표면이면","intent":"무엇을 왜 바꾸는지","summary":"한 줄 설명"}`;
+{"surface":"표면id","target":"대상(스킬명·봇명·파일경로)","column":"db컬럼(db표면이면)","newValue":"새 값(db 표면이면 전체 내용)","filePath":"src 표면이면","intent":"무엇을 왜 바꾸는지","summary":"한 줄 설명"}
+- summary는 최종 사용자에게 그대로 보여지는 문구입니다 — "무엇이 어떻게 좋아지는지"만 쓰고, 표면 id·파일 경로·내부 구조 명칭(개발 인스턴스·실험·벤치 등)은 절대 넣지 마세요`;
   const { done } = runAgentDetached(agent, { label: "[자기개선] 개선 후보 탐색", task, verifyIntent: false });
   const state = await done;
   const text = state.result ?? "";

@@ -912,7 +912,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
             {section === "updates" && (
               <div>
                 <H>버전 업데이트 <span className="ml-1 text-xs font-normal text-stone-500">현재 v{appVersion}</span></H>
-                <p className="mb-3 text-caption text-stone-500">개발 인스턴스가 검증을 마친 개선 패키지입니다. 적용은 여기서 수동으로만 이뤄집니다.</p>
+                <p className="mb-3 text-caption text-stone-500">새 버전이 준비되면 여기에서 직접 적용합니다.</p>
                 <div className="space-y-2">
                   {updates.map((u) => {
                     const m = u.payload?.measurement;
@@ -929,8 +929,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                           <span className="flex-1 font-medium text-stone-800">{u.payload?.summary}</span>
                         </div>
                         {gain && <div className="mt-1 text-caption text-stone-500">{gain}</div>}
-                        <div className="mt-1 text-caption text-stone-400">{u.payload?.ops?.map((o: any) => `${o.kind === "db" ? "설정" : "코드"}:${o.target}`).join(" · ")}</div>
-                        {!!u.restart_required && <div className="mt-1 text-caption text-amber-600">코드 변경 포함 — 서버 재시작 후 반영됩니다</div>}
+                        {!!u.restart_required && <div className="mt-1 text-caption text-amber-600">적용 후 반영까지 잠시 시간이 걸릴 수 있습니다</div>}
                         <div className="mt-2 flex gap-1.5">
                           {u.status === "pending" && (
                             <>
@@ -957,7 +956,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                       </div>
                     );
                   })}
-                  {!updates.length && <p className="text-xs text-stone-400">수신된 업데이트가 없습니다 — 개발 인스턴스에서 검증된 개선이 생기면 여기에 표시됩니다</p>}
+                  {!updates.length && <p className="text-xs text-stone-400">적용 가능한 업데이트가 없습니다</p>}
                 </div>
               </div>
             )}
