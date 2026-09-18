@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "comment": "자기개선 루프가 후보로 변경할 수 있는 튜닝 표면 등록부 — tasks/self-improvement-contract.md §2가 결속한다. 이 파일 자체는 보호 경로라 루프가 수정할 수 없다.",
+  "surfaces": [
+    { "id": "skill.prompt",     "kind": "db",    "table": "skills",   "column": "prompt",      "desc": "학습된 업무 절차문 — 신규 스킬 생성 포함" },
+    { "id": "agent.role",       "kind": "db",    "table": "agents",   "column": "role_prompt", "desc": "봇 역할 지침 — [전문가 수행 기준] 프레임 유지 필수" },
+    { "id": "agent.model",      "kind": "db",    "table": "agents",   "column": "model",       "desc": "봇-모델 배정" },
+    { "id": "agent.tools",      "kind": "db",    "table": "agents",   "column": "tools",       "desc": "봇별 도구 목록" },
+    { "id": "routine.config",   "kind": "db",    "table": "routines", "column": "*",           "desc": "루틴 설정 (schedule·prompt·enabled)" },
+    { "id": "src",              "kind": "code",  "glob": "server/src/**", "desc": "소스 코드 — 보호 경로 제외. preflight: tsc+test 통과·diff ≤200줄" }
+  ],
+  "protected": [
+    "server/src/evaluate.ts",
+    "server/src/approvals.ts",
+    "server/src/evolve.ts",
+    "server/src/evolve/**",
+    "server/src/crypto.ts",
+    "server/src/index.ts",
+    "server/data/**",
+    "server/.certs/**",
+    ".env*",
+    "tasks/self-improvement-contract.md",
+    "evolve/**",
+    "package.json",
+    "web/dist/**"
+  ],
+  "limits": {
+    "cyclesPerDay": 5,
+    "cycleWallClockMin": 30,
+    "diffMaxLines": 200,
+    "benchSamples": 3
+  }
+}

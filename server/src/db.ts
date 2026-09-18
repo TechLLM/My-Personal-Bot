@@ -286,6 +286,23 @@ db.exec("DELETE FROM conversations WHERE mode = 'bot' AND agent_id IS NOT NULL A
 try { db.exec("ALTER TABLE agent_messages ADD COLUMN chain TEXT"); } catch {} // 보낸 쪽 위임·메시지 사슬(JSON 봇 id 배열) — 순환 메시지 차단용
 try { db.exec("ALTER TABLE credential_requests ADD COLUMN agent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE credential_requests ADD COLUMN resume TEXT"); } catch {}
+// 자기개선 실험 원장 — 모든 사이클의 후보·측정·판정·적용 여부를 남긴다 (tasks/self-improvement-contract.md)
+try { db.exec(`CREATE TABLE IF NOT EXISTS experiments (
+  id TEXT PRIMARY KEY,
+  cycle INTEGER NOT NULL,          -- 사이클 번호 (날짜 내 순번)
+  surface TEXT NOT NULL,           -- 변경 대상 표면 id (surfaces.json)
+  target TEXT,                     -- 표면 내 대상 (스킬명·봇명·파일 경로)
+  candidate TEXT,                  -- 후보 요약 (diff는 candidate_path 파일로)
+  candidate_path TEXT,             -- 후보 diff·본문 저장 경로
+  baseline TEXT,                   -- 기준선 측정 JSON {pass, latency_ms, cost}
+  result TEXT,                     -- 후보 측정 JSON {pass, latency_ms, cost}
+  verdict TEXT,                    -- keep | discard | inconclusive | crash
+  reason TEXT,                     -- 판정 사유
+  applied INTEGER NOT NULL DEFAULT 0, -- 소유자 승인으로 실제 반영됐는지
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER
+)`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_experiments_created ON experiments(created_at)"); } catch {}
 // 봇 아바타를 선형 얼굴 시드로 통일 — 기존 이모지 아바타도 전환
 db.exec("UPDATE agents SET avatar = 'face:' || id WHERE avatar IS NULL OR avatar NOT LIKE 'face:%'");
 // CEO 봇이 하나도 없으면 기존 대장을 CEO로 승격

@@ -1,0 +1,124 @@
+{
+  "version": 1,
+  "comment": "자기개선 계측용 골든 과제 — 실제 사용 이력(다우오피스 조회·조직 관리·루틴·스킬)에서 추출. 완료 기준은 결정적 검사 우선. holdout은 튜닝 입력으로 쓰지 않고 판정에만 사용한다.",
+  "tasks": [
+    {
+      "id": "G1", "holdout": false,
+      "prompt": "지금 등록된 봇이 몇 개인지 확인해서 알려줘",
+      "agent": "CEO",
+      "checks": [
+        { "type": "tool_used", "tool": "agent_list" },
+        { "type": "db_count", "query": "SELECT COUNT(*) c FROM agents", "desc": "응답에 실제 봇 개수가 포함돼야 함" }
+      ]
+    },
+    {
+      "id": "G2", "holdout": false,
+      "prompt": "학습된 업무 스킬이 몇 개인지 skill_list로 확인해서 알려줘",
+      "agent": "CEO",
+      "checks": [
+        { "type": "tool_used", "tool": "skill_list" },
+        { "type": "db_count", "query": "SELECT COUNT(*) c FROM skills WHERE disabled = 0", "desc": "응답에 실제 스킬 개수 포함" }
+      ]
+    },
+    {
+      "id": "G3", "holdout": false,
+      "prompt": "지금 등록된 루틴을 전부 보여줘",
+      "agent": "CEO",
+      "checks": [
+        { "type": "tool_used", "tool": "routine_list" },
+        { "type": "db_count", "query": "SELECT COUNT(*) c FROM routines", "desc": "응답에 실제 루틴 수 포함" }
+      ]
+    },
+    {
+      "id": "G4", "holdout": false,
+      "prompt": "작업 디렉터리의 파일 목록을 확인해서 알려줘",
+      "agent": "CEO",
+      "checks": [
+        { "type": "tool_used", "tool": "list_files" },
+        { "type": "eval_min", "score": 60, "desc": "실제 파일 목록을 답변에 포함" }
+      ]
+    },
+    {
+      "id": "G5", "holdout": false,
+      "prompt": "프로젝트 코드명은 '오로라'야. 기억해줘",
+      "agent": "CEO",
+      "then": "아까 알려준 프로젝트 코드명이 뭐였지?",
+      "checks": [
+        { "type": "tool_used", "tool": "memory_save" },
+        { "type": "content_regex", "pattern": "오로라", "desc": "두 번째 응답에 저장한 코드명 회상" }
+      ]
+    },
+    {
+      "id": "G6", "holdout": false,
+      "prompt": "오늘의 주요 기술 뉴스를 웹 검색해서 3줄로 요약해줘",
+      "agent": "CEO",
+      "checks": [
+        { "type": "tool_used", "tool": "web_search" },
+        { "type": "eval_min", "score": 70, "desc": "실제 검색 근거의 3줄 요약" }
+      ]
+    },
+    {
+      "id": "G7", "holdout": false,
+      "prompt": "테스트용 봇 '골든테스트봇'을 만들고, 간단한 상태 확인을 지시한 뒤, 끝나면 삭제해줘",
+      "agent": "CEO",
+      "approvals": "auto",
+      "checks": [
+        { "type": "lifecycle", "name": "골든테스트봇", "desc": "생성→실행→삭제가 agents 테이블에 실제 반영됐다가 정리" }
+      ]
+    },
+    {
+      "id": "G8", "holdout": false,
+      "prompt": "그룹웨어팀장에게 '현재 소속 하위 봇 이름 목록만 확인해서 보고하라'고 지시하고 결과를 알려줘",
+      "agent": "CEO",
+      "checks": [
+        { "type": "tool_used", "tool": "agent_direct" },
+        { "type": "eval_min", "score": 60, "desc": "하위 봇 실제 이름이 보고에 포함" }
+      ]
+    },
+    {
+      "id": "G9", "holdout": false,
+      "prompt": "현재 조직의 봇 목록과 각 역할을 조사해서 간단한 보고서 파일로 저장해줘",
+      "agent": "CEO",
+      "checks": [
+        { "type": "tool_used", "tool": "write_file" },
+        { "type": "file_exists", "glob": "*.md", "fresh_minutes": 10, "desc": "보고서 파일이 실제 생성" },
+        { "type": "eval_min", "score": 70 }
+      ]
+    },
+    {
+      "id": "G10", "holdout": false, "env": true,
+      "prompt": "다우오피스에 접속해서 오늘 수신 메일이 있는지 확인해서 알려줘",
+      "agent": "그룹웨어팀장",
+      "checks": [
+        { "type": "tool_used", "tool_prefix": "bsk" },
+        { "type": "eval_min", "score": 60, "desc": "실제 확인한 화면 내용 근거" }
+      ]
+    },
+    {
+      "id": "H1", "holdout": true,
+      "prompt": "Eggbot에게 '현재 봇 조직도를 확인해서 한 줄로 보고하라'고 지시해줘",
+      "agent": "CEO",
+      "checks": [
+        { "type": "tool_used", "tool": "agent_direct" },
+        { "type": "eval_min", "score": 60 }
+      ]
+    },
+    {
+      "id": "H2", "holdout": true,
+      "prompt": "오늘 날짜와 지금 실행 중인 봇이 있는지 확인해서 알려줘",
+      "agent": "CEO",
+      "checks": [
+        { "type": "content_regex", "pattern": "2026|실행|없|있", "desc": "날짜·실행 상태 언급" },
+        { "type": "eval_min", "score": 60 }
+      ]
+    },
+    {
+      "id": "H3", "holdout": true,
+      "prompt": "최근에 실패한 작업이 있는지 실행 이력을 확인해서 알려줘",
+      "agent": "CEO",
+      "checks": [
+        { "type": "eval_min", "score": 60, "desc": "실제 이력 조회 근거" }
+      ]
+    }
+  ]
+}

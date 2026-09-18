@@ -240,7 +240,7 @@ export const MANAGE_TOOLS = [
 ];
 
 // 봇 이름 해석 — 정확히 일치 → 공백 무시 → 포함 검색 순. 사용자가 "메일봇"이라 써도 "메일 브리핑봇"을 찾음
-function findAgentByName(raw: string): Agent | null {
+export function findAgentByName(raw: string): Agent | null {
   const nm = String(raw ?? "").trim();
   if (!nm) return null;
   const exact = db.prepare("SELECT * FROM agents WHERE name = ?").get(nm) as Agent | undefined;

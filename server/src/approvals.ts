@@ -264,14 +264,15 @@ export const approvalsRoute = new Hono()
   });
 
 // 승인된 도구를 실제 실행 → 결과 저장 → 봇 작업 재개
-async function executeApproved(req: any) {
+export async function executeApproved(req: any) {
   const { callBuiltin } = await import("./team");
   const { browserTool, BROWSER_TOOLS } = await import("./browser");
   const { mcpCall, mcpTools } = await import("./mcp");
   const args = JSON.parse(req.args ?? "{}");
   let result: string;
   try {
-    if (req.tool.startsWith("computer_")) result = await (await import("./computer")).computerTool(req.tool, args);
+    if (req.tool === "evolve_apply") result = await (await import("./evolve")).applyApprovedExperiment(JSON.parse(req.args ?? "{}").experimentId);
+    else if (req.tool.startsWith("computer_")) result = await (await import("./computer")).computerTool(req.tool, args);
     else if (BROWSER_TOOLS.some((t: any) => t.function.name === req.tool)) result = await browserTool(req.id, req.tool, args);
     else {
       const mcpNames = (await mcpTools().catch(() => [] as any[])).map((t: any) => t.function?.name ?? t.name);
