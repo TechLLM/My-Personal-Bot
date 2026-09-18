@@ -798,10 +798,16 @@ export function stopAllRuns(): { runs: number; chats: number; messages: number }
 // 설정값 (기본값은 기존 하드코딩과 동일 — 데드라인·라운드·위임 상한)
 const runDeadlineSec = () => Number(getSetting("run_deadline_sec")) || 480;
 const toolRounds = () => Number(getSetting("tool_rounds")) || 12;
-const browserRounds = () => Number(getSetting("tool_rounds_browser")) || 20;
+// 실측 2026-09-18: 그룹웨어 메일 조회가 20라운드를 전부 성공하고도 상한에 걸려 8건 중 2건만 열었다.
+// 그때 소요는 142~175초로 데드라인(480초)의 30~36%뿐이었다 — 시간이 아니라 단계가 모자랐다.
+// 진입·로그인에 10라운드가 들고 본문 1건이 클릭 1라운드라, 목록 조회 후 본문 다수를 여는 업무가 표준이다.
+const browserRounds = () => Number(getSetting("tool_rounds_browser")) || 32;
 // 브라우저·데스크톱 조작은 로그인→탐색→클릭→확인으로 단계가 길어 기본 예산으로는 본업 전에 소진된다
 // (실측: 메일 본문 열기 업무가 "도구 단계 상한"으로 반복 중단). 그 도구를 실제로 쓴 실행만 상한을 올린다
 export const roundLimitFor = (used: Set<string>) => ([...used].some(isBrowserish) ? browserRounds() : toolRounds());
+// 남은 단계를 미리 알릴 시점 — 상한에 닿아서야 끊기면 "8건 중 2건만 열고 종결"이 된다.
+// 3/4 지점에서 한 번만 알려 남은 예산으로 핵심부터 끝내게 한다
+export const budgetWarnAt = (round: number, limit: number) => round + 1 === Math.ceil(limit * 0.75) && limit - round > 1;
 const delegateCapSec = () => Number(getSetting("delegate_cap_sec")) || 540;
 // 하위 위임의 시간 상한 — 위임 잡은 백그라운드로 분리돼 있으므로 하위는 항상 독립 상한을 받는다.
 // 상위의 "시간 초과"는 전파하지 않는다: 상위가 끝나도 하위는 완주해 결과를 세션·이력에 남긴다
@@ -907,6 +913,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
   ];
   // ─── 검증 하네스: 내부 엔티티 지시는 서버가 실측해 주입 → 실행 후 DB 상태로 이행 검증 ───
   const calledTools = new Set<string>();
+  let budgetWarned = false; // 남은 단계 안내는 실행당 한 번
   const gatedTools = new Set<string>();
   const { classifyIntent, snapshot, verifyMutation, parseIntent } = await import("./intent");
   // 봇 간 비동기 메시지는 보고·알림이라 지시가 아니고, 도구 미지원 모델(CLI)은
@@ -970,6 +977,11 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
   trackEmit({ type: "agent_phase", agentId: state.id, phase: "exec", label: "작업 실행" });
   try {
     for (let round = 0; round < roundLimitFor(calledTools); round++) {
+      // 남은 도구 단계를 미리 알린다 — 상한에 닿아서야 끊기면 지시의 뒷부분을 통째로 놓친다
+      if (!budgetWarned && budgetWarnAt(round, roundLimitFor(calledTools))) {
+        budgetWarned = true;
+        messages.push({ role: "user", content: `[시스템] 도구 사용 단계가 ${roundLimitFor(calledTools) - round}회 남았습니다. 남은 단계로 지시의 핵심을 먼저 끝내고, 끝내지 못할 항목은 보고서의 '## 미확인'에 적으세요.` });
+      }
       if (Date.now() > deadline) {
         trackEmit({ type: "agent_step", agentId: state.id, tool: "시간 제한 — 결과 정리" });
         messages.push({ role: "user", content: "작업 시간 제한에 도달했습니다. 도구를 더 사용하지 말고, 지금까지 얻은 결과로 최종 보고서를 즉시 작성하세요. 완료하지 못한 작업이 있으면 보고서 끝에 '## 남은 작업' 항목으로 구체적으로 적으세요 — 다음 지시에서 이어서 진행하는 데 사용됩니다." });

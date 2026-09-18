@@ -1,6 +1,6 @@
 import { test, expect, beforeAll } from "bun:test";
 import { db, now } from "./db";
-import { callBuiltin, runAgentDetached, stopAllRuns, getAgent, roundLimitFor } from "./team";
+import { callBuiltin, runAgentDetached, stopAllRuns, getAgent, roundLimitFor, budgetWarnAt } from "./team";
 import { gateApproval, approvalDecision } from "./approvals";
 import { systemPrompt } from "./routes/chat";
 
@@ -230,6 +230,14 @@ test("같은 봇이 agent_list를 다시 부르면 재조회가 불필요하다�
 
 test("브라우저·데스크톱 조작을 쓴 실행은 도구 라운드 상한이 늘어난다", () => {
   expect(roundLimitFor(new Set(["read_file", "agent_list"]))).toBe(12);
-  expect(roundLimitFor(new Set(["read_file", "browser_open"]))).toBe(20);
-  expect(roundLimitFor(new Set(["bsk"]))).toBe(20);
+  expect(roundLimitFor(new Set(["read_file", "browser_open"]))).toBe(32);
+  expect(roundLimitFor(new Set(["bsk"]))).toBe(32);
+});
+
+test("남은 도구 단계는 상한의 3/4 지점에서 한 번만 알린다", () => {
+  // 실측 2026-09-18: 메일 본문 조회가 상한에 닿아서야 끊겨 8건 중 2건만 열고 종결됐다
+  expect(budgetWarnAt(23, 32)).toBe(true);   // 24번째 라운드 진입 시 남은 9회를 알린다
+  expect([...Array(32).keys()].filter((r) => budgetWarnAt(r, 32))).toEqual([23]); // 실행당 한 지점
+  expect(budgetWarnAt(8, 12)).toBe(true);
+  expect(budgetWarnAt(31, 32)).toBe(false);  // 마지막 직전엔 알려도 소용없다
 });
