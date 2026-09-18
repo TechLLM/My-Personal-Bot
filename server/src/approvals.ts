@@ -47,15 +47,21 @@ function evalCond(condJson: string, args: Record<string, unknown>): boolean {
 }
 
 // agent_create 인자에서 생성 예정 수 — bots/names 배열 또는 단일 name
+// 빈 배열은 "인자 없음" — {"bots":[],"name":"X"}는 단일 생성 1건으로 센다
 function prospectiveCreateCount(args: Record<string, unknown>): number {
-  if (Array.isArray(args.bots)) return args.bots.length;
-  if (Array.isArray(args.agents)) return args.agents.length;
-  if (Array.isArray(args.names)) return args.names.length;
+  if (Array.isArray(args.bots) && args.bots.length) return args.bots.length;
+  if (Array.isArray(args.agents) && args.agents.length) return args.agents.length;
+  if (Array.isArray(args.names) && args.names.length) return args.names.length;
   return (args.name ?? args.bot_name ?? args.agent) ? 1 : 0;
 }
 
+// 승인 실행 결과가 도구 측 오류 문자열인지 — "봇 생성됨" 같은 성공 결과와 구분해
+// 실패 재개 안내·재요청 차단·디듀프 메시지 분기에 쓴다
+const TOOL_ERROR_RE = /^(오류|실행 오류|도구 오류|브라우저 오류|권한 없음|알 수 없는 도구|봇 없음|상위 봇 없음|라우팅 규칙|순환 차단|위임 깊이 제한|자기 자신|하위 봇 한도 초과|업무 트리)/;
+export const looksLikeToolError = (result: string) => TOOL_ERROR_RE.test(result.trim());
+
 // 도구 실행 전 호출 — 승인 필요면 요청을 만들고 안내 문자열 반환, 아니면 null
-export function gateApproval(tool: string, args: Record<string, unknown>, agentId: string | null, resumeTask: string): string | null {
+export function gateApproval(tool: string, args: Record<string, unknown>, agentId: string | null, resumeTask: string, chain?: string[]): string | null {
   let required = approvalDecision(tool, args) === "require";
   // A6/C7 — 봇 생성은 정원 내면 승인 면제(팀장 포함). 전체 정원(agent_cap_total, 기본 20)
   // 초과분만 승인 대상. 팀장의 max_children 한도는 도구 내부에서 거부하므로 여기선 보지 않는다.
@@ -65,13 +71,31 @@ export function gateApproval(tool: string, args: Record<string, unknown>, agentI
     if (want > 0 && total + want > (Number(getSetting("agent_cap_total")) || 20)) required = true;
   }
   if (!required) return null;
+  // 형식이 깨진 호출은 팝업을 만들지 않고 즉시 오류를 돌려준다 — 승인→실행실패→재요청 팝업 루프 방지.
+  // 봇은 이 오류를 보고 인자를 고쳐 다시 요청할 수 있다 (사용자 승인을 소모하지 않는다)
+  if (tool === "agent_create" && !prospectiveCreateCount(args))
+    return '오류: 생성할 봇 이름이 없습니다 — {"name":"메일분석봇","role":"20년 경력의 메일 분석 시니어"} 형식 또는 {"bots":[{"name":"봇1","role":"..."},{"name":"봇2","role":"..."}]} 배치 형식으로 호출하세요';
   const argsJson = canonicalArgs(args);
   // 최근에 이미 승인·실행된 동일 호출 — 승인 재개 봇의 재시도가 같은 팝업을 반복해 띄우는 것을 차단.
   // 재실행은 하지 않고 이전 실행 결과를 그대로 돌려준다 (비멱등 도구의 이중 실행 방지).
   const done = db.prepare("SELECT result FROM approval_requests WHERE status = 'approved' AND tool = ? AND agent_id IS ? AND args = ? AND resolved_at > ? ORDER BY resolved_at DESC LIMIT 1")
     .get(tool, agentId ?? null, argsJson, now() - 10 * 60_000) as { result: string | null } | undefined;
   if (done && !(done.result ?? "").startsWith("실행 오류") && !deleteTargetStillExists(tool, args)) {
-    return `이미 승인되어 실행 완료된 동일한 호출입니다 — 이전 실행 결과: ${(done.result ?? "").slice(0, 500)}\n이 호출을 다시 요청하지 말고 작업을 계속하세요.`;
+    const res = done.result ?? "";
+    return looksLikeToolError(res)
+      ? `이전에 승인·실행됐으나 실패한 동일한 호출입니다 — 실패 결과: ${res.slice(0, 500)}\n같은 인자로 재요청하면 같은 실패입니다 — 인자를 수정해 요청하거나, 불가능하면 실패를 보고하세요.`
+      : `이미 승인되어 실행 완료된 동일한 호출입니다 — 이전 실행 결과: ${res.slice(0, 500)}\n이 호출을 다시 요청하지 말고 작업을 계속하세요.`;
+  }
+  // 같은 대상에 대한 승인 실행이 연속 실패했으면 팝업을 더 띄우지 않는다 — 역할 문구만 조금 바꾼 재요청이
+  // 인자 디듀프를 우회해 승인 팝업을 무한 반복한 사고(2026-09-18 골든테스트봇, 6회 승인·0건 생성) 방지
+  if (tool.startsWith("agent_")) {
+    const targetName = String(args.name ?? args.bot_name ?? args.agent ?? args.to ?? args.target ?? "").trim();
+    if (targetName) {
+      const prev = db.prepare("SELECT result FROM approval_requests WHERE status = 'approved' AND tool = ? AND resolved_at > ? AND COALESCE(json_extract(args,'$.name'), json_extract(args,'$.bot_name'), json_extract(args,'$.agent'), json_extract(args,'$.to'), json_extract(args,'$.target')) = ? ORDER BY resolved_at DESC LIMIT 2")
+        .all(tool, now() - 30 * 60_000, targetName) as { result: string | null }[];
+      if (prev.length >= 2 && prev.every((r) => looksLikeToolError(r.result ?? "")))
+        return `같은 대상(${targetName})에 대한 승인 실행이 연속 실패했습니다 — 최근 실패: ${(prev[0].result ?? "").slice(0, 300)}\n같은 의도의 재요청을 반복하지 말고, 호출 형식을 바로잡거나 불가능하면 실패를 보고하세요.`;
+    }
   }
   // 최근에 거부된 동일 호출 — 거부를 우회하는 재요청 팝업을 차단
   const denied = db.prepare("SELECT id FROM approval_requests WHERE status = 'denied' AND tool = ? AND agent_id IS ? AND args = ? AND resolved_at > ? LIMIT 1")
@@ -89,8 +113,8 @@ export function gateApproval(tool: string, args: Record<string, unknown>, agentI
   const dup = db.prepare("SELECT id FROM approval_requests WHERE status = 'pending' AND tool = ? AND agent_id IS ? AND args = ?").get(tool, agentId ?? null, argsJson) as any;
   if (!dup) {
     const summary = summarizeArgs(tool, args);
-    db.prepare("INSERT INTO approval_requests (id, tool, args, summary, agent_id, resume, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)")
-      .run(uid(), tool, argsJson, summary, agentId ?? null, resumeTask.slice(0, 500), now());
+    db.prepare("INSERT INTO approval_requests (id, tool, args, summary, agent_id, resume, status, created_at, chain) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)")
+      .run(uid(), tool, argsJson, summary, agentId ?? null, resumeTask.slice(0, 500), now(), chain?.length ? JSON.stringify(chain) : null);
   }
   return `이 작업(${tool})은 사용자 승인이 필요합니다 — 화면의 승인 팝업에서 승인되면 자동으로 실행되고 작업이 이어집니다. 사용자에게 승인을 기다리고 있다고 알리고, 다른 작업으로 진행하세요. 같은 도구를 다시 호출해 재시도하지 마세요.`;
 }
@@ -280,7 +304,10 @@ export async function executeApproved(req: any) {
     }
   } catch (e) { result = `실행 오류: ${(e as Error).message}`; }
   db.prepare("UPDATE approval_requests SET result = ? WHERE id = ?").run(result.slice(0, 4000), req.id);
-  resumeAgent(req, `사용자가 승인한 작업 "${req.summary}"을 실행했습니다. 실행 결과:\n${result}\n\n원래 작업을 이어서 진행하고 결과를 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`);
+  // 실행 실패는 실패라고 명시한다 — "실행했습니다"로 뭉개면 봇이 같은 깨진 호출을 재제출해 승인 루프가 된다
+  resumeAgent(req, looksLikeToolError(result)
+    ? `사용자가 승인한 작업 "${req.summary}"을 실행했지만 실패했습니다.\n실패 결과:\n${result}\n\n같은 인자로 재요청하면 같은 실패가 발생합니다 — 인자를 수정하거나 다른 방법으로 진행하고, 불가능하면 실패를 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`
+    : `사용자가 승인한 작업 "${req.summary}"을 실행했습니다. 실행 결과:\n${result}\n\n원래 작업을 이어서 진행하고 결과를 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`);
 }
 
 async function notifyDenied(req: any) {
@@ -302,10 +329,30 @@ async function resumeAgent(req: any, task: string) {
     appendToAgentSession(agentSessionConvId(agent.id), `[승인 처리 — 결과 기록] ${req.tool}`, await normalizeReport(agent.name, req.resume || req.tool, task), agent.model, null);
     return;
   }
+  // 승인으로 재개된 작업의 결과를 지시 체인으로 돌려보낸다 — 위임한 상위 봇에게 완료 회신을 전달해
+  // 사용자의 원래 지시가 "승인 대기"로 끝난 뒤 결과가 사용자 대화에 도착하게 한다 (agent_message 회신 재수화와 같은 패턴)
+  let reqChain: string[] = [];
+  try { reqChain = JSON.parse(req.chain ?? "[]"); } catch {}
+  const parentId = reqChain.filter((id) => id !== agent.id).at(-1);
+  const parent = parentId ? getAgent(parentId) : null;
   runAgentDetached(agent, {
     label: `[승인 처리됨] ${req.tool} — 작업 재개`,
     task,
     sessionTitle: `[승인 처리 — 작업 재개] ${req.tool}`,
     sessionTask: req.resume || req.tool,
+    notifyTitle: `승인 작업 · ${agent.name} · ${req.tool}`,
+    onDone: parent
+      ? (state) => {
+          if (state.status !== "done" || !getAgent(parent.id)) return;
+          runAgentDetached(parent, {
+            label: `[승인 작업 회신] ${agent.name} · ${req.tool}`,
+            task: `[${agent.name} 봇이 사용자 승인을 받아 실행한 작업 "${req.summary}"의 결과가 도착했습니다 — 내용을 검토해 사용자에게 취합·보고하세요. ${agent.name}에게 접수·확인 회신을 다시 보내지 마세요]\n\n${(state.result?.trim() || "(결과 없음)").slice(0, 3000)}`,
+            sessionTitle: `[승인 작업 완료] ${req.tool}`,
+            sessionTask: req.resume || req.summary,
+            chain: [...reqChain.filter((id) => id !== parent.id), agent.id],
+            verifyIntent: false, // 완료 회신 전달은 지시가 아님 — 지시-실측 검증 대상에서 제외
+          });
+        }
+      : undefined,
   });
 }

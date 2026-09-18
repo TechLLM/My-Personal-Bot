@@ -55,10 +55,13 @@ export async function execToolCall(tc: ToolCall, ctx: ToolCtx): Promise<{ out: s
   let args: Record<string, unknown>;
   try { args = JSON.parse(tc.arguments || "{}"); }
   catch { return finish(`도구 오류: ${tc.name}의 인자 JSON이 깨져 있습니다(길이 ${tc.arguments.length}자). content가 크면 짧게 나눠 쓰고, 따옴표·줄바꿈을 올바르게 이스케이프한 유효한 JSON으로 다시 호출하세요.`, false); }
+  // 빈 배열 인자는 "인자 없음"으로 정규화 — 스키마의 모든 필드를 채우는 모델이 {"bots":[]} 같은 빈 배열을
+  // 함께 보내면 배치 모드로 오인돼 동봉된 단일 인자(name 등)가 무시되는 결정적 실패를 낳는다 (승인→실행실패 루프의 근본 원인)
+  for (const k of Object.keys(args)) if (Array.isArray(args[k]) && !(args[k] as unknown[]).length) delete args[k];
   ctx.onStart?.(tc.name);
   // 승인 경계 — 위험 액션은 실행하지 않고 사용자 승인 큐에 올림
   const { gateApproval } = await import("./approvals");
-  const gate = gateApproval(tc.name, args, ctx.agentId, ctx.context);
+  const gate = gateApproval(tc.name, args, ctx.agentId, ctx.context, ctx.chain);
   if (gate) { ctx.onGate?.(tc.name); return finish(gate, true); }
   ctx.onDispatch?.(tc.name);
   try {

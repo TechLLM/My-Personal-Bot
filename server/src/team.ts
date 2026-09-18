@@ -318,14 +318,15 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     if (caller && !caller.is_boss && !isOrgAdmin && !caller.is_lead)
       return "권한 없음: 봇 생성·수정·삭제는 Eggbot(조직관리 전담)만 수행합니다 — Eggbot에게 요청하세요";
     // 인자 정규화 — 단일(name+role) 또는 배치(bots:[{name,role,model}] / names:[…]+role|roles 공유)
+    // 빈 배열은 배치 모드가 아니다 — {"bots":[],"name":"X"} 형태로 오는 호출이 단일 인자를 잃지 않도록 한다
     const specs: { name: string; role: string; model?: string }[] = [];
-    const rawArr = (Array.isArray(args.bots) ? args.bots : Array.isArray(args.agents) ? args.agents : null) as any[] | null;
+    const rawArr = (Array.isArray(args.bots) && args.bots.length ? args.bots : Array.isArray(args.agents) && args.agents.length ? args.agents : null) as any[] | null;
     if (rawArr) {
       for (const b of rawArr) {
         if (typeof b === "string") specs.push({ name: b, role: String(args.role ?? ""), model: args.model ? String(args.model) : undefined });
         else if (b && typeof b === "object") specs.push({ name: String(b.name ?? ""), role: String(b.role ?? args.role ?? ""), model: b.model ? String(b.model) : (args.model ? String(args.model) : undefined) });
       }
-    } else if (Array.isArray(args.names)) {
+    } else if (Array.isArray(args.names) && args.names.length) {
       const roles = Array.isArray(args.roles) ? args.roles : [];
       (args.names as unknown[]).forEach((n, i) => specs.push({ name: String(n), role: String(roles[i] ?? args.role ?? ""), model: args.model ? String(args.model) : undefined }));
     } else {
@@ -387,8 +388,9 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     if (depth >= 3) return "위임 깊이 제한(3단계) — 이 봇에게 직접 수행하라고 지시하세요";
     const caller = agentId ? getAgent(agentId) : null;
     const instruction = pickStr(args, "instruction", "task", "content", "message");
-    if (!instruction && !Array.isArray(args.instructions)) return '오류: 지시 내용이 없습니다 — instruction(또는 task) 필드로 구체적인 업무를 적어주세요';
-    const perInstruction = (v: unknown, i: number) => Array.isArray(args.instructions) ? String(args.instructions[i] ?? instruction) : instruction;
+    const hasInstructions = Array.isArray(args.instructions) && args.instructions.length > 0;
+    if (!instruction && !hasInstructions) return '오류: 지시 내용이 없습니다 — instruction(또는 task) 필드로 구체적인 업무를 적어주세요';
+    const perInstruction = (v: unknown, i: number) => hasInstructions ? String((args.instructions as unknown[])[i] ?? instruction) : instruction;
 
     const runOne = async (nm: string, i: number): Promise<string> => {
       const target = findAgentByName(nm);
@@ -406,6 +408,7 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
       const recentRuns = (db.prepare("SELECT COUNT(*) c FROM agent_runs WHERE agent_id = ? AND created_at > ?").get(target.id, now() - 60 * 60_000) as any)?.c ?? 0;
       if (recentRuns >= 15) return `${target.name}: 최근 1시간 동안 ${recentRuns}회 실행됨 — 봇 간 보고 루프 방지를 위해 추가 위임이 차단됐습니다. 지금까지의 결과를 취합해 보고하세요.`;
       const inst = perInstruction(args.instructions, i);
+      if (!inst.trim()) return "오류: 지시 내용이 비어 있습니다 — instruction 필드에 구체적인 업무를 적어주세요";
       const runId = uid();
       db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, NULL, ?, 'running', ?)").run(runId, target.id, `[${caller?.name ?? "사용자"} 지시] ${inst.slice(0, 200)}`, now());
       const state: TeamAgentState = {
