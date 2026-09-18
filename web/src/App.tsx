@@ -134,9 +134,18 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
-  // 실행 중인 봇 폴링 — 위임·루틴 등 백그라운드 작업도 사이드바에 표시
+  // 실행 중인 봇 폴링 — 위임·루틴 등 백그라운드 작업도 사이드바에 표시.
+  // 봇 목록도 함께 갱신한다 — 봇이 다른 봇을 생성·삭제해도 새로고침 없이 반영되게
+  // (목록 시그니처가 같으면 setState를 건너뛰어 불필요한 리렌더를 막는다)
   useEffect(() => {
-    const poll = () => api.agentsRunning().then((d) => setRunningInfo(Object.fromEntries(d.running.map((r) => [r.id, r.tool])))).catch(() => {});
+    let lastSig = "";
+    const poll = () => {
+      api.agentsRunning().then((d) => setRunningInfo(Object.fromEntries(d.running.map((r) => [r.id, r.tool])))).catch(() => {});
+      api.agents().then((d) => {
+        const sig = d.agents.map((a) => `${a.id}:${a.name}:${a.model ?? ""}`).join("|");
+        if (sig !== lastSig) { lastSig = sig; setAgents(d.agents); setAgentsLoaded(true); }
+      }).catch(() => {});
+    };
     poll();
     const t = setInterval(poll, 4000);
     return () => clearInterval(t);
