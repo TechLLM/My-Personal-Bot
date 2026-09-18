@@ -228,6 +228,8 @@ export const notifyRoute = new Hono()
       ? await sendTelegram("[MyBot] 테스트 메시지입니다 ✅")
       : channel === "email"
         ? await sendEmail("[MyBot] 테스트 메일", "MyBot 메일 설정이 정상 동작합니다.")
-        : "channel: telegram|email";
+        : channel === "imap"
+          ? await (await import("./mail")).testImap() // 수신(IMAP) — 사서함 접속까지 확인
+          : "channel: telegram|email|imap";
     return err ? c.json({ ok: false, error: err }, 400) : c.json({ ok: true });
   });
