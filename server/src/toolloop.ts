@@ -32,7 +32,7 @@ const DELEGATION = new Set(["agent_direct", "agent_message"]); // 중첩 실행 
 // 병렬 안전 — 서로 상태를 공유하지 않는 읽기·독립 작업. 브라우저(페이지 공유)·쓰기(경로 공유)는 순차 유지
 const PARALLEL_SAFE = new Set(["agent_direct", "agent_message", "web_search", "read_file", "list_files", "agent_list", "routine_list", "skill_list"]);
 const LONG_RUNNING = /^browser_(handoff|login)$/; // 테이크오버·로그인 인계 — 사용자 완료까지 최대 5분 블로킹이 정상
-const isBrowserish = (n: string) => n.startsWith("browser_") || n === "ego_run";
+export const isBrowserish = (n: string) => n.startsWith("browser_") || n === "ego_run" || n === "bsk";
 
 export interface ToolCtx {
   agentId: string | null;            // 승인 게이트·builtin에 넘길 봇 id

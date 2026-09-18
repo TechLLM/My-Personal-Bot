@@ -46,3 +46,12 @@ test("조직 유지 지침이 없는 옛 기본 역할문은 최신 기본 역�
   expect(getRole()).toContain("조직 유지");
   expect(getRole()).not.toContain("[CEO 권한]");
 });
+
+test("bsk·ego_run 도구가 브라우저 경로로 디스패치된다 (MCP 새움 방지)", async () => {
+  const { isBrowserish } = await import("./toolloop");
+  expect(isBrowserish("bsk")).toBe(true);
+  expect(isBrowserish("ego_run")).toBe(true);
+  expect(isBrowserish("browser_open")).toBe(true);
+  expect(isBrowserish("shell_run")).toBe(false);
+  expect(isBrowserish("agent_list")).toBe(false);
+});
