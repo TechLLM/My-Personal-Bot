@@ -163,8 +163,10 @@ export function cycleLockHeld(): boolean {
 // ---------- 골든 과제 실행 — 실제 봇 파이프라인으로 돌린다 ----------
 
 // 벤치 중 생긴 승인 요청 자동 처리 (approvals:"auto" 과제 전용 — 실행 창 내 요청만)
-export function autoResolveApprovals(agentId: string, sinceMs: number) {
-  const rows = db.prepare("SELECT * FROM approval_requests WHERE status = 'pending' AND agent_id = ? AND created_at > ?").all(agentId, sinceMs) as any[];
+export function autoResolveApprovals(_agentId: string, sinceMs: number) {
+  // 골든 과제는 직렬 실행 — 창 안의 pending 승인은 전부 이 과제의 인과 사슬이다.
+  // agent_id로 좁히면 조직 규칙(생성·삭제는 Eggbot 전담)으로 다른 봇이 올린 승인이 영구 방치된다.
+  const rows = db.prepare("SELECT * FROM approval_requests WHERE status = 'pending' AND created_at > ?").all(sinceMs) as any[];
   for (const req of rows) {
     db.prepare("UPDATE approval_requests SET status = 'approved', resolved_at = ? WHERE id = ?").run(now(), req.id);
     import("./approvals").then((m) => m.executeApproved(req)).catch(() => {});
