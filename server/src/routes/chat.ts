@@ -565,8 +565,13 @@ export const chatRoute = new Hono()
             // 오독해 하네스가 반대 실행을 강제하는 사고를 냈었다. 분류 실패 시 동사는 버려진다.
             // LLM 분류는 도구 루프·스트리밍과 병렬로 돌리고 스냅샷은 정규식 추정 객체로 즉시 주입한다 —
             // 직렬 대기를 없애고, 분류 결과는 검증 시점(selfcheck·실측 푸터)에만 받는다.
+            // 판정형 호출은 빠른 기본 모델로 — 분류·검증 같은 결정 작업은 생성 모델이 필요 없다 (System One 원칙).
+            // 분류 실패(lowConfidence)면 작업 모델로 한 번만 재분류해 강한 모델을 보강용으로만 쓴다.
+            const intentTarget = (() => { try { return resolveModel(defaultModelId()); } catch { return { endpoint, model: realModel }; } })();
             const intentP: Promise<Intent> = toolsCapable
-              ? classifyIntent(userMsg?.content ?? "", endpoint, realModel, signal).catch(() => ({ verb: null, object: null, all: false } as Intent))
+              ? classifyIntent(userMsg?.content ?? "", intentTarget.endpoint, intentTarget.model, signal)
+                  .then((i) => i.lowConfidence ? classifyIntent(userMsg?.content ?? "", endpoint, realModel, signal).catch(() => i) : i)
+                  .catch(() => ({ verb: null, object: null, all: false } as Intent))
               : Promise.resolve({ verb: null, object: null, all: false } as Intent);
             const quickObject = toolsCapable ? parseIntent(userMsg?.content ?? "").object : null;
             const snapByObj: Partial<Record<"agents" | "routines", { count: number; ids: Set<string>; text: string }>> = {};

@@ -902,9 +902,14 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
   // LLM 분류는 도구 루프와 병렬로 진행하고 스냅샷은 정규식 추정 객체로 즉시 주입한다 —
   // 직렬 대기를 없애고, 분류 결과는 검증이 필요한 시점(도구 없는 응답)에만 받는다.
   const skipIntent = state.verifyIntent === false || !toolsCapable;
+  // 판정형 호출은 빠른 기본 모델로 — 분류·검증 같은 결정 작업은 생성 모델이 필요 없다 (System One 원칙).
+  // 분류 실패(lowConfidence)면 작업 모델로 한 번만 재분류해 강한 모델을 보강용으로만 쓴다.
+  const intentTarget = (() => { try { return resolveModel(defaultModel()); } catch { return { endpoint, model }; } })();
   const intentP: Promise<Intent> = skipIntent
     ? Promise.resolve({ verb: null, object: null, all: false })
-    : classifyIntent(state.task, endpoint, model, signal).catch(() => ({ verb: null, object: null, all: false } as Intent));
+    : classifyIntent(state.task, intentTarget.endpoint, intentTarget.model, signal)
+        .then((i) => i.lowConfidence ? classifyIntent(state.task, endpoint, model, signal).catch(() => i) : i)
+        .catch(() => ({ verb: null, object: null, all: false } as Intent));
   const quickObject = skipIntent ? null : parseIntent(state.task).object;
   const snapByObj: Partial<Record<"agents" | "routines", { count: number; ids: Set<string>; text: string }>> = {};
   if (quickObject) {
