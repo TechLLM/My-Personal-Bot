@@ -590,9 +590,13 @@ export async function materializeCandidate(p: Proposal): Promise<Candidate | nul
     const { endpoint, model } = resolveModel(defaultModelId());
     const res = await chatOnce(endpoint, model, [{
       role: "user",
-      content: `아래 현재 값을 개선하세요. 변경 의도: ${p.intent}\n요구: 기존 구조·형식·톤 유지, 필요한 부분만 수정, 개선된 전체 값만 출력. 다른 설명 없이.\n\n[현재 값 — ${surf.table}.${col} (${p.target})]\n${String(row[col] ?? "").slice(0, 20000)}`,
+      content: `아래 현재 값을 개선하세요. 변경 의도: ${p.intent}\n요구: 기존 구조·형식·톤 유지, 필요한 부분만 수정, 개선된 전체 값의 본문만 출력. 라벨·설명·코드펜스 없이.\n\n[현재 값 — ${surf.table}.${col} (${p.target})]\n${String(row[col] ?? "").slice(0, 20000)}`,
     }], { reasoningEffort: "low", signal: AbortSignal.timeout(90_000) });
-    const newValue = (res.content ?? "").trim();
+    // 모델이 프롬프트 라벨을 그대로 에코한 경우([개선된 값 — ...]) 첫 줄을 제거한다 — 역할문 첫 줄이 라벨이면 프롬프트가 오염된다
+    const newValue = (res.content ?? "")
+      .replace(/^\[[^\]\n]*(개선|수정|새로운|새 값)[^\]\n]*\][ \t]*\n?/, "")
+      .replace(/^```[a-z]*\n?|```\s*$/g, "")
+      .trim();
     if (!newValue || newValue === String(row[col] ?? "").trim()) return null;
     return { surface: p.surface, target: p.target, column: col, newValue, summary: p.summary ?? p.intent };
   }
