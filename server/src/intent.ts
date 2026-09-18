@@ -14,6 +14,7 @@ export interface Intent {
   verb: IntentVerb;
   object: IntentObject;
   all: boolean; // "모두/전부/전체" 지시
+  lowConfidence?: boolean; // 분류 호출이 실패·파싱 불가였다는 표시 — "의도 없음"과 구분해 호출자가 강한 모델로 재시도할 수 있다
 }
 
 // 동사 어간 뒤 관형형 어미(된·되·할·한·하는·하던·는·라는)는 명령이 아니라 수식 —
@@ -83,7 +84,7 @@ export async function classifyIntent(text: string, endpoint: Endpoint, model: st
 출력: {"verb":...,"object":...,"all":bool,"imperative":bool,"negated":bool}`,
     }], { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000), reasoningEffort: "low" });
     const m = (res.content ?? "").match(/\{[\s\S]*\}/);
-    if (!m) return { verb: null, object: null, all: false };
+    if (!m) return { verb: null, object: null, all: false, lowConfidence: true };
     const j = JSON.parse(m[0]);
     const object: IntentObject = j.object === "agents" || j.object === "routines" ? j.object : null;
     if (!object) return { verb: null, object: null, all: false };
@@ -93,9 +94,10 @@ export async function classifyIntent(text: string, endpoint: Endpoint, model: st
     return { verb, object, all: !!j.all };
   } catch {
     // 분류 호출 실패 — 정규식으로 객체만 추정해 실측 상태는 주입하되,
-    // 동사는 버려 변경 검증·미이행 압박이 오독된 지시를 강제하지 않게 한다
+    // 동사는 버려 변경 검증·미이행 압박이 오독된 지시를 강제하지 않게 한다.
+    // lowConfidence를 표시해 호출자가 더 강한 모델로 재분류할 수 있게 한다.
     const rx = parseIntent(t);
-    return { verb: null, object: rx.object, all: false };
+    return { verb: null, object: rx.object, all: false, lowConfidence: true };
   }
 }
 

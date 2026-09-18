@@ -476,9 +476,10 @@ async function publishUpdate(candidate: Candidate, baseline: BenchResult, candBe
 // 서비스 인스턴스 — 패키지 ops를 실제 적용하고 되돌림 ops를 만든다 (사용자 버전 업데이트 경로)
 export function applyUpdateOps(ops: UpdateOp[]): { revertOps: UpdateOp[]; restartRequired: boolean } {
   const surfaces = loadSurfaces();
-  const revertOps: UpdateOp[] = [];
-  let restartRequired = false;
-  for (const op of ops) {
+  // 1단계: 모든 op를 먼저 검증하고 되돌림 정보를 수집한다 — 하나라도 실패하면 아무것도 바꾸지 않는다.
+  // (중간 실패 시 앞선 변경만 남는 부분 적용 사고를 차단 — 파일 쓰기는 트랜잭션으로 못 되돌리므로 사전 검증이 유일한 원자성 보장)
+  type Surf = Surfaces["surfaces"][number];
+  const plan: { op: UpdateOp; surf: Surf; col?: string; rowid?: number; abs?: string; revert: UpdateOp }[] = ops.map((op) => {
     const surf = surfaces.surfaces.find((s) => s.id === op.surface);
     if (!surf) throw new Error(`미등록 표면: ${op.surface}`);
     if (op.kind === "db") {
@@ -487,16 +488,24 @@ export function applyUpdateOps(ops: UpdateOp[]): { revertOps: UpdateOp[]; restar
       if (!/^[a-z_]+$/.test(col)) throw new Error(`컬럼명 불가: ${col}`);
       const row = db.prepare(`SELECT rowid, ${col} FROM ${surf.table} WHERE name = ? OR id = ?`).get(op.target, op.target) as any;
       if (!row) throw new Error(`대상 없음: ${surf.table}.${op.target}`);
-      revertOps.push({ ...op, newValue: row[col] ?? "" });
-      db.prepare(`UPDATE ${surf.table} SET ${col} = ? WHERE rowid = ?`).run(op.newValue ?? "", row.rowid);
+      return { op, surf, col, rowid: row.rowid as number, revert: { ...op, newValue: row[col] ?? "" } as UpdateOp };
+    }
+    const path = op.target;
+    if (isProtectedPath(path)) throw new Error(`보호 경로는 업데이트 불가: ${path}`);
+    const abs = join(ROOT, path);
+    if (!existsSync(abs)) throw new Error(`파일 없음: ${path}`);
+    return { op, surf, abs, revert: { ...op, newContent: readFileSync(abs, "utf8") } as UpdateOp };
+  });
+  // 2단계: 검증을 통과한 op만 실제 반영한다
+  const revertOps: UpdateOp[] = [];
+  let restartRequired = false;
+  for (const p of plan) {
+    revertOps.push(p.revert);
+    if (p.op.kind === "db") {
+      db.prepare(`UPDATE ${p.surf.table} SET ${p.col!} = ? WHERE rowid = ?`).run(p.op.newValue ?? "", p.rowid!);
     } else {
-      const path = op.target;
-      if (isProtectedPath(path)) throw new Error(`보호 경로는 업데이트 불가: ${path}`);
-      const abs = join(ROOT, path);
-      if (!existsSync(abs)) throw new Error(`파일 없음: ${path}`);
-      revertOps.push({ ...op, newContent: readFileSync(abs, "utf8") });
       const { writeFileSync } = require("node:fs") as typeof import("node:fs");
-      writeFileSync(abs, op.newContent ?? "");
+      writeFileSync(p.abs!, p.op.newContent ?? "");
       restartRequired = true; // 코드 변경은 실행 중 프로세스에 반영되지 않음 — 재시작 필요
     }
   }
@@ -547,7 +556,8 @@ ${surfList}
 - 코드(src) 표면은 filePath와 intent(무엇을 어떻게 바꿀지)만 적으세요 — 실제 코드 작성은 하네스가 합니다
 
 [출력] JSON만 출력하세요:
-{"surface":"표면id","target":"대상(스킬명·봇명·파일경로)","column":"db컬럼(db표면이면)","newValue":"새 값(db 표면이면 전체 내용)","filePath":"src 표면이면","intent":"무엇을 왜 바꾸는지","summary":"한 줄 설명"}`;
+{"surface":"표면id","target":"대상(스킬명·봇명·파일경로)","column":"db컬럼(db표면이면)","newValue":"새 값(db 표면이면 전체 내용)","filePath":"src 표면이면","intent":"무엇을 왜 바꾸는지","summary":"한 줄 설명"}
+- summary는 최종 사용자에게 그대로 보여지는 문구입니다 — "무엇이 어떻게 좋아지는지"만 쓰고, 표면 id·파일 경로·내부 구조 명칭(개발 인스턴스·실험·벤치 등)은 절대 넣지 마세요`;
   const { done } = runAgentDetached(agent, { label: "[자기개선] 개선 후보 탐색", task, verifyIntent: false });
   const state = await done;
   const text = state.result ?? "";

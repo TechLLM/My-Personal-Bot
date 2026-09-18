@@ -1,7 +1,7 @@
 import { test, expect, beforeAll } from "bun:test";
 import { db, now } from "./db";
-import { callBuiltin, runAgentDetached, stopAllRuns, getAgent } from "./team";
-import { gateApproval } from "./approvals";
+import { callBuiltin, runAgentDetached, stopAllRuns, getAgent, roundLimitFor } from "./team";
+import { gateApproval, approvalDecision } from "./approvals";
 import { systemPrompt } from "./routes/chat";
 
 // 봇 간 위임·메시지 연쇄 방지 테스트 — 2026-09-18 보고-회신 폭주(자정 이후 실행 64건·승인 대기 50건) 재발 방지
@@ -193,4 +193,43 @@ test("CEO·Eggbot은 브라우저·데스크톱 도구와 안내 없이, 실무 
     globalThis.fetch = blocked;
     db.prepare("DELETE FROM agents WHERE id IN ('t-ceo', 't-egg')").run();
   }
+});
+
+// ─── 2026-09-18 업무 중단 3대 원인 재발 방지 ───
+// 실측(서비스 DB): 승인 만료 51건(읽기 전용 ls까지 팝업 대기), 단계 상한 도달 실행 114건,
+// 그 실행들의 도구 호출 1336회 중 agent_list 219회(한 실행에서 3~5회 반복이 36건)
+
+test("shell_run은 승인 팝업 없이 실행된다 — 외부 발신·삭제류는 그대로 승인 대상", () => {
+  expect(approvalDecision("shell_run", { command: "ls -R agents" })).toBe("allow");
+  expect(gateApproval("shell_run", { command: "ls -R agents" }, ids.a, "파일 조사")).toBeNull();
+  expect(approvalDecision("send_email", { to: "x@y.z" })).toBe("require");
+  expect(approvalDecision("agent_delete", { name: "X" })).toBe("require");
+});
+
+test("봇 생성·삭제 결과가 현재 조직 현황을 함께 돌려준다 — agent_list 재조회 불필요", async () => {
+  db.prepare("INSERT INTO agents (id, name, role_prompt, model, is_boss, created_at) VALUES ('t-ceo2', '테스트CEO2', '총괄', 'zai/glm-5.3-flash', 1, 0)").run();
+  try {
+    const created = await callBuiltin("agent_create", { name: "임시조직봇", role: "임시 역할" }, "t-ceo2");
+    expect(created).toContain("[현재 조직]");
+    expect(created.split("[현재 조직]")[1]).toContain("임시조직봇");
+    const deleted = await callBuiltin("agent_delete", { name: "임시조직봇" }, "t-ceo2");
+    const org = deleted.split("[현재 조직]")[1] ?? "";
+    expect(org).toContain("테스트CEO2");
+    expect(org).not.toContain("임시조직봇"); // 삭제 결과가 곧 최신 조직도 — 다시 조회할 이유가 없다
+  } finally {
+    db.prepare("DELETE FROM agents WHERE id = 't-ceo2' OR name = '임시조직봇'").run();
+  }
+});
+
+test("같은 봇이 agent_list를 다시 부르면 재조회가 불필요하다고 알린다", async () => {
+  const first = await callBuiltin("agent_list", {}, "t-list-probe");
+  const second = await callBuiltin("agent_list", {}, "t-list-probe");
+  expect(first).not.toContain("재조회");
+  expect(second).toContain("재조회");
+});
+
+test("브라우저·데스크톱 조작을 쓴 실행은 도구 라운드 상한이 늘어난다", () => {
+  expect(roundLimitFor(new Set(["read_file", "agent_list"]))).toBe(12);
+  expect(roundLimitFor(new Set(["read_file", "browser_open"]))).toBe(20);
+  expect(roundLimitFor(new Set(["bsk"]))).toBe(20);
 });
