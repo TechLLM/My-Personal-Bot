@@ -188,7 +188,7 @@ export function verifyMutation(
     const gone = after < beforeCount;
     if (gone && intent.all && intent.object === "agents") {
       // 전체 삭제 지시인데 삭제 가능한 대상이 아직 남아 있으면 부분 이행 — 미완료로 판정
-      // CEO·Eggbot·비서실장은 삭제 불가라 잔여 산정에서 제외 — 안 빼면 "전부 삭제"가 영구 미이행이 된다
+      // CEO·Eggbot은 삭제 불가라 잔여 산정에서 제외 — 안 빼면 "전부 삭제"가 영구 미이행이 된다
       const remaining = (db.prepare("SELECT COUNT(*) c FROM agents WHERE is_boss = 0 AND special_role IS NULL").get() as any)?.c ?? 0;
       if (remaining > 0) return { ok: false, detail: `전체 삭제 지시였지만 삭제 가능한 봇이 ${remaining}개 남아 있습니다 — agent_list로 남은 봇을 확인하고 모두 삭제하세요.` };
     }

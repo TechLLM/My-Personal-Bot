@@ -1,4 +1,4 @@
-import type { Endpoint } from "./index";
+import type { Endpoint, Resolved } from "./index";
 import { resolveModel, nextInChain } from "./index";
 import { responsesChatOnce, responsesStream, geminiChatOnce, geminiStream, cliChatOnce, cliStream } from "./adapters";
 
@@ -30,6 +30,25 @@ function isTransientErr(e: unknown): boolean {
     || (e as Error)?.name === "TimeoutError";
 }
 
+// 속도 제한(429)에 걸린 모델은 잠시 건너뛴다 — 예전엔 호출마다 같은 모델에서 백오프 재시도(1초·4초)를
+// 반복한 뒤에야 폴백해, 봇 호출 하나하나가 수 초씩 늦어지고 제한도 더 오래 풀리지 않았다.
+// 폴백할 다음 모델이 없으면 건너뛰지 않고 그대로 시도한다.
+const RATE_LIMIT_COOLDOWN_MS = 120_000;
+const rateLimitedUntil = new Map<string, number>();
+const isRateLimited = (e: unknown) => /\b429\b|rate.?limit|\b1302\b/i.test(String((e as Error)?.message ?? e));
+const coolingDown = (key: string) => (rateLimitedUntil.get(key) ?? 0) > Date.now();
+
+// 폴백 체인에서 실제로 쓸 수 있는 다음 모델 — 해석 불가 항목과, 도구가 필요할 때 도구 미지원(CLI) 모델은 건너뛴다
+function nextUsable(key: string, needsTools: boolean): Resolved | null {
+  for (let next = nextInChain(key); next; next = nextInChain(next)) {
+    try {
+      const r = resolveModel(next);
+      if (!needsTools || r.endpoint.caps?.tools !== false) return r;
+    } catch {}
+  }
+  return null;
+}
+
 // 비스트리밍 호출 (도구 루프·내부용) — 프로바이더 폴백 체인 포함
 // HTTP 오류는 content로 위장하지 않고 throw — transient는 백오프 재시도 후 폴백 (사용자 abort 제외)
 export async function chatOnce(
@@ -39,26 +58,30 @@ export async function chatOnce(
   opts: { signal?: AbortSignal; tools?: { type: string; function: { name: string; description?: string; parameters?: object } }[]; toolChoice?: string | object; reasoningEffort?: string } = {},
 ): Promise<ChatResult> {
   let ep = endpoint, mdl = model, origin: string | null = null;
+  const needsTools = !!opts.tools?.length;
   for (;;) {
-    try {
-      const r = await chatOnceAttempt(ep, mdl, messages, opts);
-      r.model = mdl;
-      if (origin) r.fallbackFrom = origin;
-      return r;
-    } catch (e) {
-      if (opts.signal?.aborted || !isTransientErr(e)) throw e;
-      let next = nextInChain(`${ep.id}/${mdl}`);
-      while (next) {
-        let r;
-        try { r = resolveModel(next); } catch { next = nextInChain(next); continue; } // 해석 불가 항목은 건너뛴다
-        // 도구가 필요한 실행에서 도구 미지원(CLI) 모델은 폴백 대상이 아니다
-        if (opts.tools?.length && r.endpoint.caps?.tools === false) { next = nextInChain(next); continue; }
-        ({ endpoint: ep, model: mdl } = r); break;
+    const key = `${ep.id}/${mdl}`;
+    let next: Resolved | null = null;
+    let failure: unknown;
+    if (coolingDown(key) && (next = nextUsable(key, needsTools))) {
+      failure = new Error("최근 속도 제한(429) — 대기 없이 다음 모델로");
+    } else {
+      try {
+        const r = await chatOnceAttempt(ep, mdl, messages, opts);
+        r.model = mdl;
+        if (origin) r.fallbackFrom = origin;
+        return r;
+      } catch (e) {
+        if (opts.signal?.aborted || !isTransientErr(e)) throw e;
+        if (isRateLimited(e)) rateLimitedUntil.set(key, Date.now() + RATE_LIMIT_COOLDOWN_MS);
+        next = nextUsable(key, needsTools);
+        if (!next) throw e;
+        failure = e;
       }
-      if (!next) throw e;
-      console.warn(`[mybot] 모델 폴백: ${endpoint.id}/${model} → ${ep.id}/${mdl} (${String((e as Error).message).slice(0, 80)})`);
-      origin ??= `${endpoint.id}/${model}`;
     }
+    console.warn(`[mybot] 모델 폴백: ${key} → ${next.endpoint.id}/${next.model} (${String((failure as Error).message).slice(0, 80)})`);
+    origin ??= `${endpoint.id}/${model}`;
+    ({ endpoint: ep, model: mdl } = next);
   }
 }
 
@@ -150,29 +173,33 @@ export async function* streamChat(
 ): AsyncGenerator<StreamEvent> {
   let ep = endpoint, mdl = model, origin: string | null = null;
   for (;;) {
+    const key = `${ep.id}/${mdl}`;
     let failMsg: string | null = null;
-    let produced = false;
-    let noted = !origin;
-    try {
-      for await (const ev of streamChatOnce(ep, mdl, messages, opts)) {
-        if (!noted) { yield { type: "reasoning", text: `⚠️ ${origin} 실패 — ${ep.id}/${mdl}로 폴백했습니다\n` }; noted = true; }
-        if (ev.type === "error" && !produced && isTransientErr(new Error(ev.error ?? ""))) { failMsg = ev.error ?? "오류"; break; }
-        if (ev.type === "content") produced = true;
-        yield ev;
+    let next: Resolved | null = null;
+    if (coolingDown(key) && (next = nextUsable(key, false))) {
+      failMsg = "최근 속도 제한(429) — 대기 없이 다음 모델로";
+    } else {
+      let produced = false;
+      let noted = !origin;
+      try {
+        for await (const ev of streamChatOnce(ep, mdl, messages, opts)) {
+          if (!noted) { yield { type: "reasoning", text: `⚠️ ${origin} 실패 — ${ep.id}/${mdl}로 폴백했습니다\n` }; noted = true; }
+          if (ev.type === "error" && !produced && isTransientErr(new Error(ev.error ?? ""))) { failMsg = ev.error ?? "오류"; break; }
+          if (ev.type === "content") produced = true;
+          yield ev;
+        }
+      } catch (e) {
+        if (opts.signal?.aborted || produced || !isTransientErr(e)) throw e; // 본문 출력이 시작된 뒤엔 중간 전환 금지
+        failMsg = String((e as Error).message);
       }
-    } catch (e) {
-      if (opts.signal?.aborted || produced || !isTransientErr(e)) throw e; // 본문 출력이 시작된 뒤엔 중간 전환 금지
-      failMsg = String((e as Error).message);
+      if (!failMsg) return;
+      if (isRateLimited(failMsg)) rateLimitedUntil.set(key, Date.now() + RATE_LIMIT_COOLDOWN_MS);
+      next = nextUsable(key, false);
+      if (!next) { yield { type: "error", error: failMsg }; return; }
     }
-    if (!failMsg) return;
-    let next = nextInChain(`${ep.id}/${mdl}`);
-    while (next) {
-      try { ({ endpoint: ep, model: mdl } = resolveModel(next)); break; }
-      catch { next = nextInChain(next); }
-    }
-    if (!next) { yield { type: "error", error: failMsg }; return; }
-    console.warn(`[mybot] 스트림 폴백: ${endpoint.id}/${model} → ${ep.id}/${mdl} (${failMsg.slice(0, 80)})`);
+    console.warn(`[mybot] 스트림 폴백: ${key} → ${next.endpoint.id}/${next.model} (${failMsg.slice(0, 80)})`);
     origin ??= `${endpoint.id}/${model}`;
+    ({ endpoint: ep, model: mdl } = next);
   }
 }
 

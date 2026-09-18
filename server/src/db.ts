@@ -5,7 +5,8 @@ import { join } from "node:path";
 const DATA_DIR = join(import.meta.dir, "..", "data");
 mkdirSync(DATA_DIR, { recursive: true });
 
-export const db = new Database(join(DATA_DIR, "mybot.db"), { create: true });
+// bun test는 NODE_ENV=test로 실행된다 — 테스트가 운영 DB를 건드리지 않도록 메모리 DB 사용
+export const db = new Database(process.env.NODE_ENV === "test" ? ":memory:" : join(DATA_DIR, "mybot.db"), { create: true });
 db.exec("PRAGMA journal_mode = WAL");
 db.exec("PRAGMA foreign_keys = ON");
 
@@ -262,13 +263,14 @@ try { db.exec("ALTER TABLE agents ADD COLUMN parent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN is_lead INTEGER NOT NULL DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN max_children INTEGER"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN sort_order REAL"); } catch {}
-try { db.exec("ALTER TABLE agents ADD COLUMN special_role TEXT"); } catch {} // 'org_admin'(Eggbot, 봇 관리 전담) / 'secretary'(비서실장, 업무 라우팅)
-// 조직 역할 자동 배정 — 이름 기준 1회 백필 (Eggbot=조직관리, 비서실장=라우팅)
+try { db.exec("ALTER TABLE agents ADD COLUMN special_role TEXT"); } catch {} // 'org_admin'(Eggbot, 봇 관리 전담)
+// 조직 역할 자동 배정 — 이름 기준 1회 백필 (Eggbot=조직관리)
 // 역할이 이미 배정돼 있으면 백필하지 않음 — Eggbot 개명 후 새 "Eggbot"이 org_admin을 얻는 중복을 차단
 db.exec("UPDATE agents SET special_role = 'org_admin' WHERE name = 'Eggbot' AND special_role IS NULL AND NOT EXISTS (SELECT 1 FROM agents WHERE special_role = 'org_admin')");
-db.exec("UPDATE agents SET special_role = 'secretary' WHERE name = '비서실장봇' AND special_role IS NULL AND NOT EXISTS (SELECT 1 FROM agents WHERE special_role = 'secretary')");
+// 비서실장(secretary) 역할 폐지(2026-09-18) — CEO가 팀장·전문 봇에게 직접 배정한다. 남은 표시는 일반 봇으로 되돌림
+db.exec("UPDATE agents SET special_role = NULL WHERE special_role = 'secretary'");
 // 업무 트리 무결성 — 최대 2단계(CEO→팀장→봇). 잘못된 배정은 기동 시 자동 복구:
-// ① 특수 역할 봇(Eggbot·비서실장)은 항상 CEO 직속 ② 팀장도 CEO 직속
+// ① 특수 역할 봇(Eggbot)은 항상 CEO 직속 ② 팀장도 CEO 직속
 // ③ parent는 팀장·CEO만 가능 ④ 3단계 이상 금지
 db.exec("UPDATE agents SET parent_id = NULL WHERE special_role IS NOT NULL AND parent_id IS NOT NULL");
 db.exec("UPDATE agents SET parent_id = NULL WHERE is_lead = 1 AND parent_id IS NOT NULL");
@@ -281,6 +283,7 @@ db.exec("DELETE FROM conversations WHERE mode = 'bot' AND agent_id IS NOT NULL A
   for (const r of db.prepare("SELECT id FROM agents WHERE sort_order IS NULL ORDER BY is_boss DESC, pinned DESC, created_at").all() as any[])
     db.prepare("UPDATE agents SET sort_order = ? WHERE id = ?").run(++i, r.id);
 }
+try { db.exec("ALTER TABLE agent_messages ADD COLUMN chain TEXT"); } catch {} // 보낸 쪽 위임·메시지 사슬(JSON 봇 id 배열) — 순환 메시지 차단용
 try { db.exec("ALTER TABLE credential_requests ADD COLUMN agent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE credential_requests ADD COLUMN resume TEXT"); } catch {}
 // 봇 아바타를 선형 얼굴 시드로 통일 — 기존 이모지 아바타도 전환

@@ -79,6 +79,13 @@ export function gateApproval(tool: string, args: Record<string, unknown>, agentI
   if (denied) {
     return `사용자가 이 호출(${tool})을 이미 거부했습니다 — 같은 호출을 다시 요청하지 말고, 다른 방법이 있으면 그것으로 진행하고 없으면 거부됐다고 보고하세요.`;
   }
+  // 같은 봇에 대한 설정 수정이 이미 대기 중이면 최신 요청으로 교체 — 문구만 조금씩 다른 수정 요청이
+  // 봇마다 5~7건씩 팝업으로 쌓였던 사고(2026-09-18) 방지. 요청한 봇이 달라도 대상이 같으면 교체한다
+  if (tool === "agent_update") {
+    const target = String(args.name ?? args.to ?? args.agent ?? args.target ?? args.bot ?? "");
+    if (target) db.prepare("UPDATE approval_requests SET status = 'expired', result = '같은 봇에 대한 새 수정 요청으로 대체됨', resolved_at = ? WHERE status = 'pending' AND tool = 'agent_update' AND args != ? AND COALESCE(json_extract(args, '$.name'), json_extract(args, '$.to'), json_extract(args, '$.agent'), json_extract(args, '$.target'), json_extract(args, '$.bot')) = ?")
+      .run(now(), argsJson, target);
+  }
   const dup = db.prepare("SELECT id FROM approval_requests WHERE status = 'pending' AND tool = ? AND agent_id IS ? AND args = ?").get(tool, agentId ?? null, argsJson) as any;
   if (!dup) {
     const summary = summarizeArgs(tool, args);
@@ -148,24 +155,30 @@ export function dispatchAgentMessage(msgId: string) {
     const target = getAgent(msg.to_agent_id);
     if (!target) { db.prepare("UPDATE agent_messages SET status = 'failed', reply = '봇을 찾을 수 없음', done_at = ? WHERE id = ?").run(now(), msgId); return; }
     const sender = msg.from_agent_id ? getAgent(msg.from_agent_id) : null;
+    // 메시지 사슬 = 보낸 봇까지의 상위 봇 id. 받는 봇은 사슬의 봇에게 되돌아 지시·메시지를 보낼 수 없다
+    let chain: string[] = [];
+    try { chain = JSON.parse(msg.chain ?? "[]"); } catch {}
     runAgentDetached(target, {
       label: `[${sender?.name ?? "사용자"} 메시지] ${msg.content.slice(0, 150)}`,
       task: `[${sender?.name ?? "사용자"} 봇의 비동기 메시지입니다. 처리하고 회신할 내용을 보고하세요 — 회신은 보낸 봇의 세션에 전달됩니다]\n\n${msg.content}`,
       sessionTitle: `[${sender?.name ?? "사용자"} 메시지] ${msg.content}`,
       sessionTask: msg.content,
       replyTo: sender,
+      chain,
       verifyIntent: false, // 메시지 본문은 보고·알림 — 지시-실측 검증 대상이 아님 (보고 속 단어를 지시로 오독해 반대 실행을 강제하는 사고 방지)
       onDone: (state) => {
         db.prepare("UPDATE agent_messages SET status = ?, reply = ?, done_at = ? WHERE id = ?")
           .run(state.status === "done" ? "done" : "failed", (state.result?.trim() || "(결과 없음)").slice(0, 4000), now(), msgId);
         // 회신을 발신 봇이 실제로 받아 처리하게 재실행 — 세션에 기록만 하면 아무도 읽지 않는 데드레터가 됨
-        // (연쇄 방지: 봇 쌍 메시지 10건/30분 + 봇별 실행 15회/시간 상한이 ping-pong을 차단)
+        // 재실행 사슬에 회신한 봇을 넣어, 회신에 다시 메시지로 답하는 보고-회신 핑퐁을 구조적으로 막는다
+        // (추가 안전장치: 봇 쌍 메시지 10건/30분 + 봇별 실행 15회/시간 상한)
         if (sender && state.status === "done" && getAgent(sender.id)) {
           runAgentDetached(sender, {
             label: `[${target.name} 회신] ${msg.content.slice(0, 120)}`,
-            task: `[${target.name} 봇이 보낸 회신이 도착했습니다 — 내용을 검토해 취합·보고·후속 조치 등 다음 단계를 이어가세요]\n\n${(state.result?.trim() || "(결과 없음)").slice(0, 3000)}`,
+            task: `[${target.name} 봇이 보낸 회신이 도착했습니다 — 내용을 검토해 취합·보고·후속 조치 등 다음 단계를 이어가세요. ${target.name}에게 접수·확인 회신을 다시 보내지 마세요]\n\n${(state.result?.trim() || "(결과 없음)").slice(0, 3000)}`,
             sessionTitle: `[${target.name} 회신] ${msg.content.slice(0, 80)}`,
             sessionTask: msg.content,
+            chain: [...chain.filter((id) => id !== sender.id), target.id],
             verifyIntent: false, // 회신 전달은 지시가 아님 — 지시-실측 검증 대상에서 제외
           });
         }

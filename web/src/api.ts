@@ -101,6 +101,7 @@ export const api = {
 
   agents: () => mybotFetch("/api/agents").then(j) as Promise<{ agents: Agent[] }>,
   agentsRunning: () => mybotFetch("/api/agents/running").then(j) as Promise<{ running: { id: string; tool: string | null }[] }>,
+  stopAllRuns: () => mybotFetch("/api/agents/stop-all", { method: "POST" }).then(j) as Promise<{ ok: boolean; stopped: { runs: number; chats: number; messages: number } }>,
   addAgent: (a: { name: string; role_prompt: string; model?: string; avatar?: string }) =>
     mybotFetch("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(a) }).then(j),
   updateAgent: (id: string, patch: Partial<Agent>) =>

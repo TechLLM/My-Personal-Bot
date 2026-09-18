@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Agent, Group } from "../api";
 import { Settings, Crown, Plus, Pin, Users, EyeOff } from "lucide-react";
 import { AgentIcon, BrandMark } from "./icons";
@@ -21,6 +21,7 @@ export function Sidebar({
   onClose,
   workingId,
   working,
+  onStopAll,
 }: {
   agents: Agent[];
   groups: Group[];
@@ -36,8 +37,18 @@ export function Sidebar({
   workingId?: string | null;
   // 서버에서 실행 중인 봇: id → 마지막으로 사용한 도구 (실시간 작업 내용 표시용)
   working?: Record<string, string | null>;
+  // 모든 봇 실행 중지 — 봇 간 위임·회신이 연쇄로 번질 때 한 번에 끊는다
+  onStopAll?: () => void;
 }) {
   const [showHidden, setShowHidden] = useState(false);
+  const [confirmStop, setConfirmStop] = useState(false);
+  const workingCount = Object.keys(working ?? {}).length;
+  // 전체 중지는 두 번 눌러야 실행 — 첫 탭은 3초간 확인 상태
+  useEffect(() => {
+    if (!confirmStop) return;
+    const t = setTimeout(() => setConfirmStop(false), 3000);
+    return () => clearTimeout(t);
+  }, [confirmStop]);
   const [groupForm, setGroupForm] = useState(false);
   const [groupName, setGroupName] = useState("");
   const [picked, setPicked] = useState<Set<string>>(new Set());
@@ -71,7 +82,21 @@ export function Sidebar({
           className="ml-auto flex h-9 items-center gap-1 rounded-xl bg-stone-900 px-3 text-xs font-semibold text-white hover:bg-stone-700 md:h-8"
         ><Plus size={14} strokeWidth={2.4} /> 새 봇</button>
       </div>
-      <div className="px-4 pb-1 pt-3 text-2xs font-semibold uppercase tracking-wider text-stone-400">봇</div>
+      <div className="flex min-h-9 items-center justify-between gap-2 pb-1 pl-4 pr-2 pt-3">
+        <span className="text-2xs font-semibold uppercase tracking-wider text-stone-400">봇</span>
+        {onStopAll && workingCount > 0 && (
+          <button
+            onClick={() => { if (confirmStop) { setConfirmStop(false); onStopAll(); } else setConfirmStop(true); }}
+            className={`flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-2xs font-semibold transition-colors md:h-7 ${
+              confirmStop ? "bg-stone-900 text-white hover:bg-stone-700" : "text-stone-600 ring-1 ring-stone-900/10 hover:bg-white/70"
+            }`}
+            title="진행 중인 모든 봇 작업과 봇 간 메시지를 중지합니다"
+          >
+            <svg width="10" height="10" viewBox="0 0 14 14" aria-hidden="true"><rect x="2" y="2" width="10" height="10" rx="2" fill="currentColor" /></svg>
+            {confirmStop ? "한 번 더 누르면 중지" : `모두 중지 · ${workingCount}`}
+          </button>
+        )}
+      </div>
       <div className="flex-1 space-y-0.5 overflow-y-auto overscroll-contain px-2 pb-2">
         {visible.map((a) => {
           const tool = working?.[a.id];

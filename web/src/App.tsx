@@ -339,6 +339,17 @@ export default function App() {
     setStreaming(false);
   }, []);
 
+  // 모든 봇 실행 중지 — 이 대화뿐 아니라 백그라운드 위임·봇 간 메시지까지 서버에서 한 번에 끊는다
+  const stopAll = useCallback(() => {
+    setQueued([]);
+    abortRef.current?.abort();
+    setStreaming(false);
+    api.stopAllRuns()
+      .then(() => api.agentsRunning())
+      .then((d) => setRunningInfo(Object.fromEntries(d.running.map((r) => [r.id, r.tool]))))
+      .catch(() => {});
+  }, []);
+
   const regenerate = useCallback((m: Message) => {
     if (streaming || m.role !== "assistant") return;
     setStreaming(true);
@@ -462,6 +473,7 @@ export default function App() {
         onClose={() => setSidebarOpen(false)}
         workingId={streaming ? activeAgent?.id ?? null : null}
         working={runningInfo}
+        onStopAll={stopAll}
       />
       <main className="relative flex min-w-0 flex-1 flex-col">
         <header className="flex min-h-14 items-center gap-1.5 border-b border-stone-200/60 px-2 pt-[env(safe-area-inset-top)] md:min-h-[52px] md:px-3">
