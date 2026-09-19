@@ -956,6 +956,8 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
   } catch {}
   // 스킬화 제안 — 도구로 실제 검증된 성공 작업만. 저장은 사용자 승인 팝업을 거친다
   if (toolsCapable) messages[0].content += `\n[스킬 제안] 반복 가치가 있는 작업을 도구로 실제 확인된 성공으로 마치면 skill_save로 절차(도구 선택·주의점 포함)를 제안하세요 — 사용자 승인 팝업을 거쳐 저장되고, 같은 이름이면 개선 내용이 누적됩니다. 검증되지 않은 작업은 제안하지 마세요.`;
+  // 결과를 그림으로 보여줄 수 있다 — 대화창이 html 코드블록을 격리된 iframe으로 렌더한다
+  messages[0].content += "\n\n[결과 화면] 비교·추이·상태·구성도처럼 그림이 이해를 빠르게 하는 결과는 ```html 코드블록으로 그리면 대화창에 그대로 렌더됩니다. 인라인 <style>·<script>만 동작하고 외부 CDN·이미지 URL·네트워크 요청은 차단되니 순수 HTML/CSS(필요하면 인라인 JS)로만 만드세요. 짧은 답변·단순 목록까지 HTML로 만들지는 말고, 표와 글로 충분하면 그대로 쓰세요.";
   // 위임 권한이 있는 봇에는 조직도를 미리 주입 — agent_list 왕복 한 라운드를 절약한다
   if (agent.is_boss || agent.is_lead || agent.special_role) {
     try {

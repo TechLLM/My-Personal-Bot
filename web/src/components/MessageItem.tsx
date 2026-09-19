@@ -6,6 +6,7 @@ import type { Message } from "../api";
 import { Brain, Bot, FileText, Volume2 } from "lucide-react";
 import { AgentIcon } from "./icons";
 import { WorkingStatus } from "./WorkingStatus";
+import { HtmlPreview } from "./HtmlPreview";
 
 // 저장된 과거 메시지·스트리밍 중간에 섞인 장식 이모지를 렌더 단에서 제거 — 정돈된 선형 표기 유지
 const stripEmoji = (s: string) => s.replace(/\p{Extended_Pictographic}️?/gu, "").replace(/‍/g, "");
@@ -130,7 +131,21 @@ export function MessageItem({
       {streaming && !m.reasoning && !m.content && <WorkingStatus compact />}
       {m.content && (
         <div className="markdown text-body">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>{stripEmoji(m.content)}</ReactMarkdown>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            rehypePlugins={[rehypeHighlight]}
+            components={{
+              // html·svg 코드블록은 격리된 미리보기로 — 봇이 표·차트·카드 같은 결과 화면을 직접 그릴 수 있다
+              pre({ children, ...props }) {
+                const el = (Array.isArray(children) ? children[0] : children) as { props?: { className?: string; children?: unknown } } | undefined;
+                const lang = /language-(\w+)/.exec(el?.props?.className ?? "")?.[1];
+                const code = String(el?.props?.children ?? "").replace(/\n$/, "");
+                if ((lang === "html" || lang === "svg") && code.includes("<"))
+                  return <HtmlPreview code={code} streaming={streaming} />;
+                return <pre {...props}>{children}</pre>;
+              },
+            }}
+          >{stripEmoji(m.content)}</ReactMarkdown>
         </div>
       )}
       {meta?.type === "team" && meta.status === "pending" && meta.agents && (
