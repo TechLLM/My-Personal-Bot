@@ -999,7 +999,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
       }
       if (Date.now() > deadline) {
         trackEmit({ type: "agent_step", agentId: state.id, tool: "시간 제한 — 결과 정리" });
-        messages.push({ role: "user", content: "작업 시간 제한에 도달했습니다. 도구를 더 사용하지 말고, 지금까지 얻은 결과로 최종 보고서를 즉시 작성하세요. 완료하지 못한 작업이 있으면 보고서 끝에 '## 남은 작업' 항목으로 구체적으로 적으세요 — 다음 지시에서 이어서 진행하는 데 사용됩니다." });
+        messages.push({ role: "user", content: "작업 시간 제한에 도달했습니다. 도구를 더 사용하지 말고, 지금까지 얻은 결과로 최종 보고서를 즉시 작성하세요. 적용한 스킬이 산출물 형식을 지정했다면 그 형식을 유지하세요. 완료하지 못한 작업이 있으면 보고서 끝에 '## 남은 작업' 항목으로 구체적으로 적으세요 — 다음 지시에서 이어서 진행하는 데 사용됩니다." });
         const res = await chatOnce(endpoint, model, messages, { signal });
         noteFallback(res);
         state.status = "done";
@@ -1089,7 +1089,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
     }
     // 단계 상한 도달 — 수집한 내용을 버리지 않고 도구 없이 최종 보고서 생성
     trackEmit({ type: "agent_step", agentId: state.id, tool: "단계 상한 — 결과 정리" });
-    messages.push({ role: "user", content: "도구 사용 단계 상한에 도달했습니다. 도구를 더 쓰지 말고, 지금까지 얻은 결과로 최종 보고서를 즉시 작성하세요." });
+    messages.push({ role: "user", content: "도구 사용 단계 상한에 도달했습니다. 도구를 더 쓰지 말고, 지금까지 얻은 결과로 최종 보고서를 즉시 작성하세요. 이 작업에 적용한 스킬이 산출물 형식을 지정했다면 그 형식을 그대로 유지하세요." });
     try {
       const res = await chatOnce(endpoint, model, messages, { signal });
       noteFallback(res);
