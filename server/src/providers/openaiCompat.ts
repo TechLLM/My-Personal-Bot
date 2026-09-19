@@ -40,6 +40,7 @@ const shouldFallback = (e: unknown) => isTransientErr(e) || isAuthErr(e);
 // 프로바이더 원문 오류(JSON 덩어리)를 원인과 조치가 보이는 한 줄로 — 폴백까지 모두 실패해 사용자에게 갈 때 쓴다
 // ("에이전트 오류: 오류 401: {"error":{...}}"만 남아 실패 이유를 알 수 없다는 보고가 있었다)
 export function friendlyProviderError(msg: string): string {
+  if (/\b1311\b|subscription plan|does not (yet )?include/i.test(msg)) return `현재 구독 플랜에 포함되지 않은 모델이라 호출이 거부됐습니다 — 설정 > 프로바이더에서 플랜에 맞는 모델로 바꾸세요 (원문: ${msg.slice(0, 200)})`;
   if (/insufficient|balance|1113|CreditsError/i.test(msg)) return `모델 제공자 잔액이 부족해 호출이 거부됐습니다 — 결제 후 다시 시도하세요 (원문: ${msg.slice(0, 200)})`;
   if (isAuthErr(msg)) return `모델 제공자 인증이 만료됐습니다 — 설정 > 프로바이더에서 재인증하세요 (원문: ${msg.slice(0, 200)})`;
   if (/\b429\b|rate.?limit|1302/i.test(msg)) return `모델 제공자 요청 한도에 걸렸습니다 — 잠시 후 다시 시도하거나 다른 모델을 배정하세요 (원문: ${msg.slice(0, 200)})`;
@@ -52,6 +53,12 @@ export function friendlyProviderError(msg: string): string {
 // 18회 반복됐다 — 폴백이 일어났다는 것 자체가 "이 모델은 지금 못 쓴다"는 신호라 실패 종류를 가리지 않는다.
 // 폴백할 다음 모델이 없으면 건너뛰지 않고 그대로 시도한다.
 const FAIL_COOLDOWN_MS = 120_000;
+// 플랜 미지원(z.ai 1311)·모델 자체 부재 같은 영구 오류는 120초 쿨다운으로는 회복되지 않는다 —
+// 쿨다운이 풀릴 때마다 같은 실패를 반복해 폴백이 무한히 이어진 실측이 있다 (2026-09-19 flashx 사고).
+// 영구 오류는 1시간 건너뛰어 반복 호출을 끊고, 설정이 고쳐진 뒤에는 재시작으로 바로 해소된다.
+const PERM_COOLDOWN_MS = 3_600_000;
+const isPermanentModelErr = (e: unknown) =>
+  /\b1311\b|subscription plan|does not (yet )?include|model.{0,20}(not.{0,10}(supported|available|found)|does not exist)/i.test(String((e as Error)?.message ?? e));
 const skipUntil = new Map<string, number>();
 const coolingDown = (key: string) => (skipUntil.get(key) ?? 0) > Date.now();
 
@@ -90,7 +97,7 @@ export async function chatOnce(
         return r;
       } catch (e) {
         if (opts.signal?.aborted || !shouldFallback(e)) throw e;
-        skipUntil.set(key, Date.now() + FAIL_COOLDOWN_MS);
+        skipUntil.set(key, Date.now() + (isPermanentModelErr(e) ? PERM_COOLDOWN_MS : FAIL_COOLDOWN_MS));
         next = nextUsable(key, needsTools);
         if (!next) throw e;
         failure = e;
@@ -210,7 +217,7 @@ export async function* streamChat(
         failMsg = String((e as Error).message);
       }
       if (!failMsg) return;
-      skipUntil.set(key, Date.now() + FAIL_COOLDOWN_MS);
+      skipUntil.set(key, Date.now() + (isPermanentModelErr(new Error(failMsg)) ? PERM_COOLDOWN_MS : FAIL_COOLDOWN_MS));
       next = nextUsable(key, false);
       if (!next) { yield { type: "error", error: failMsg }; return; }
     }
