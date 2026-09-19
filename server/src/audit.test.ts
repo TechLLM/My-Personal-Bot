@@ -1,6 +1,6 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { db, now } from "./db";
-import { auditOrg, formatAudit, repeatedParagraph, modelProblem, failRateFinding, isInfraFailure, skillTally, type Run } from "./audit";
+import { auditOrg, formatAudit, repeatedParagraph, modelProblem, failRateFinding, isInfraFailure, skillTally, unattendedExpiry, type Run } from "./audit";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
 
@@ -207,4 +207,35 @@ test("인프라 장애만 겪은 스킬은 성공률 경고를 내지 않는다"
   add.run("r3", "sk-inf", "k3", 0, "The operation timed out.");
   add.run("r4", "sk-inf", "k4", 0, "오류 429: rate limit");
   expect(ids(auditOrg())).not.toContain("skill.low_success"); // 판단 대상이 1건뿐이라 아예 판정하지 않는다
+});
+
+// --- 만료 승인 구분 (개선지침서 A-7) ---
+// expired에는 "방치돼 만료"와 "정상적으로 대체·정리"가 섞여 있다.
+// 후자까지 세면 승인 대상이 과하다고 잘못 보고한다.
+
+test("정상적인 대체·정리 만료는 방치로 세지 않는다", () => {
+  expect(unattendedExpiry("같은 봇에 대한 새 수정 요청으로 대체됨")).toBe(false);
+  expect(unattendedExpiry("만료 — 사용자 요청으로 봇 간 연쇄 실행 정지")).toBe(false);
+  expect(unattendedExpiry("E2E 검증 산출물 — 직접 정리")).toBe(false);
+});
+
+test("사유 없이 만료된 것은 방치로 본다", () => {
+  expect(unattendedExpiry(null)).toBe(true);
+  expect(unattendedExpiry("")).toBe(true);
+  expect(unattendedExpiry("시간 초과")).toBe(true);
+});
+
+test("대체로 만료된 요청이 쌓여도 만료율 경고를 내지 않는다", () => {
+  ins({ is_boss: 1 });
+  const add = db.prepare("INSERT INTO approval_requests (id, tool, args, summary, status, result, created_at) VALUES (?,'agent_update','{}','s','expired',?,0)");
+  for (let i = 0; i < 25; i++) add.run("ex" + i, "같은 봇에 대한 새 수정 요청으로 대체됨");
+  expect(ids(auditOrg())).not.toContain("ops.expired_rate");
+});
+
+test("방치된 만료가 실제로 많으면 경고한다", () => {
+  ins({ is_boss: 1 });
+  const add = db.prepare("INSERT INTO approval_requests (id, tool, args, summary, status, result, created_at) VALUES (?,'send_email','{}','s',?,?,0)");
+  for (let i = 0; i < 10; i++) add.run("ok" + i, "approved", null);
+  for (let i = 0; i < 15; i++) add.run("st" + i, "expired", null); // 사유 없는 만료 = 방치
+  expect(ids(auditOrg())).toContain("ops.expired_rate");
 });

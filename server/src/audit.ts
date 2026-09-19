@@ -61,6 +61,13 @@ export function skillTally(rows: { ok: number | null; fail_reason: string | null
   return { n: judged.length, ok: judged.filter((r) => r.ok === 1).length };
 }
 
+// 만료에는 두 종류가 있다. 같은 대상에 새 요청이 와서 대체된 것과 사람이 일괄 정리한 것은
+// 정상 동작이며 "승인 대상이 과한지"를 나타내지 않는다. 기록된 만료 51건이 전부 이 종류였다.
+// 방치되어 만료된 것만 세야 규칙이 원래 재려던 것을 잰다 (개선지침서 A-7).
+export function unattendedExpiry(result: string | null | undefined): boolean {
+  return !/대체됨|직접 정리|사용자 요청|수동 정리/.test(String(result ?? ""));
+}
+
 export interface Run { status: string; steps: number | null; created_at: number }
 
 // 실패율을 7일 한 창으로만 보면 이미 고친 문제가 일주일 내내 "위험"으로 남는다.
@@ -172,7 +179,8 @@ export function auditOrg(): Finding[] {
   }
   const stale = db.prepare("SELECT COUNT(*) c FROM approval_requests WHERE status = 'pending' AND created_at < ?").get(Date.now() - PENDING_STALE_H * 3_600_000) as { c: number };
   if (stale.c > 0) add("ops.stale_approval", "위험", "오래 방치된 승인 대기가 있습니다", `${stale.c}건 (${PENDING_STALE_H}시간 초과)`, "화면에서 승인하거나 거부하세요 — 그동안 해당 업무는 멈춰 있습니다.");
-  const exp = db.prepare("SELECT COUNT(*) c FROM approval_requests WHERE status = 'expired'").get() as { c: number };
+  const expRows = db.prepare("SELECT result FROM approval_requests WHERE status = 'expired'").all() as { result: string | null }[];
+  const exp = { c: expRows.filter((r) => unattendedExpiry(r.result)).length };
   const apr = db.prepare("SELECT COUNT(*) c FROM approval_requests").get() as { c: number };
   if (apr.c >= 20 && exp.c / apr.c > 0.2) add("ops.expired_rate", "주의", "만료된 승인이 많습니다", `${exp.c}/${apr.c}`, "승인 대상이 과한지 검토하세요 — 조회성 도구까지 막고 있을 수 있습니다.");
 
