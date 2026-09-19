@@ -98,7 +98,7 @@ export function MessageItem({
             </div>
           </div>
         ) : (
-          <div className="max-w-[88%] whitespace-pre-wrap break-words rounded-[22px] rounded-br-md bg-[#EAE7E1] px-4 py-2.5 text-body text-stone-900 md:max-w-[80%]">
+          <div className="max-w-[88%] whitespace-pre-wrap break-words rounded-[22px] rounded-br-md bg-stone-200 px-4 py-2.5 text-body text-stone-900 md:max-w-[80%]">
             {m.attachments && (JSON.parse(m.attachments) as { url: string; mime: string; name: string }[]).map((a, i) =>
               a.mime.startsWith("image/") ? (
                 <img key={i} src={a.url} className="mb-2 max-h-64 rounded-xl" alt={a.name} />
