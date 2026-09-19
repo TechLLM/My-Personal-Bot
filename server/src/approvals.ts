@@ -8,11 +8,24 @@ import { db, uid, now, getSetting } from "./db";
 // 기본 위험 패턴 — 규칙이 없어도 이름만으로 승인 요구 (파괴적·외부 영향 액션)
 // skill_save — 스킬은 전 봇이 재사용하는 조직 자산이라 저장 전 사용자 승인
 // agent_create/update/reorder/delete — 봇 설정 변경은 사용자 승인 후 반영 (조직 관리 채널)
-// shell_run 제외(2026-09-18 소유자 결정) — 작업 디렉터리 샌드박스·30초 상한 안에서만 돌고,
-// ls·find 같은 조회까지 팝업을 띄워 승인 51건이 만료되고 업무가 통째로 멈췄다
+// shell_run은 이름이 아니라 명령 내용으로 가른다 (아래 isReadOnlyShell)
 const DEFAULT_RISKY = /send_email|send_telegram|delete|publish|purchase|payment|pay_|_pay|submit_form|drop|execute_sql|skill_save|agent_(create|update|reorder)|computer_/i;
 // 승인 면제 — 이름에 위험 단어가 있어도 실제로는 안전한 도구
 const DEFAULT_SAFE = /routine_list|agent_list|read_|list_|_list|search|lookup/i;
+
+// 조회용 셸만 자동 허용한다.
+// 2026-09-18에는 ls·find 같은 조회까지 팝업이 떠 승인 51건이 만료되고 업무가 멈춰 shell_run을 통째로 면제했는데,
+// 2026-09-19 점검에서 서비스가 공인 도메인(nginx → 5274)으로 인증 없이 열려 있던 것이 확인돼 그 범위를 여기까지 좁혔다.
+// 쓰기·삭제·네트워크·인터프리터 실행과 리다이렉션·체이닝·치환은 계속 승인을 받는다.
+const READ_ONLY_CMD = /^(ls|cat|head|tail|find|grep|rg|wc|stat|file|du|df|pwd|echo|date|which|tree|sort|uniq|cut|basename|dirname|realpath|jq)\b/;
+const SHELL_UNSAFE = /[>`$;&]|\b(rm|mv|cp|ln|chmod|chown|kill|curl|wget|ssh|scp|nc|telnet|python3?|node|bun|deno|sh|bash|zsh|eval|exec|sudo|tee|dd|launchctl|git|npm|pip3?|open|osascript)\b/;
+
+export function isReadOnlyShell(command: unknown): boolean {
+  const c = String(command ?? "").trim();
+  if (!c || SHELL_UNSAFE.test(c)) return false;
+  // 파이프는 허용하되 각 구간이 모두 조회 명령이어야 한다 — `ls | head`는 통과, `cat x | sh`는 차단
+  return c.split("|").every((seg) => READ_ONLY_CMD.test(seg.trim()));
+}
 
 export function approvalDecision(tool: string, args?: Record<string, unknown>): "require" | "allow" {
   const rules = db.prepare("SELECT pattern, action, cond FROM approval_rules").all() as { pattern: string; action: string; cond: string | null }[];
@@ -27,6 +40,7 @@ export function approvalDecision(tool: string, args?: Record<string, unknown>): 
     } catch {}
   }
   if (hasAllow) return "allow";
+  if (tool === "shell_run") return isReadOnlyShell(args?.command ?? args?.cmd ?? args?.script) ? "allow" : "require";
   if (DEFAULT_SAFE.test(tool)) return "allow";
   return DEFAULT_RISKY.test(tool) ? "require" : "allow";
 }

@@ -16,7 +16,10 @@ export function BrowserView({ viewKey, onClose }: { viewKey: string; onClose: ()
   const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
-    const es = new EventSource(`/api/browser/view/${encodeURIComponent(viewKey)}`);
+    // EventSource는 헤더를 실을 수 없어 접속 암호를 쿼리로 넘긴다 (/api/events와 같은 방식).
+    // 암호를 설정하면 이 스트림만 401로 끊겨 브라우저 화면이 비던 문제를 막는다
+    const key = localStorage.getItem("mybot_key");
+    const es = new EventSource(`/api/browser/view/${encodeURIComponent(viewKey)}${key ? `?key=${encodeURIComponent(key)}` : ""}`);
     esRef.current = es;
     es.addEventListener("frame", (e) => {
       try { setFrame(JSON.parse((e as MessageEvent).data)); setLive(true); } catch {}
