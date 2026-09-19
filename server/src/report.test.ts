@@ -33,3 +33,12 @@ test("기존 정리 기능은 그대로 동작한다", () => {
   expect(cleanOutput("완료 ✅")).toBe("완료 [완료]"); // ✅는 기존 마커 규칙대로 [완료]로 바뀐다
   expect(cleanOutput("진행 🚀")).toBe("진행");            // 마커가 아닌 장식 이모지는 제거
 });
+
+test("한글 뒤 괄호 병기는 이미 올바른 표기다 — 건드리지 않는다", () => {
+  expect(hanjaToHangul("비(非)AI 분야 투자")).toBe("비(非)AI 분야 투자");
+  expect(hanjaToHangul("대인(對人) 차량 돌진")).toBe("대인(對人) 차량 돌진");
+  expect(hanjaToHangul("한미(韓美) 외교장관 회담")).toBe("한미(韓美) 외교장관 회담");
+  expect(hanjaToHangul("이창용(前 총재)")).toBe("이창용(前 총재)"); // 괄호 안은 그대로
+  // 괄호 밖 제목 투는 계속 바꾼다
+  expect(hanjaToHangul("美 국무장관, 韓美 회담")).toBe("미국 국무장관, 한미 회담");
+});
