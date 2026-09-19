@@ -133,12 +133,63 @@ function ProviderRow({ p, onChanged }: { p: ProviderCard; onChanged: () => void 
 // 입력 컴포넌트는 반드시 모듈 스코프에 둔다 — 컴포넌트 안에서 정의하면 렌더마다 새 타입이 만들어져
 // React가 input을 통째로 리마운트한다. 그러면 한 글자 칠 때마다 포커스가 빠져 다시 클릭해야 했다
 // (2026-09-18 실측: 입력 직후 해당 input이 DOM에서 사라지고 document.activeElement가 body로 갔다)
-function Field({ k, label, ph, s, update }: { k: string; label: string; ph?: string; s: Record<string, string>; update: (patch: Record<string, string>) => void }) {
+function Field({ k, label, ph, s, update, secret }: { k: string; label: string; ph?: string; s: Record<string, string>; update: (patch: Record<string, string>) => void; secret?: boolean }) {
   return (
     <label className="block">
       <span className="text-xs text-stone-600">{label}</span>
-      <input className="mt-1 w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none" value={s[k] ?? ""} placeholder={ph} onChange={(e) => update({ [k]: e.target.value })} />
+      <input type={secret ? "password" : "text"} autoComplete={secret ? "off" : undefined}
+        className="mt-1 w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none" value={s[k] ?? ""} placeholder={ph} onChange={(e) => update({ [k]: e.target.value })} />
     </label>
+  );
+}
+
+// 접속 암호 — 오타가 나면 본인까지 못 들어오고 외부 접속 경로가 통째로 막히므로 두 번 받아 대조한다.
+// 두 값이 일치할 때만 저장 대상에 반영하고, 그전까지는 편집 시작 시점의 값을 유지해 잘못 저장되지 않게 한다.
+function AccessCodeField({ s, update, onWarn }: { s: Record<string, string>; update: (patch: Record<string, string>) => void; onWarn: (msg: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [saved, setSaved] = useState(""); // 편집 시작 시점의 서버 값(마스킹) — 취소·불일치 때 되돌린다
+  const [v1, setV1] = useState("");
+  const [v2, setV2] = useState("");
+  const isSet = !!(s.access_code ?? "");
+
+  const start = () => { setSaved(s.access_code ?? ""); setV1(""); setV2(""); setEditing(true); onWarn("새 접속 암호를 두 번 입력해 주세요"); };
+  const cancel = () => { update({ access_code: saved }); setV1(""); setV2(""); setEditing(false); onWarn(""); };
+  const apply = (a: string, b: string) => {
+    setV1(a); setV2(b);
+    const ok = a.length > 0 && a === b;
+    update({ access_code: ok ? a : saved });
+    onWarn(ok ? "" : !a && !b ? "새 접속 암호를 두 번 입력해 주세요" : a !== b ? "두 접속 암호가 서로 다릅니다" : "확인란에도 같은 암호를 입력해 주세요");
+  };
+
+  const box = "mt-1 w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none";
+  if (!editing) return (
+    <div>
+      <span className="text-xs text-stone-600">접속 암호 (설정 시 API 전체에 필요)</span>
+      <div className="mt-1 flex items-center gap-2">
+        <span className={`flex-1 text-xs ${isSet ? "text-stone-700" : "font-medium text-red-700"}`}>
+          {isSet ? "설정됨 — 접속에 암호가 필요합니다" : "설정 안 됨 — 인증 없이 접근됩니다"}
+        </span>
+        <button type="button" onClick={start} className="rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs text-stone-700 hover:bg-stone-300">
+          {isSet ? "변경" : "설정"}
+        </button>
+      </div>
+    </div>
+  );
+  return (
+    <div className="space-y-2">
+      <label className="block">
+        <span className="text-xs text-stone-600">새 접속 암호</span>
+        <input type="password" autoComplete="new-password" className={box} value={v1} onChange={(e) => apply(e.target.value, v2)} />
+      </label>
+      <label className="block">
+        <span className="text-xs text-stone-600">새 접속 암호 확인</span>
+        <input type="password" autoComplete="new-password" className={box} value={v2} onChange={(e) => apply(v1, e.target.value)} />
+      </label>
+      <div className="flex items-center gap-2">
+        <span className="flex-1 text-xs text-stone-500">{v1 && v1 === v2 ? "두 입력이 일치합니다 — 저장하면 적용됩니다" : "두 입력이 일치해야 저장됩니다"}</span>
+        <button type="button" onClick={cancel} className="rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs text-stone-700 hover:bg-stone-300">취소</button>
+      </div>
+    </div>
   );
 }
 
@@ -266,6 +317,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   }, [recActive]);
 
   // 입력은 로컬 상태만 변경 — "저장" 버튼을 눌러야 서버에 반영
+  const [pwWarn, setPwWarn] = useState(""); // 접속 암호 두 입력이 어긋나 있으면 저장을 잠근다
   const update = (patch: Record<string, string>) => { setS((p) => ({ ...p, ...patch })); setDirty(true); };
   const saveAll = () => {
     mybotFetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(s) })
@@ -610,10 +662,10 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                 </select>
                 <div className="space-y-2.5">
                   <Field s={s} update={update} k="searxng_url" label="SearXNG URL" ph="http://127.0.0.1:8080" />
-                  <Field s={s} update={update} k="tavily_key" label="Tavily API 키" />
-                  <Field s={s} update={update} k="brave_key" label="Brave API 키" />
-                  <Field s={s} update={update} k="exa_key" label="Exa API 키" ph="exa.ai — 무료 크레딧" />
-                  <Field s={s} update={update} k="jina_key" label="Jina API 키" ph="jina.ai — 무료 10M 토큰" />
+                  <Field secret s={s} update={update} k="tavily_key" label="Tavily API 키" />
+                  <Field secret s={s} update={update} k="brave_key" label="Brave API 키" />
+                  <Field secret s={s} update={update} k="exa_key" label="Exa API 키" ph="exa.ai — 무료 크레딧" />
+                  <Field secret s={s} update={update} k="jina_key" label="Jina API 키" ph="jina.ai — 무료 10M 토큰" />
                 </div>
               </div>
             )}
@@ -623,7 +675,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                 <H>이미지 생성</H>
                 <div className="space-y-2.5">
                   <Field s={s} update={update} k="image_endpoint" label="Images API 엔드포인트" ph="http://127.0.0.1:11441/v1 또는 Draw Things http://127.0.0.1:7888" />
-                  <Field s={s} update={update} k="image_key" label="이미지 API 키(선택)" />
+                  <Field secret s={s} update={update} k="image_key" label="이미지 API 키(선택)" />
                   <Field s={s} update={update} k="image_model" label="이미지 모델" ph="dall-e-3 / flux 등" />
                 </div>
               </div>
@@ -867,7 +919,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     <input type="checkbox" checked={s.notify_telegram === "1"} onChange={(e) => update({ notify_telegram: e.target.checked ? "1" : "0" })} />
                     답변을 텔레그램으로도 받기
                   </label>
-                  <Field s={s} update={update} k="telegram_bot_token" label="텔레그램 봇 토큰" ph="@BotFather에서 발급 (123456:ABC…)" />
+                  <Field secret s={s} update={update} k="telegram_bot_token" label="텔레그램 봇 토큰" ph="@BotFather에서 발급 (123456:ABC…)" />
                   <Field s={s} update={update} k="telegram_chat_id" label="텔레그램 채팅 ID" ph="봇에게 말 건 뒤 getUpdates로 확인" />
                   <label className="flex items-center gap-2 text-xs text-stone-600">
                     <input type="checkbox" checked={s.telegram_listen === "1"} onChange={(e) => update({ telegram_listen: e.target.checked ? "1" : "0" })} />
@@ -881,7 +933,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     <Field s={s} update={update} k="smtp_host" label="SMTP 호스트" ph="smtp.gmail.com" />
                     <Field s={s} update={update} k="smtp_port" label="포트" ph="587 (465는 SSL)" />
                     <Field s={s} update={update} k="smtp_user" label="SMTP 계정" />
-                    <Field s={s} update={update} k="smtp_pass" label="SMTP 비밀번호/앱 비밀번호" />
+                    <Field secret s={s} update={update} k="smtp_pass" label="SMTP 비밀번호/앱 비밀번호" />
                     <Field s={s} update={update} k="smtp_from" label="보내는 주소(선택)" />
                     <Field s={s} update={update} k="email_to" label="받는 주소" />
                   </div>
@@ -891,7 +943,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     <Field s={s} update={update} k="imap_host" label="IMAP 호스트" ph="imap.gmail.com / 사내 메일 서버" />
                     <Field s={s} update={update} k="imap_port" label="포트" ph="993 (SSL)" />
                     <Field s={s} update={update} k="imap_user" label="IMAP 계정" ph="name@company.com" />
-                    <Field s={s} update={update} k="imap_pass" label="IMAP 비밀번호/앱 비밀번호" />
+                    <Field secret s={s} update={update} k="imap_pass" label="IMAP 비밀번호/앱 비밀번호" />
                   </div>
                   <label className="flex items-center gap-2 text-xs text-stone-600">
                     <input type="checkbox" checked={s.imap_tls !== "0"} onChange={(e) => update({ imap_tls: e.target.checked ? "1" : "0" })} />
@@ -1008,7 +1060,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                 </div>
                 <div>
                   <H>보안</H>
-                  <Field s={s} update={update} k="access_code" label="접속 암호 (설정 시 API 전체에 필요)" ph="비워두면 LAN 개방" />
+                  <AccessCodeField s={s} update={update} onWarn={setPwWarn} />
                 </div>
               </div>
             )}
@@ -1016,8 +1068,8 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
 
           {/* 하단 저장 바 */}
           <div className="flex items-center gap-3 border-t border-stone-200 px-4 pb-[max(0.625rem,env(safe-area-inset-bottom))] pt-2.5 md:px-5 md:py-3">
-            <button onClick={saveAll} className="h-10 rounded-lg bg-stone-900 px-5 text-xs font-semibold text-white hover:bg-stone-700 md:h-8 md:px-4">저장</button>
-            {dirty && <span className="text-caption text-amber-600">저장되지 않은 변경 사항 있음</span>}
+            <button onClick={saveAll} disabled={!!pwWarn} className="h-10 rounded-lg bg-stone-900 px-5 text-xs font-semibold text-white hover:bg-stone-700 disabled:opacity-40 disabled:hover:bg-stone-900 md:h-8 md:px-4">저장</button>
+            {pwWarn ? <span className="text-caption text-red-700">{pwWarn}</span> : dirty && <span className="text-caption text-amber-600">저장되지 않은 변경 사항 있음</span>}
             {savedMsg && <span className="text-caption text-emerald-600">{savedMsg}</span>}
             <button onClick={onClose} className="ml-auto h-10 rounded-lg px-3 text-xs text-stone-500 hover:bg-stone-100 hover:text-stone-800 md:h-8">닫기</button>
           </div>
