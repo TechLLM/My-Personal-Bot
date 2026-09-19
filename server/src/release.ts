@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { getSetting, setSetting } from "./db";
 
 // 서비스 릴리스 — 개발 인스턴스에서 검증을 마친 커밋을 release 브랜치로 밀면
@@ -14,10 +14,22 @@ const CHANNEL = "release";
 
 export interface PendingCommit { sha: string; subject: string; date: string }
 
-function run(cmd: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
-  const p = Bun.spawnSync(cmd, { cwd: opts.cwd ?? ROOT, env: { ...process.env, ...opts.env } });
-  const dec = new TextDecoder();
-  return { ok: p.exitCode === 0, out: (dec.decode(p.stdout) + dec.decode(p.stderr)).trim() };
+// launchd로 뜬 프로세스는 로그인 셸의 PATH를 물려받지 않는다(기본 /usr/bin:/bin:/usr/sbin:/sbin).
+// plist가 절대 경로로 띄워 주므로 서버는 돌지만, 여기서 "bun"을 이름으로 부르면 찾지 못한다.
+// 지금 돌고 있는 실행 파일을 그대로 쓰고, 하위 프로세스 PATH에도 그 디렉터리를 얹는다.
+export const BUN = process.execPath;
+const PATH_WITH_BUN = `${dirname(BUN)}:${process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin"}`;
+
+// spawn 자체가 실패해도(실행 파일 없음 등) 예외로 새어나가지 않게 한다.
+// 예외가 올라가면 호출부의 롤백을 건너뛰어 반영만 된 채 남는다 — 실제로 그 사고가 있었다.
+export function run(cmd: string[], opts: { cwd?: string; env?: Record<string, string> } = {}) {
+  try {
+    const p = Bun.spawnSync(cmd, { cwd: opts.cwd ?? ROOT, env: { ...process.env, PATH: PATH_WITH_BUN, ...opts.env } });
+    const dec = new TextDecoder();
+    return { ok: p.exitCode === 0, out: (dec.decode(p.stdout) + dec.decode(p.stderr)).trim() };
+  } catch (e) {
+    return { ok: false, out: `실행할 수 없습니다: ${cmd[0]} — ${(e as Error).message}` };
+  }
 }
 const git = (...args: string[]) => run(["git", ...args]);
 const tail = (s: string, n = 1200) => (s.length > n ? "…" + s.slice(-n) : s);
@@ -75,7 +87,7 @@ export async function runGates(gates: Gate[]): Promise<{ ok: true } | { ok: fals
 // NODE_ENV=test로 띄워 메모리 DB를 쓰게 하므로 운영 DB와 외부 채널은 건드리지 않는다.
 export async function bootCheck(cwd = join(ROOT, "server")): Promise<{ ok: boolean; out: string }> {
   const port = 5390 + Math.floor(Math.random() * 40);
-  const proc = Bun.spawn(["bun", "src/index.ts"], {
+  const proc = Bun.spawn([BUN, "src/index.ts"], {
     cwd,
     env: { ...process.env, MYBOT_PORT: String(port), MYBOT_HOST: "127.0.0.1", NODE_ENV: "test" },
     stdout: "pipe", stderr: "pipe",
@@ -101,9 +113,9 @@ const cmdGate = (name: string, cmd: string[], cwd: string, env?: Record<string, 
 
 // 기동 시험은 반드시 마지막이다 — 웹 빌드까지 끝난 상태로 띄워야 실제 배포본과 같다
 export const defaultGates = (): Gate[] => [
-  cmdGate("테스트", ["bun", "test"], "server", { NODE_ENV: "test" }),
-  cmdGate("타입검사", ["bunx", "tsc", "--noEmit"], "server"),
-  cmdGate("웹 빌드", ["bun", "run", "build"], "web"),
+  cmdGate("테스트", [BUN, "test"], "server", { NODE_ENV: "test" }),
+  cmdGate("타입검사", [BUN, "x", "tsc", "--noEmit"], "server"),
+  cmdGate("웹 빌드", [BUN, "run", "build"], "web"),
   { name: "기동 시험", run: bootCheck },
 ];
 
@@ -117,11 +129,19 @@ export async function applyRelease(gates?: Gate[]): Promise<{ ok: true; version:
   const merged = git("merge", "--ff-only", CHANNEL);
   if (!merged.ok) return fail("병합", tail(merged.out));
 
-  const result = await runGates(gates ?? defaultGates());
-  if (!result.ok) {
+  // 병합한 뒤로는 어떤 경로로 빠져나가든 되돌려야 한다.
+  // 예외가 그냥 올라가면 반영만 된 채 재시작도 롤백도 없이 남는다(실제로 겪은 사고다).
+  const rollback = (stage: string, detail: string): Fail => {
     git("reset", "--hard", before);
-    run(["bun", "run", "build"], { cwd: join(ROOT, "web") }); // 되돌린 소스로 화면도 원상복구
-    return fail(result.stage, `${tail(result.out)}\n\n받기 전 상태(${before.slice(0, 7)})로 되돌렸습니다.`);
+    run([BUN, "run", "build"], { cwd: join(ROOT, "web") }); // 되돌린 소스로 화면도 원상복구
+    return fail(stage, `${tail(detail)}\n\n받기 전 상태(${before.slice(0, 7)})로 되돌렸습니다.`);
+  };
+
+  try {
+    const result = await runGates(gates ?? defaultGates());
+    if (!result.ok) return rollback(result.stage, result.out);
+  } catch (e) {
+    return rollback("검증", `예기치 못한 오류 — ${(e as Error).message}`);
   }
 
   setSetting("release_prev_sha", before);
@@ -138,7 +158,7 @@ export function revertRelease(): { ok: true; sha: string } | Fail {
 
   const r = git("reset", "--hard", prev);
   if (!r.ok) return fail("되돌리기", tail(r.out));
-  const build = run(["bun", "run", "build"], { cwd: join(ROOT, "web") });
+  const build = run([BUN, "run", "build"], { cwd: join(ROOT, "web") });
   if (!build.ok) return fail("웹 빌드", `코드는 되돌렸지만 화면 빌드에 실패했습니다 — ${tail(build.out)}`);
 
   setSetting("release_prev_sha", "");
@@ -150,15 +170,20 @@ const scheduleRestart = () => setTimeout(() => process.exit(0), 700);
 
 export const releaseRoute = new Hono()
   .get("/", (c) => c.json(releaseStatus()))
+  // 예외가 그대로 올라가면 화면에는 뜻을 알 수 없는 "HTTP 500"만 뜬다 — 사유를 실어 보낸다
   .post("/apply", async (c) => {
-    const r = await applyRelease();
-    if (!r.ok) return c.json(r, 400);
-    scheduleRestart();
-    return c.json({ ...r, restarting: true });
+    try {
+      const r = await applyRelease();
+      if (!r.ok) return c.json(r, 400);
+      scheduleRestart();
+      return c.json({ ...r, restarting: true });
+    } catch (e) { return c.json({ ok: false, error: `적용 중 오류 — ${(e as Error).message}` }, 500); }
   })
   .post("/revert", (c) => {
-    const r = revertRelease();
-    if (!r.ok) return c.json(r, 400);
-    scheduleRestart();
-    return c.json({ ...r, restarting: true });
+    try {
+      const r = revertRelease();
+      if (!r.ok) return c.json(r, 400);
+      scheduleRestart();
+      return c.json({ ...r, restarting: true });
+    } catch (e) { return c.json({ ok: false, error: `되돌리기 중 오류 — ${(e as Error).message}` }, 500); }
   });

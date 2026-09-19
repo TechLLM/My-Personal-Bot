@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { db } from "./db";
-import { evaluateRelease, runGates, defaultGates, bootCheck, type Gate } from "./release";
+import { evaluateRelease, runGates, defaultGates, bootCheck, run, BUN, type Gate } from "./release";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
 
@@ -67,6 +67,21 @@ test("마지막 단계의 실패도 놓치지 않는다", async () => {
   expect(r.ok).toBe(false);
   if (!r.ok) expect(r.stage).toBe("기동 시험");
   expect(log).toEqual(["테스트", "기동 시험"]);
+});
+
+// 2026-09-19 회귀: launchd로 뜬 서버가 "bun"을 PATH에서 찾지 못해 spawn이 예외를 던졌고,
+// 그 예외가 롤백을 건너뛰어 병합만 된 채 재시작도 되돌리기도 없이 HTTP 500만 남았다.
+
+test("하위 명령은 PATH가 아니라 지금 돌고 있는 실행 파일로 부른다", () => {
+  expect(BUN.startsWith("/")).toBe(true);
+  // 게이트가 "bun"을 이름으로 부르면 launchd 환경에서 다시 같은 사고가 난다
+  expect(BUN).not.toBe("bun");
+});
+
+test("실행 파일을 찾지 못해도 예외 대신 실패로 돌려준다", () => {
+  const r = run(["/nonexistent/definitely-not-here"], {});
+  expect(r.ok).toBe(false);
+  expect(r.out).toContain("실행할 수 없습니다");
 });
 
 test("기동 시험은 뜨지 못하는 코드를 잡아낸다", async () => {
