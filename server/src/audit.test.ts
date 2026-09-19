@@ -91,3 +91,12 @@ test("문단 반복 검출은 짧은 줄을 무시한다", () => {
   const long = "이 문단은 서른 자가 넘는 충분히 긴 문단이라 반복 검출 대상입니다.";
   expect(repeatedParagraph(`${long}\n\n${long}`)?.count).toBe(2);
 });
+
+test("짧은 템플릿 스킬은 적용 조건을 요구하지 않는다", () => {
+  ins({ is_boss: 1 });
+  const add = db.prepare("INSERT INTO skills (id, name, prompt, created_at, disabled) VALUES (?,?,?,0,0)");
+  add.run("s1", "요약", "다음 내용을 핵심만 간결하게 요약해줘:");                       // 템플릿 — 제외
+  add.run("s2", "그룹웨어-메일조회", "절차를 길게 설명하는 학습된 스킬 본문입니다. ".repeat(12)); // 절차 스킬 — 요구
+  const found = auditOrg().filter((x) => x.id === "skill.no_condition").map((x) => x.detail);
+  expect(found).toEqual(["그룹웨어-메일조회"]);
+});
