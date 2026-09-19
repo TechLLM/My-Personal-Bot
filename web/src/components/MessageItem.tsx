@@ -11,6 +11,14 @@ import { HtmlPreview } from "./HtmlPreview";
 // 저장된 과거 메시지·스트리밍 중간에 섞인 장식 이모지를 렌더 단에서 제거 — 정돈된 선형 표기 유지
 const stripEmoji = (s: string) => s.replace(/\p{Extended_Pictographic}️?/gu, "").replace(/‍/g, "");
 
+// rehypeHighlight가 만든 토큰 트리에서 원본 텍스트만 다시 모은다
+interface HastElement { tagName?: string; type?: string; value?: string; properties?: { className?: unknown }; children?: HastElement[] }
+function hastText(node?: HastElement): string {
+  if (!node) return "";
+  if (node.type === "text") return node.value ?? "";
+  return (node.children ?? []).map(hastText).join("");
+}
+
 // 메시지 하단 액션 — 마우스 기기에선 hover 때만, 터치 기기에선 항상 보임
 const actionRow = "flex items-center gap-0.5 text-xs text-stone-400 transition-opacity can-hover:opacity-0 can-hover:group-hover:opacity-100";
 const actionBtn = "flex h-9 items-center rounded-lg px-2.5 hover:bg-stone-200/60 hover:text-stone-800 md:h-8 md:px-2";
@@ -135,11 +143,13 @@ export function MessageItem({
             remarkPlugins={[remarkGfm]}
             rehypePlugins={[rehypeHighlight]}
             components={{
-              // html·svg 코드블록은 격리된 미리보기로 — 봇이 표·차트·카드 같은 결과 화면을 직접 그릴 수 있다
-              pre({ children, ...props }) {
-                const el = (Array.isArray(children) ? children[0] : children) as { props?: { className?: string; children?: unknown } } | undefined;
-                const lang = /language-(\w+)/.exec(el?.props?.className ?? "")?.[1];
-                const code = String(el?.props?.children ?? "").replace(/\n$/, "");
+              // html·svg 코드블록은 격리된 미리보기로 — 봇이 표·차트·카드 같은 결과 화면을 직접 그릴 수 있다.
+              // 원문은 hast 노드에서 꺼낸다 — rehypeHighlight가 코드를 토큰 span으로 쪼개 children은 문자열이 아니다
+              pre({ children, node, ...props }) {
+                const codeNode = (node as HastElement | undefined)?.children?.find((c) => (c as HastElement).tagName === "code") as HastElement | undefined;
+                const cls = codeNode?.properties?.className;
+                const lang = /language-(\w+)/.exec(Array.isArray(cls) ? cls.join(" ") : String(cls ?? ""))?.[1];
+                const code = hastText(codeNode).replace(/\n$/, "");
                 if ((lang === "html" || lang === "svg") && code.includes("<"))
                   return <HtmlPreview code={code} streaming={streaming} />;
                 return <pre {...props}>{children}</pre>;
