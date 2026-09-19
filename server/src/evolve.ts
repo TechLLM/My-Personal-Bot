@@ -536,6 +536,31 @@ export function analyzeFailures(): { failureCount: number; summary: string } {
 
 interface Proposal { surface: string; target: string; column?: string; newValue?: string; filePath?: string; intent: string; summary: string }
 
+// 탐색 봇이 없는 스킬·봇 이름을 지어내면 사이클이 통째로 헛돈다.
+// 하루 한 번뿐인 사이클이라 한 건을 날리는 비용이 크다 (개선지침서 A-2).
+// 그래서 실재 목록을 프롬프트에 넣어 애초에 못 만들게 하고, 구체화 단계에서 한 번 더 거른다.
+export function liveTargets(): { table: string; names: string[] }[] {
+  const names = (t: string, where = "") =>
+    (db.prepare(`SELECT name FROM ${t} ${where} ORDER BY name`).all() as { name: string }[]).map((r) => r.name).filter(Boolean);
+  return [
+    { table: "skills", names: names("skills", "WHERE COALESCE(disabled, 0) = 0") },
+    { table: "agents", names: names("agents") },
+    { table: "routines", names: names("routines") },
+  ];
+}
+
+// db 표면의 대상이 실재하는지. code 표면(파일)은 여기서 보지 않는다 — 존재·보호 검사가 따로 있다
+export function targetExists(surf: { kind?: string; table?: string }, target: string): boolean {
+  if (surf.kind !== "db" || !surf.table) return true;
+  if (!/^[a-z_]+$/.test(surf.table)) return false;
+  return !!db.prepare(`SELECT 1 FROM ${surf.table} WHERE name = ? OR id = ?`).get(target, target);
+}
+
+const targetListForPrompt = (max = 40) => liveTargets()
+  .filter((g) => g.names.length)
+  .map((g) => `- ${g.table}: ${g.names.slice(0, max).join(", ")}${g.names.length > max ? ` 외 ${g.names.length - max}개` : ""}`)
+  .join("\n") || "- (등록된 대상 없음)";
+
 // 탐색 봇 실행 — 실제 파이프라인(도구 포함)으로 실패를 분석하고 개선 후보 1건을 JSON으로 제안
 export async function proposeCandidate(analysis: string): Promise<Proposal | null> {
   const { runAgentDetached, ensureBossAgent, findAgentByName } = await import("./team");
@@ -549,6 +574,9 @@ ${analysis}
 
 [변경 가능한 표면]
 ${surfList}
+
+[실재 대상 — target은 반드시 아래 목록에 있는 이름을 그대로 쓰세요. 목록에 없는 이름을 지어내면 후보가 버려집니다]
+${targetListForPrompt()}
 
 [탐색 방법]
 - skill_list로 기존 스킬을 보고 재사용·개선 여지를 먼저 찾으세요
@@ -588,6 +616,9 @@ export async function materializeCandidate(p: Proposal): Promise<Candidate | nul
   const surf = surfaces.surfaces.find((s) => s.id === p.surface);
   if (!surf) return null;
   if (surf.kind === "db") {
+    // 새 값을 통째로 받아왔더라도 대상이 실재하는지 먼저 본다.
+    // 예전에는 여기를 그냥 지나쳐 preflight에서야 "대상 없음"으로 걸렸고, 사이클 한 건이 통째로 버려졌다
+    if (!targetExists(surf, p.target)) return null;
     const col = p.column ?? surf.column;
     if (p.newValue)
       return { surface: p.surface, target: p.target, column: col, newValue: p.newValue, summary: p.summary ?? p.intent };
