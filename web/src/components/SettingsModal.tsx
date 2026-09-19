@@ -1050,6 +1050,26 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                           </button>
                         </div>
                       )}
+                      {!!rel.receipts?.length && (
+                        <div className="mt-2.5 border-t border-stone-100 pt-2.5">
+                          <div className="mb-1.5 text-2xs font-medium text-stone-500">적용 기록</div>
+                          <ul className="space-y-1.5">
+                            {rel.receipts.map((r, i) => (
+                              <li key={`${r.ts}-${i}`} className="text-2xs">
+                                <div className="flex gap-2">
+                                  <span className={`shrink-0 font-medium ${r.result === "applied" ? "text-emerald-700" : r.result === "rolled-back" ? "text-amber-700" : "text-red-700"}`}>
+                                    {r.result === "applied" ? "적용됨" : r.result === "rolled-back" ? "되돌림" : "중단됨"}
+                                  </span>
+                                  <span className="min-w-0 flex-1 truncate text-stone-600">{r.subjects[0] ?? `${r.from.slice(0, 7)} → ${r.to.slice(0, 7)}`}</span>
+                                  <span className="shrink-0 text-stone-400">{new Date(r.ts).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                                </div>
+                                {r.result === "applied" && !!r.gates.length && <div className="mt-0.5 text-stone-400">통과: {r.gates.join(" · ")}</div>}
+                                {r.error && <div className="mt-0.5 whitespace-pre-wrap break-words text-stone-500">{r.error}</div>}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
                     </>
                   )}
                 </div>

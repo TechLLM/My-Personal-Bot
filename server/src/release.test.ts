@@ -3,7 +3,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { db } from "./db";
-import { evaluateRelease, runGates, defaultGates, bootCheck, run, BUN, type Gate } from "./release";
+import {
+  evaluateRelease, runGates, defaultGates, bootCheck, run, BUN,
+  writeReceipt, readReceipts, interruptedReceipt, type Gate,
+} from "./release";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
 
@@ -101,6 +104,43 @@ test("기동 시험은 웹 빌드까지 끝난 뒤 마지막에 돌린다", () =
   // 순서가 바뀌면 빌드 전 코드로 띄우게 되어 실제 배포본을 검증하지 못한다
   const names = defaultGates().map((g) => g.name);
   expect(names).toEqual(["테스트", "타입검사", "웹 빌드", "기동 시험"]);
+});
+
+// --- 영수증·저널 (개선지침서 R1·R3) ---
+
+test("영수증은 쌓이고 최신이 먼저 나온다", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mybot-receipt-"));
+  const path = join(dir, "log.jsonl");
+  try {
+    writeReceipt({ ts: 1, from: "a", to: "b", subjects: ["첫 적용"], gates: ["테스트"], result: "applied" }, path);
+    writeReceipt({ ts: 2, from: "b", to: "c", subjects: ["둘째"], gates: [], result: "rolled-back", error: "테스트 실패" }, path);
+    const rs = readReceipts(10, path);
+    expect(rs.map((r) => r.ts)).toEqual([2, 1]);
+    expect(rs[0].result).toBe("rolled-back");
+    expect(rs[0].error).toContain("테스트 실패");
+    expect(rs[1].gates).toEqual(["테스트"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("영수증 파일이 없으면 빈 목록이다 — 조회가 실패하지 않는다", () => {
+  expect(readReceipts(10, join(tmpdir(), "mybot-no-such-file.jsonl"))).toEqual([]);
+});
+
+test("끝나지 못한 적용은 중단 영수증으로 남는다", () => {
+  const r = interruptedReceipt(JSON.stringify({ from: "aaa1111", to: "bbb2222", subjects: ["기동 시험 추가"], ts: 1 }), 99);
+  expect(r.result).toBe("interrupted");
+  expect(r.from).toBe("aaa1111");
+  expect(r.subjects).toEqual(["기동 시험 추가"]);
+  expect(r.ts).toBe(99);
+  expect(r.error).toContain("프로세스가 종료");
+});
+
+test("저널이 깨져 있어도 중단 사실은 남긴다", () => {
+  // 기록이 망가졌다고 조용히 넘어가면, 반영만 된 채 재시작이 안 된 상태를 놓친다
+  const r = interruptedReceipt("{깨진 JSON", 99);
+  expect(r.result).toBe("interrupted");
+  expect(r.from).toBe("");
+  expect(r.error).toContain("프로세스가 종료");
 });
 
 test("여러 조건이 동시에 어긋나면 가장 먼저 막아야 할 사유를 알린다", () => {

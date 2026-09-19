@@ -186,6 +186,12 @@ export interface ReleaseStatus {
   pending: { sha: string; subject: string; date: string }[];
   canApply: boolean; reason: string;
   canRevert: boolean; prevSha: string; appliedAt: number; appVersion: number;
+  receipts: ReleaseReceipt[];
+}
+
+export interface ReleaseReceipt {
+  ts: number; from: string; to: string; subjects: string[]; gates: string[];
+  result: "applied" | "rolled-back" | "interrupted"; error?: string;
 }
 
 export interface EvolveUpdate {

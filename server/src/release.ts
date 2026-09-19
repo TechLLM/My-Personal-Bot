@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { appendFileSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getSetting, setSetting } from "./db";
 
@@ -63,12 +64,70 @@ export function releaseStatus() {
     prevSha: prev.slice(0, 7),
     appliedAt: Number(getSetting("release_applied_at")) || 0,
     appVersion: Number(getSetting("app_version")) || 0,
+    receipts: readReceipts(5), // 무엇을 언제 적용했고 어떤 검사를 통과했는지
   };
 }
 
 // 실패는 문자열 하나로 돌려준다 — 화면이 서버 오류 메시지를 그대로 보여주기 때문이다
 type Fail = { ok: false; error: string };
 const fail = (stage: string, detail: string): Fail => ({ ok: false, error: `${stage} 단계에서 멈췄습니다 — ${detail}` });
+
+// ---------- 영수증·저널 (개선지침서 R1·R3) ----------
+
+export interface Receipt {
+  ts: number;
+  from: string;              // 적용 전 커밋
+  to: string;                // 적용 대상 커밋
+  subjects: string[];        // 적용하려는 커밋 제목
+  gates: string[];           // 통과한 검사
+  result: "applied" | "rolled-back" | "interrupted";
+  error?: string;
+}
+
+// 영수증은 DB가 아니라 파일에 쌓는다 — server/data/**는 보호 경로라 봇이 건드릴 수 없고,
+// DB 스키마를 건드리지 않아도 이력이 남는다.
+const LOG = join(ROOT, "server", "data", "release-log.jsonl");
+
+// 경로를 인자로 열어 둔다 — 릴리스 적용 때 테스트가 돌므로, 테스트가 운영 영수증에 섞이면 안 된다
+export function writeReceipt(r: Receipt, path = LOG) {
+  try { appendFileSync(path, JSON.stringify(r) + "\n"); } catch { /* 기록 실패가 배포를 막지는 않는다 */ }
+}
+
+export function readReceipts(limit = 20, path = LOG): Receipt[] {
+  try {
+    return readFileSync(path, "utf8").trim().split("\n").filter(Boolean)
+      .slice(-limit).reverse().map((l) => JSON.parse(l) as Receipt);
+  } catch { return []; }
+}
+
+// 저널 문자열 → 중단 영수증. 깨진 기록이어도 "중단됐다"는 사실은 남긴다
+export function interruptedReceipt(raw: string, now = Date.now()): Receipt {
+  let j: Partial<Receipt> = {};
+  try { j = JSON.parse(raw) as Partial<Receipt>; } catch { /* 형식이 깨져도 계속 진행한다 */ }
+  return {
+    ts: now, from: j.from ?? "", to: j.to ?? "", subjects: j.subjects ?? [], gates: [],
+    result: "interrupted",
+    error: "적용이 끝나기 전에 프로세스가 종료됐습니다. 현재 코드와 실행 버전을 확인하세요.",
+  };
+}
+
+// 적용을 시작할 때 "무엇을 하려는지"를 먼저 남긴다.
+// 재시작 뒤 프로세스가 돌아오지 못하거나 도중에 죽으면 이 기록만 남아,
+// 다음 기동에서 완료되지 못한 적용이 있었음을 알 수 있다.
+const beginJournal = (j: Omit<Receipt, "ts" | "result" | "gates">) =>
+  setSetting("release_inflight", JSON.stringify({ ...j, ts: Date.now() }));
+const clearJournal = () => setSetting("release_inflight", "");
+
+// 서버가 뜰 때 한 번 부른다. 끝나지 못한 적용이 있으면 영수증에 남기고 지운다.
+export function recoverJournal(): Receipt | null {
+  const raw = getSetting("release_inflight");
+  if (!raw) return null;
+  clearJournal();
+  const r = interruptedReceipt(raw);
+  writeReceipt(r);
+  console.warn(`[mybot] 완료되지 못한 릴리스 적용을 발견했습니다 (${r.from.slice(0, 7)} → ${r.to.slice(0, 7)})`);
+  return r;
+}
 
 export interface Gate { name: string; run: () => Promise<{ ok: boolean; out: string }> }
 
@@ -126,19 +185,29 @@ export async function applyRelease(gates?: Gate[]): Promise<{ ok: true; version:
   if (!st.canApply) return fail("점검", st.reason);
 
   const before = git("rev-parse", "HEAD").out;
+  const target = git("rev-parse", CHANNEL).out;
+  const subjects = st.pending.map((p) => p.subject);
+  beginJournal({ from: before, to: target, subjects }); // 손대기 전에 의도를 먼저 남긴다
+
   const merged = git("merge", "--ff-only", CHANNEL);
-  if (!merged.ok) return fail("병합", tail(merged.out));
+  if (!merged.ok) {
+    clearJournal();
+    return fail("병합", tail(merged.out));
+  }
 
   // 병합한 뒤로는 어떤 경로로 빠져나가든 되돌려야 한다.
   // 예외가 그냥 올라가면 반영만 된 채 재시작도 롤백도 없이 남는다(실제로 겪은 사고다).
   const rollback = (stage: string, detail: string): Fail => {
     git("reset", "--hard", before);
     run([BUN, "run", "build"], { cwd: join(ROOT, "web") }); // 되돌린 소스로 화면도 원상복구
+    clearJournal();
+    writeReceipt({ ts: Date.now(), from: before, to: target, subjects, gates: [], result: "rolled-back", error: `${stage}: ${tail(detail, 400)}` });
     return fail(stage, `${tail(detail)}\n\n받기 전 상태(${before.slice(0, 7)})로 되돌렸습니다.`);
   };
 
+  const list = gates ?? defaultGates();
   try {
-    const result = await runGates(gates ?? defaultGates());
+    const result = await runGates(list);
     if (!result.ok) return rollback(result.stage, result.out);
   } catch (e) {
     return rollback("검증", `예기치 못한 오류 — ${(e as Error).message}`);
@@ -148,6 +217,8 @@ export async function applyRelease(gates?: Gate[]): Promise<{ ok: true; version:
   setSetting("release_applied_at", String(Date.now()));
   const version = (Number(getSetting("app_version")) || 0) + 1;
   setSetting("app_version", String(version));
+  clearJournal();
+  writeReceipt({ ts: Date.now(), from: before, to: target, subjects, gates: list.map((g) => g.name), result: "applied" });
   return { ok: true, version, sha: git("rev-parse", "--short", "HEAD").out };
 }
 
