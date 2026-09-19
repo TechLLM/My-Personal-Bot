@@ -58,9 +58,58 @@ export function releaseStatus() {
 type Fail = { ok: false; error: string };
 const fail = (stage: string, detail: string): Fail => ({ ok: false, error: `${stage} 단계에서 멈췄습니다 — ${detail}` });
 
-// 검증은 반영 뒤에 돌린다 — 새 코드로 테스트·빌드가 통과해야 하기 때문이다.
+export interface Gate { name: string; run: () => Promise<{ ok: boolean; out: string }> }
+
+// 앞 단계가 실패하면 뒤 단계를 돌리지 않는다 — 깨진 코드로 빌드·기동을 시도해봐야 시간만 쓴다
+export async function runGates(gates: Gate[]): Promise<{ ok: true } | { ok: false; stage: string; out: string }> {
+  for (const g of gates) {
+    const r = await g.run();
+    if (!r.ok) return { ok: false, stage: g.name, out: r.out };
+  }
+  return { ok: true };
+}
+
+// 새 코드로 서버가 실제로 뜨는지 임시 포트에서 확인한다.
+// 이 단계가 없으면 기동 실패 시 launchd(KeepAlive)가 무한 재시작을 돌고,
+// 그때는 화면도 죽어 되돌리기 버튼조차 누를 수 없다.
+// NODE_ENV=test로 띄워 메모리 DB를 쓰게 하므로 운영 DB와 외부 채널은 건드리지 않는다.
+export async function bootCheck(cwd = join(ROOT, "server")): Promise<{ ok: boolean; out: string }> {
+  const port = 5390 + Math.floor(Math.random() * 40);
+  const proc = Bun.spawn(["bun", "src/index.ts"], {
+    cwd,
+    env: { ...process.env, MYBOT_PORT: String(port), MYBOT_HOST: "127.0.0.1", NODE_ENV: "test" },
+    stdout: "pipe", stderr: "pipe",
+  });
+  try {
+    for (let i = 0; i < 40; i++) {
+      if (proc.exitCode !== null) {
+        const err = await new Response(proc.stderr as ReadableStream).text().catch(() => "");
+        return { ok: false, out: `새 코드가 기동 중 종료됐습니다 (exit ${proc.exitCode})\n${tail(err, 600)}` };
+      }
+      try {
+        const r = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(1000) });
+        if (r.ok) return { ok: true, out: "" };
+      } catch { /* 아직 안 떴다 — 계속 기다린다 */ }
+      await Bun.sleep(250);
+    }
+    return { ok: false, out: "10초 안에 health 응답이 없었습니다" };
+  } finally { proc.kill(); }
+}
+
+const cmdGate = (name: string, cmd: string[], cwd: string, env?: Record<string, string>): Gate =>
+  ({ name, run: async () => run(cmd, { cwd: join(ROOT, cwd), env }) });
+
+// 기동 시험은 반드시 마지막이다 — 웹 빌드까지 끝난 상태로 띄워야 실제 배포본과 같다
+export const defaultGates = (): Gate[] => [
+  cmdGate("테스트", ["bun", "test"], "server", { NODE_ENV: "test" }),
+  cmdGate("타입검사", ["bunx", "tsc", "--noEmit"], "server"),
+  cmdGate("웹 빌드", ["bun", "run", "build"], "web"),
+  { name: "기동 시험", run: bootCheck },
+];
+
+// 검증은 반영 뒤에 돌린다 — 새 코드로 통과해야 의미가 있기 때문이다.
 // 하나라도 실패하면 받기 전 커밋으로 되돌려 서비스를 원래 상태로 남긴다.
-export function applyRelease(): { ok: true; version: number; sha: string } | Fail {
+export async function applyRelease(gates?: Gate[]): Promise<{ ok: true; version: number; sha: string } | Fail> {
   const st = releaseStatus();
   if (!st.canApply) return fail("점검", st.reason);
 
@@ -68,18 +117,12 @@ export function applyRelease(): { ok: true; version: number; sha: string } | Fai
   const merged = git("merge", "--ff-only", CHANNEL);
   if (!merged.ok) return fail("병합", tail(merged.out));
 
-  const rollback = (stage: string, out: string): Fail => {
+  const result = await runGates(gates ?? defaultGates());
+  if (!result.ok) {
     git("reset", "--hard", before);
     run(["bun", "run", "build"], { cwd: join(ROOT, "web") }); // 되돌린 소스로 화면도 원상복구
-    return fail(stage, `${tail(out)}\n\n받기 전 상태(${before.slice(0, 7)})로 되돌렸습니다.`);
-  };
-
-  const tests = run(["bun", "test"], { cwd: join(ROOT, "server"), env: { NODE_ENV: "test" } });
-  if (!tests.ok) return rollback("테스트", tests.out);
-  const types = run(["bunx", "tsc", "--noEmit"], { cwd: join(ROOT, "server") });
-  if (!types.ok) return rollback("타입검사", types.out);
-  const build = run(["bun", "run", "build"], { cwd: join(ROOT, "web") });
-  if (!build.ok) return rollback("웹 빌드", build.out);
+    return fail(result.stage, `${tail(result.out)}\n\n받기 전 상태(${before.slice(0, 7)})로 되돌렸습니다.`);
+  }
 
   setSetting("release_prev_sha", before);
   setSetting("release_applied_at", String(Date.now()));
@@ -107,8 +150,8 @@ const scheduleRestart = () => setTimeout(() => process.exit(0), 700);
 
 export const releaseRoute = new Hono()
   .get("/", (c) => c.json(releaseStatus()))
-  .post("/apply", (c) => {
-    const r = applyRelease();
+  .post("/apply", async (c) => {
+    const r = await applyRelease();
     if (!r.ok) return c.json(r, 400);
     scheduleRestart();
     return c.json({ ...r, restarting: true });
