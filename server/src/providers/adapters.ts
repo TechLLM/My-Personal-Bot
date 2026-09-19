@@ -2,7 +2,7 @@
 // 각각 MyBot의 chatOnce/streamChat 인터페이스로 변환
 import { spawn } from "node:child_process";
 import type { Endpoint } from "./index";
-import { CLI_PATH_PREFIX } from "./registry";
+import { CLI_PATH_PREFIX, refreshCodexAuth, refreshGeminiAuth } from "./registry";
 import type { ChatResult, ToolCall, StreamEvent } from "./openaiCompat";
 
 // 호출별 상한 — 외부 signal이 있어도 개별 호출은 이 상한 안에서 끝나야 한다.
@@ -49,9 +49,10 @@ function toResponsesInput(msgs: Msg[]): { instructions?: string; input: any[] } 
   return { instructions: instructions.filter(Boolean).join("\n\n") || undefined, input };
 }
 
-function responsesBody(endpoint: Endpoint, model: string, messages: Msg[], tools: any[], stream: boolean, toolChoice?: string | object): any {
+function responsesBody(endpoint: Endpoint, model: string, messages: Msg[], tools: any[], stream: boolean, toolChoice?: string | object, reasoningEffort?: string): any {
   const { instructions, input } = toResponsesInput(messages);
   const body: any = { model, instructions, input, stream: true, store: false }; // codex 백엔드는 stream 필수
+  if (reasoningEffort) body.reasoning = { effort: reasoningEffort };
   void stream;
   if (tools?.length) {
     body.tools = tools.map((t) => ({ type: "function", name: t.function.name, description: t.function.description, parameters: t.function.parameters ?? { type: "object" } }));
@@ -93,9 +94,11 @@ function fromResponses(j: any): ChatResult {
   return { content: reasoning ? `<think>${reasoning}</think>\n\n${content}` : content, toolCalls: parts.calls.length ? parts.calls : undefined };
 }
 
-export async function responsesChatOnce(endpoint: Endpoint, model: string, messages: Msg[], opts: { signal?: AbortSignal; tools?: any[]; toolChoice?: string | object } = {}): Promise<ChatResult> {
+export async function responsesChatOnce(endpoint: Endpoint, model: string, messages: Msg[], opts: { signal?: AbortSignal; tools?: any[]; toolChoice?: string | object; reasoningEffort?: string } = {}): Promise<ChatResult> {
   const base = (endpoint.baseUrl ?? "https://api.openai.com/v1").replace(/\/$/, "");
   let lastErr: Error | null = null;
+  let effort: string | undefined = opts.reasoningEffort;
+  let refreshed = false; // 401 token_expired → OAuth 갱신 후 재시도는 한 번
   for (let attempt = 0; attempt < 3; attempt++) {
     if (opts.signal?.aborted) break;
     if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
@@ -103,7 +106,7 @@ export async function responsesChatOnce(endpoint: Endpoint, model: string, messa
     try {
       res = await fetch(`${base}/responses`, {
         method: "POST", headers: responsesHeaders(endpoint),
-        body: JSON.stringify(responsesBody(endpoint, model, messages, opts.tools ?? [], true, opts.toolChoice)),
+        body: JSON.stringify(responsesBody(endpoint, model, messages, opts.tools ?? [], true, opts.toolChoice, effort)),
         signal: callSignal(opts.signal),
       });
     } catch (e) {
@@ -113,6 +116,14 @@ export async function responsesChatOnce(endpoint: Endpoint, model: string, messa
     if (!res.ok) {
       const txt = (await res.text()).slice(0, 300);
       const err = new Error(`오류 ${res.status}: ${txt}`);
+      // reasoning effort 미지원 → 파라미터를 빼고 재시도 (한 번)
+      if (res.status === 400 && effort && /reasoning|effort/i.test(txt)) { effort = undefined; continue; }
+      // 구독 OAuth 토큰 만료 — refresh_token으로 갱신한 뒤 같은 요청을 재시도한다
+      if (res.status === 401 && /token_expired|unauthorized|invalid.*token/i.test(txt) && !refreshed) {
+        refreshed = true;
+        const fresh = await refreshCodexAuth();
+        if (fresh) { endpoint.accessToken = fresh; continue; }
+      }
       if (res.status >= 500 || res.status === 429) { lastErr = err; continue; }
       throw err;
     }
@@ -133,15 +144,28 @@ export async function responsesChatOnce(endpoint: Endpoint, model: string, messa
   throw lastErr ?? new Error(opts.signal?.aborted ? "작업 중단 — 중지 요청 또는 시간 초과" : "responses 호출 실패");
 }
 
-export async function* responsesStream(endpoint: Endpoint, model: string, messages: Msg[], opts: { signal?: AbortSignal; tools?: any[] } = {}): AsyncGenerator<StreamEvent> {
+export async function* responsesStream(endpoint: Endpoint, model: string, messages: Msg[], opts: { signal?: AbortSignal; tools?: any[]; reasoningEffort?: string } = {}): AsyncGenerator<StreamEvent> {
   const base = (endpoint.baseUrl ?? "https://api.openai.com/v1").replace(/\/$/, "");
-  const res = await fetch(`${base}/responses`, {
+  // reasoning effort 미지원 시 400 — 파라미터를 빼고 한 번 재시도
+  let effort: string | undefined = opts.reasoningEffort;
+  const doFetch = () => fetch(`${base}/responses`, {
     method: "POST", headers: responsesHeaders(endpoint),
-    body: JSON.stringify(responsesBody(endpoint, model, messages, opts.tools ?? [], true)),
+    body: JSON.stringify(responsesBody(endpoint, model, messages, opts.tools ?? [], true, undefined, effort)),
     signal: callSignal(opts.signal, 300_000),
   });
+  let res = await doFetch();
+  if (!res.ok && res.status === 400 && effort && /reasoning|effort/i.test(await res.text().catch(() => ""))) {
+    effort = undefined;
+    res = await doFetch();
+  }
+  // 구독 OAuth 토큰 만료(401) — refresh_token으로 갱신 후 한 번 재시도
+  let errBody = "";
+  if (!res.ok && res.status === 401 && /token_expired|unauthorized|invalid.*token/i.test((errBody = await res.text().catch(() => "")))) {
+    const fresh = await refreshCodexAuth();
+    if (fresh) { endpoint.accessToken = fresh; res = await doFetch(); errBody = ""; }
+  }
   if (!res.ok || !res.body) {
-    const body = await res.text().catch(() => "");
+    const body = errBody || await res.text().catch(() => "");
     yield { type: "error", error: `${endpoint.name} ${res.status}: ${body.slice(0, 300)}` };
     return;
   }
@@ -279,6 +303,7 @@ function fromGemini(j: any): ChatResult {
 
 export async function geminiChatOnce(endpoint: Endpoint, model: string, messages: Msg[], opts: { signal?: AbortSignal; tools?: any[] } = {}): Promise<ChatResult> {
   let lastErr: Error | null = null;
+  let refreshed = false; // 401 → OAuth 갱신 후 재시도는 한 번
   for (let attempt = 0; attempt < 3; attempt++) {
     if (opts.signal?.aborted) break;
     if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
@@ -296,6 +321,11 @@ export async function geminiChatOnce(endpoint: Endpoint, model: string, messages
     if (!res.ok) {
       const txt = (await res.text()).slice(0, 300);
       const err = new Error(`오류 ${res.status}: ${txt}`);
+      if (res.status === 401 && !refreshed) {
+        refreshed = true;
+        const fresh = await refreshGeminiAuth();
+        if (fresh) { endpoint.accessToken = fresh; continue; }
+      }
       if (res.status >= 500 || res.status === 429) { lastErr = err; continue; }
       throw err;
     }
@@ -305,11 +335,23 @@ export async function geminiChatOnce(endpoint: Endpoint, model: string, messages
 }
 
 export async function* geminiStream(endpoint: Endpoint, model: string, messages: Msg[], opts: { signal?: AbortSignal; tools?: any[] } = {}): AsyncGenerator<StreamEvent> {
-  const res = await fetch(geminiUrl(endpoint, model, true), {
+  let res = await fetch(geminiUrl(endpoint, model, true), {
     method: "POST", headers: geminiHeaders(endpoint),
     body: JSON.stringify(geminiBody(endpoint, model, messages, opts.tools ?? [])),
     signal: callSignal(opts.signal, 300_000),
   });
+  // 구독 OAuth 토큰 만료(401) — refresh_token으로 갱신 후 한 번 재시도
+  if (!res.ok && res.status === 401) {
+    const fresh = await refreshGeminiAuth();
+    if (fresh) {
+      endpoint.accessToken = fresh;
+      res = await fetch(geminiUrl(endpoint, model, true), {
+        method: "POST", headers: geminiHeaders(endpoint),
+        body: JSON.stringify(geminiBody(endpoint, model, messages, opts.tools ?? [])),
+        signal: callSignal(opts.signal, 300_000),
+      });
+    }
+  }
   if (!res.ok || !res.body) {
     const body = await res.text().catch(() => "");
     yield { type: "error", error: `${endpoint.name} ${res.status}: ${body.slice(0, 300)}` };

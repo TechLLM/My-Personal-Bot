@@ -1,8 +1,8 @@
 // 프로바이더 레지스트리 — 프록시 없이 각 AI 서비스에 직접 연결
 // 자격증명은 로컬 저장소에서 자동 해석: 설정값 → opencode auth.json → codex/gemini OAuth 파일 → airoute 키체인 → 환경변수
 import { getSetting, setSetting } from "../db";
-import { existsSync, readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync, renameSync, readdirSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
 import { join } from "node:path";
 
 export type ProviderKind = "openai" | "responses" | "gemini" | "cli";
@@ -41,6 +41,32 @@ export const CLI_PATH_PREFIX = CLI_DIRS.slice(0, 4).join(":");
 const OPENCODE_AUTH = join(HOME, ".local", "share", "opencode", "auth.json");
 const CODEX_AUTH = join(HOME, ".codex", "auth.json");
 const GEMINI_AUTH = join(HOME, ".gemini", "oauth_creds.json");
+
+// ─── airoute (로컬 AI 프록시) ───
+// 실행 중이면 자기 설정 디렉터리에 포트(airoute.port)와 토큰(config.json)을 둔다.
+// 포트는 실행마다 바뀔 수 있으므로 airoute.port를 config.json의 port보다 우선한다.
+const AIROUTE_DIR = join(HOME, ".config", "airoute");
+export const AIROUTE_DEFAULT_PORT = 11441;
+export function airouteLocal(dir = AIROUTE_DIR): { port: number; token?: string } | null {
+  const cfg = readJson(join(dir, "config.json"));
+  if (!cfg) return null;
+  let port = Number(cfg.port) || 0;
+  try { port = Number(readFileSync(join(dir, "airoute.port"), "utf8").trim()) || port; } catch {}
+  return { port: port || AIROUTE_DEFAULT_PORT, token: cfg.token ? String(cfg.token) : undefined };
+}
+
+// airoute는 같은 모델을 `제공자/모델`과 짧은 이름으로 모두 내보낸다(237개 중 114개가 중복) —
+// 짧은 쪽을 접어 모델 선택기를 정리한다. 역할 별칭(main·fast·code…)은 대응하는 `제공자/모델`이 없어 그대로 남는다
+export function dedupeAirouteModels<T extends { id: string }>(models: T[]): T[] {
+  const qualified = new Set(models.filter((m) => m.id.includes("/")).map((m) => m.id.slice(m.id.indexOf("/") + 1)));
+  const seen = new Set<string>();
+  return models.filter((m) => {
+    if (seen.has(m.id)) return false; // 같은 id를 두 번 주는 경우
+    if (!m.id.includes("/") && qualified.has(m.id)) return false;
+    seen.add(m.id);
+    return true;
+  });
+}
 
 // ─── 기본 프로바이더 프리셋 ───
 export const PROVIDER_PRESETS: ProviderDef[] = [
@@ -115,6 +141,13 @@ export const PROVIDER_PRESETS: ProviderDef[] = [
     id: "ollama", name: "Ollama · 로컬", kind: "openai", baseUrl: "http://localhost:11434/v1",
     authType: "none", authLabel: "로컬 — 키 불필요",
   },
+  {
+    // 로컬 AI 프록시 — 여러 제공자를 한 엔드포인트로 묶고 별칭(main·fast·code…) 라우팅과 자체 폴백을 갖는다.
+    // 포트·토큰을 airoute 자기 설정에서 읽으므로 사용자가 키를 입력할 필요가 없다 (미실행이면 미인증으로 표시)
+    id: "airoute", name: "airoute · 로컬 프록시", kind: "openai",
+    baseUrl: `http://127.0.0.1:${AIROUTE_DEFAULT_PORT}/v1`, authType: "apikey",
+    authLabel: "로컬 설정 자동 인식", doc: "`airoute start`로 띄워 두면 포트와 토큰을 ~/.config/airoute에서 자동으로 읽습니다",
+  },
 ];
 
 // ─── 자격증명 해석 ───
@@ -134,7 +167,7 @@ export interface ResolvedAuth {
   apiKey?: string;
   accessToken?: string;
   accountId?: string;
-  source?: string;   // UI 표시: "설정" | "opencode" | "codex" | "gemini" | "keychain" | "env" | "cli"
+  source?: string;   // UI 표시: "설정" | "opencode" | "codex" | "gemini" | "airoute" | "keychain" | "env" | "cli"
   expired?: boolean;
 }
 
@@ -161,6 +194,139 @@ export function resolveAuth(def: ProviderDef): ResolvedAuth {
   return v;
 }
 
+// ─── codex(ChatGPT 구독) OAuth 토큰 갱신 ───
+// access_token은 JWT로 만료가 있고 refresh_token으로 갱신해야 한다 — 미갱신 시
+// 만료 경계에서 401 token_expired가 나고 실행이 통째로 error로 끝났다.
+// codex CLI와 같은 파일을 쓰므로 임시 파일 + rename으로 원자적으로 갱신한다.
+const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+let codexRefreshInflight: Promise<string | null> | null = null;
+
+// JWT의 exp 클레임(초)을 ms로 — access_token의 실제 만료 시각. 파일의 last_refresh는 발급 시각이라 만료 판정에 못 쓴다
+function jwtExp(token: string): number | undefined {
+  try {
+    const p = token.split(".")[1];
+    if (!p) return undefined;
+    const exp = JSON.parse(Buffer.from(p, "base64url").toString("utf8"))?.exp;
+    return typeof exp === "number" ? exp * 1000 : undefined;
+  } catch { return undefined; }
+}
+
+export function refreshCodexAuth(): Promise<string | null> {
+  codexRefreshInflight ??= (async () => {
+    try {
+      const c = readJson(CODEX_AUTH);
+      const rt = c?.tokens?.refresh_token;
+      if (!rt) return null;
+      const res = await fetch("https://auth.openai.com/oauth/token", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ client_id: CODEX_CLIENT_ID, grant_type: "refresh_token", refresh_token: rt }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) return null;
+      const j = (await res.json()) as any;
+      if (!j.access_token) return null;
+      c.tokens = { ...c.tokens, access_token: j.access_token, id_token: j.id_token ?? c.tokens.id_token, refresh_token: j.refresh_token ?? rt };
+      c.last_refresh = new Date().toISOString();
+      const tmp = `${CODEX_AUTH}.tmp-${process.pid}`;
+      writeFileSync(tmp, JSON.stringify(c));
+      renameSync(tmp, CODEX_AUTH);
+      authCache.delete("openai");
+      console.log("[mybot] codex OAuth 토큰 갱신 완료");
+      return j.access_token as string;
+    } catch (e) {
+      console.warn(`[mybot] codex OAuth 토큰 갱신 실패: ${(e as Error).message}`);
+      return null;
+    } finally {
+      codexRefreshInflight = null;
+    }
+  })();
+  return codexRefreshInflight;
+}
+
+// ─── Gemini(Code Assist 구독) OAuth 토큰 갱신 ───
+// 클라이언트 정보는 설치된 gemini-cli 패키지에서 읽는다 — 저장소에 박지 않는다.
+let geminiRefreshInflight: Promise<string | null> | null = null;
+
+function geminiClientCreds(): { clientId: string; clientSecret: string } | null {
+  const dirs = [
+    join(HOME, ".npm-global", "lib", "node_modules", "@google", "gemini-cli"),
+    "/opt/homebrew/lib/node_modules/@google/gemini-cli",
+    "/usr/local/lib/node_modules/@google/gemini-cli",
+  ];
+  for (const dir of dirs) {
+    try {
+      const bundle = join(dir, "bundle");
+      for (const f of readdirSync(bundle).filter((n) => n.endsWith(".js"))) {
+        const src = readFileSync(join(bundle, f), "utf8");
+        const id = src.match(/OAUTH_CLIENT_ID = "([^"]+)"/)?.[1];
+        const sec = src.match(/OAUTH_CLIENT_SECRET = "([^"]+)"/)?.[1];
+        if (id && sec) return { clientId: id, clientSecret: sec };
+      }
+    } catch {}
+  }
+  return null;
+}
+
+export function refreshGeminiAuth(): Promise<string | null> {
+  geminiRefreshInflight ??= (async () => {
+    try {
+      const c = readJson(GEMINI_AUTH);
+      const rt = c?.refresh_token;
+      const creds = geminiClientCreds();
+      if (!rt || !creds) return null;
+      const res = await fetch("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ client_id: creds.clientId, client_secret: creds.clientSecret, grant_type: "refresh_token", refresh_token: rt }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!res.ok) return null;
+      const j = (await res.json()) as any;
+      if (!j.access_token) return null;
+      Object.assign(c, { access_token: j.access_token, expires_in: j.expires_in, expiry_date: Date.now() + (j.expires_in ?? 3600) * 1000 });
+      const tmp = `${GEMINI_AUTH}.tmp-${process.pid}`;
+      writeFileSync(tmp, JSON.stringify(c));
+      renameSync(tmp, GEMINI_AUTH);
+      authCache.delete("gemini");
+      console.log("[mybot] gemini OAuth 토큰 갱신 완료");
+      return j.access_token as string;
+    } catch (e) {
+      console.warn(`[mybot] gemini OAuth 토큰 갱신 실패: ${(e as Error).message}`);
+      return null;
+    } finally {
+      geminiRefreshInflight = null;
+    }
+  })();
+  return geminiRefreshInflight;
+}
+
+// ─── 프로바이더 재로그인 — CLI의 브라우저 로그인을 백그라운드로 실행 ───
+// 완료되면 각 CLI가 자체 자격증명 파일을 갱신하고, 다음 resolveAuth가 새 토큰을 읽는다.
+const loginInFlight = new Map<string, number>();
+export function startProviderLogin(providerId: string): { ok: boolean; error?: string } {
+  const cmds: Record<string, { cmd: string; args: string[] }> = {
+    openai: { cmd: "codex", args: ["login"] },
+    grok: { cmd: "grok", args: ["login"] },
+    cursor: { cmd: "cursor-agent", args: ["login"] },
+  };
+  const spec = cmds[providerId];
+  if (!spec) return { ok: false, error: "이 프로바이더는 자동 재로그인을 지원하지 않습니다" };
+  const bin = findCli(spec.cmd);
+  if (!bin) return { ok: false, error: `${spec.cmd} CLI가 설치돼 있지 않습니다` };
+  const last = loginInFlight.get(providerId) ?? 0;
+  if (Date.now() - last < 60_000) return { ok: true }; // 이미 로그인 창이 열려 있음 — 중복 실행 방지
+  loginInFlight.set(providerId, Date.now());
+  try {
+    const child = spawn(bin, spec.args, { detached: true, stdio: "ignore", env: { ...process.env, PATH: `${CLI_PATH_PREFIX}:${process.env.PATH}` } });
+    child.unref();
+    console.log(`[mybot] ${providerId} 재로그인 프로세스 시작 (pid ${child.pid})`);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
 function resolveAuthUncached(def: ProviderDef): ResolvedAuth {
   // 0. 커스텀 프로바이더 저장 키
   if (def.apiKey) return { apiKey: def.apiKey, source: "설정" };
@@ -177,8 +343,10 @@ function resolveAuthUncached(def: ProviderDef): ResolvedAuth {
     if (def.id === "openai") {
       const c = readJson(CODEX_AUTH);
       if (c?.tokens?.access_token) {
-        const exp = Number(c.tokens?.expires_at ?? c.last_refresh ?? 0) || undefined;
-        return { accessToken: c.tokens.access_token, accountId: c.tokens.account_id, source: "codex", expired: !!(exp && exp < Date.now()) };
+        const exp = jwtExp(c.tokens.access_token);
+        const expired = !!(exp && exp < Date.now());
+        if (expired) void refreshCodexAuth(); // 만료 토큰을 미리 갱신해 다음 호출이 401로 죽지 않게 한다
+        return { accessToken: c.tokens.access_token, accountId: c.tokens.account_id, source: "codex", expired };
       }
       const oc = readJson(OPENCODE_AUTH)?.openai;
       if (oc?.access) return { accessToken: oc.access, accountId: oc.accountId, source: "opencode", expired: !!(oc.expires && oc.expires < Date.now()) };
@@ -186,7 +354,11 @@ function resolveAuthUncached(def: ProviderDef): ResolvedAuth {
     }
     if (def.id === "gemini") {
       const g = readJson(GEMINI_AUTH);
-      if (g?.access_token) return { accessToken: g.access_token, source: "gemini", expired: !!(g.expiry_date && g.expiry_date < Date.now()) };
+      if (g?.access_token) {
+        const expired = !!(g.expiry_date && g.expiry_date < Date.now());
+        if (expired) void refreshGeminiAuth();
+        return { accessToken: g.access_token, source: "gemini", expired };
+      }
       const oc = readJson(OPENCODE_AUTH)?.google;
       if (oc?.access) return { accessToken: oc.access, source: "opencode", expired: !!(oc.expires && oc.expires < Date.now()) };
       return {};
@@ -196,18 +368,24 @@ function resolveAuthUncached(def: ProviderDef): ResolvedAuth {
 
   if (def.authType === "none") return { source: "로컬" };
 
-  // 2. opencode auth.json — <id> / <id>-coding-plan 항목의 api 키
+  // 2. airoute — 로컬 프록시는 자기 설정 파일에 토큰을 둔다 (사용자가 키를 옮겨 적을 필요 없음)
+  if (def.id === "airoute") {
+    const t = airouteLocal()?.token;
+    return t ? { apiKey: t, source: "airoute" } : {};
+  }
+
+  // 3. opencode auth.json — <id> / <id>-coding-plan 항목의 api 키
   const oc = readJson(OPENCODE_AUTH);
   for (const k of def.ocKeys ?? [def.id]) {
     const ent = oc?.[k];
     if (ent?.type === "api" && ent.key) return { apiKey: ent.key, source: "opencode" };
   }
-  // 3. airoute 키체인
+  // 4. airoute 키체인
   if (def.keychain) {
     const k = keychainGet(def.keychain);
     if (k) return { apiKey: k, source: "keychain" };
   }
-  // 4. 환경변수
+  // 5. 환경변수
   if (def.env && process.env[def.env]) return { apiKey: process.env[def.env], source: "env" };
   return {};
 }
@@ -225,7 +403,12 @@ export function customProviders(): ProviderDef[] {
 }
 
 export function allProviders(): ProviderDef[] {
-  return [...PROVIDER_PRESETS, ...customProviders()];
+  // airoute는 실행마다 포트가 달라질 수 있어 프리셋의 기본 포트를 현재 값으로 덮어쓴다
+  const port = airouteLocal()?.port;
+  const presets = port && port !== AIROUTE_DEFAULT_PORT
+    ? PROVIDER_PRESETS.map((p) => (p.id === "airoute" ? { ...p, baseUrl: `http://127.0.0.1:${port}/v1` } : p))
+    : PROVIDER_PRESETS;
+  return [...presets, ...customProviders()];
 }
 
 export function findProvider(id: string): ProviderDef | undefined {

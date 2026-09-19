@@ -1,0 +1,79 @@
+import { test, expect } from "bun:test";
+import { db } from "./db";
+import { searchCriteria, pickTextPart, attachmentNames, htmlToText, parseUids, decodeBodyChunk, htmlBodyFragment } from "./mail";
+
+if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
+
+test("검색 조건 — today는 오늘 0시부터, 안읽음·발신자·제목 필터", () => {
+  const today = searchCriteria({ since: "today" }) as { since: Date };
+  const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+  expect(today.since.getTime()).toBe(midnight.getTime());
+  expect(searchCriteria({ since: "2026-09-18", unseen: true })).toMatchObject({ seen: false });
+  expect(searchCriteria({ from: "boss@kcc.co.kr", subject: "견적" })).toEqual({ from: "boss@kcc.co.kr", subject: "견적" });
+  // 조건이 없으면 빈 객체 — ALL 검색에 0건을 돌려주는 서버가 있어(DOPMAIL 실측) 호출부가 "최근 N건"으로 처리한다
+  expect(searchCriteria({})).toEqual({});
+  expect(searchCriteria({ since: "말도 안 되는 날짜" })).toEqual({});
+});
+
+test("본문 파트 — text/plain을 먼저 고르고 없으면 html을 고른다", () => {
+  const multipart = {
+    type: "multipart/alternative",
+    childNodes: [
+      { type: "text/html", part: "1.2", parameters: { charset: "utf-8" } },
+      { type: "text/plain", part: "1.1", parameters: { charset: "euc-kr" } },
+    ],
+  };
+  expect(pickTextPart(multipart)).toEqual({ part: "1.1", type: "text/plain", charset: "euc-kr" });
+  expect(pickTextPart({ type: "multipart/mixed", childNodes: [{ type: "text/html", part: "2", parameters: {} }] }))
+    .toMatchObject({ part: "2", type: "text/html" });
+  expect(pickTextPart({ type: "application/pdf", part: "1" })).toBeNull();
+  expect(pickTextPart(null)).toBeNull();
+});
+
+test("첨부 파일명만 뽑는다 — 인라인 이미지는 제외", () => {
+  const structure = {
+    type: "multipart/mixed",
+    childNodes: [
+      { type: "text/plain", part: "1" },
+      { type: "application/pdf", part: "2", disposition: "attachment", dispositionParameters: { filename: "견적서.pdf" } },
+      { type: "image/png", part: "3", disposition: "inline", parameters: { name: "logo.png" } },
+      { type: "application/vnd.ms-excel", part: "4", disposition: "ATTACHMENT", dispositionParameters: { filename: "수금현황.xlsx" } },
+    ],
+  };
+  expect(attachmentNames(structure)).toEqual(["견적서.pdf", "수금현황.xlsx"]);
+});
+
+test("html 본문은 읽을 수 있는 텍스트로 정리한다", () => {
+  const html = `<style>p{color:red}</style><div>안녕하세요<br/>제주항공 견적 건입니다.</div><p>기한: 9/22</p><script>x()</script>`;
+  expect(htmlToText(html)).toBe("안녕하세요\n제주항공 견적 건입니다.\n기한: 9/22");
+  expect(htmlToText("<p>A&nbsp;&amp;&nbsp;B</p>")).toBe("A & B");
+});
+
+test("uid는 쉼표·공백·배열로 여러 통을 받는다 — 한 연결로 묶어 읽기 위한 것", () => {
+  expect(parseUids({ uid: "101,102 103" })).toEqual(["101", "102", "103"]);
+  expect(parseUids({ uids: ["7", "7", "9"] })).toEqual(["7", "9"]); // 중복 제거
+  expect(parseUids({ id: "42" })).toEqual(["42"]);
+  expect(parseUids({ uid: "abc, 12" })).toEqual(["12"]); // 숫자가 아닌 값은 버린다
+  expect(parseUids({})).toEqual([]);
+});
+
+test("부분 수신 본문 조각 디코딩 — 전송 인코딩을 바이트 단계에서 먼저 푼다", () => {
+  // quoted-printable로 실린 UTF-8 한글 ("한글 = test")
+  const qp = Buffer.from("=ED=95=9C=EA=B8=80 =3D test", "ascii");
+  expect(decodeBodyChunk(qp, { part: "1", type: "text/plain", encoding: "quoted-printable", charset: "utf-8" })).toBe("한글 = test");
+  // base64 + html
+  const b64 = Buffer.from(Buffer.from("<p>제주항공 <b>견적</b></p>", "utf8").toString("base64"), "ascii");
+  expect(decodeBodyChunk(b64, { part: "1", type: "text/html", encoding: "base64", charset: "utf-8" })).toBe("제주항공 견적");
+  // 인코딩 없음 — 공백만 정리
+  expect(decodeBodyChunk(Buffer.from("줄1\n\n줄2  끝", "utf8"), { part: "1", type: "text/plain" })).toBe("줄1 줄2 끝");
+});
+
+test("HTML 조각은 head·style을 버리고 본문 영역만 남긴다", () => {
+  const frag = `<html><head><style>.a{color:red}</style></head><body><p>제주항공 견적 요청</p>`;
+  expect(htmlToText(htmlBodyFragment(frag))).toBe("제주항공 견적 요청");
+  // 잘려서 </style>이 없는 조각 — 끝까지 잘라내야 CSS가 미리보기를 채우지 않는다
+  const cut = `<html><head><style>@media not all and (min-resolution: 0.001dpcm) { img { top: -1px; }`;
+  expect(htmlToText(htmlBodyFragment(cut))).toBe("");
+  // 끝이 잘린 태그가 그대로 남으면 미리보기에 마크업이 보인다
+  expect(htmlToText(htmlBodyFragment('<body><p>점검 안내</p><td height="26" style="heig'))).toBe("점검 안내");
+});

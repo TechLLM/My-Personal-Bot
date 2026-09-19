@@ -1,4 +1,4 @@
-import type { Endpoint } from "./index";
+import type { Endpoint, Resolved } from "./index";
 import { resolveModel, nextInChain } from "./index";
 import { responsesChatOnce, responsesStream, geminiChatOnce, geminiStream, cliChatOnce, cliStream } from "./adapters";
 
@@ -30,35 +30,75 @@ function isTransientErr(e: unknown): boolean {
     || (e as Error)?.name === "TimeoutError";
 }
 
+// 인증 실패(401/403·토큰 만료·키 오류)는 재시도로 풀리지 않지만 다른 프로바이더로는 넘어가야 한다
+// 실측 2026-09-18: codex 토큰 만료 401에서 폴백 없이 봇 실행이 통째로 실패했다 (429·잔액부족은 이미 폴백 대상)
+function isAuthErr(e: unknown): boolean {
+  return /\b(401|403)\b|token_expired|invalid.?api.?key|unauthorized|authentication token/i.test(String((e as Error)?.message ?? e));
+}
+const shouldFallback = (e: unknown) => isTransientErr(e) || isAuthErr(e);
+
+// 프로바이더 원문 오류(JSON 덩어리)를 원인과 조치가 보이는 한 줄로 — 폴백까지 모두 실패해 사용자에게 갈 때 쓴다
+// ("에이전트 오류: 오류 401: {"error":{...}}"만 남아 실패 이유를 알 수 없다는 보고가 있었다)
+export function friendlyProviderError(msg: string): string {
+  if (/insufficient|balance|1113|CreditsError/i.test(msg)) return `모델 제공자 잔액이 부족해 호출이 거부됐습니다 — 결제 후 다시 시도하세요 (원문: ${msg.slice(0, 200)})`;
+  if (isAuthErr(msg)) return `모델 제공자 인증이 만료됐습니다 — 설정 > 프로바이더에서 재인증하세요 (원문: ${msg.slice(0, 200)})`;
+  if (/\b429\b|rate.?limit|1302/i.test(msg)) return `모델 제공자 요청 한도에 걸렸습니다 — 잠시 후 다시 시도하거나 다른 모델을 배정하세요 (원문: ${msg.slice(0, 200)})`;
+  return msg;
+}
+
+// 폴백을 부른 모델은 잠시 건너뛴다 — 예전엔 호출마다 같은 모델에서 백오프 재시도(1초·4초)를
+// 반복한 뒤에야 폴백해, 봇 호출 하나하나가 수 초씩 늦어지고 제한도 더 오래 풀리지 않았다.
+// 처음엔 429만 대상이었는데, 2026-09-18 devin 미로그인 모델이 호출마다 502를 맞고 폴백해 같은 실패가
+// 18회 반복됐다 — 폴백이 일어났다는 것 자체가 "이 모델은 지금 못 쓴다"는 신호라 실패 종류를 가리지 않는다.
+// 폴백할 다음 모델이 없으면 건너뛰지 않고 그대로 시도한다.
+const FAIL_COOLDOWN_MS = 120_000;
+const skipUntil = new Map<string, number>();
+const coolingDown = (key: string) => (skipUntil.get(key) ?? 0) > Date.now();
+
+// 폴백 체인에서 실제로 쓸 수 있는 다음 모델 — 해석 불가 항목과, 도구가 필요할 때 도구 미지원(CLI) 모델은 건너뛴다
+function nextUsable(key: string, needsTools: boolean): Resolved | null {
+  for (let next = nextInChain(key); next; next = nextInChain(next)) {
+    try {
+      const r = resolveModel(next);
+      if (!needsTools || r.endpoint.caps?.tools !== false) return r;
+    } catch {}
+  }
+  return null;
+}
+
 // 비스트리밍 호출 (도구 루프·내부용) — 프로바이더 폴백 체인 포함
 // HTTP 오류는 content로 위장하지 않고 throw — transient는 백오프 재시도 후 폴백 (사용자 abort 제외)
 export async function chatOnce(
   endpoint: Endpoint,
   model: string,
   messages: any[],
-  opts: { signal?: AbortSignal; tools?: { type: string; function: { name: string; description?: string; parameters?: object } }[]; toolChoice?: string | object } = {},
+  opts: { signal?: AbortSignal; tools?: { type: string; function: { name: string; description?: string; parameters?: object } }[]; toolChoice?: string | object; reasoningEffort?: string } = {},
 ): Promise<ChatResult> {
   let ep = endpoint, mdl = model, origin: string | null = null;
+  const needsTools = !!opts.tools?.length;
   for (;;) {
-    try {
-      const r = await chatOnceAttempt(ep, mdl, messages, opts);
-      r.model = mdl;
-      if (origin) r.fallbackFrom = origin;
-      return r;
-    } catch (e) {
-      if (opts.signal?.aborted || !isTransientErr(e)) throw e;
-      let next = nextInChain(`${ep.id}/${mdl}`);
-      while (next) {
-        let r;
-        try { r = resolveModel(next); } catch { next = nextInChain(next); continue; } // 해석 불가 항목은 건너뛴다
-        // 도구가 필요한 실행에서 도구 미지원(CLI) 모델은 폴백 대상이 아니다
-        if (opts.tools?.length && r.endpoint.caps?.tools === false) { next = nextInChain(next); continue; }
-        ({ endpoint: ep, model: mdl } = r); break;
+    const key = `${ep.id}/${mdl}`;
+    let next: Resolved | null = null;
+    let failure: unknown;
+    if (coolingDown(key) && (next = nextUsable(key, needsTools))) {
+      failure = new Error("최근 실패로 건너뜀 — 대기 없이 다음 모델로");
+    } else {
+      try {
+        const r = await chatOnceAttempt(ep, mdl, messages, opts);
+        r.model = mdl;
+        if (origin) r.fallbackFrom = origin;
+        return r;
+      } catch (e) {
+        if (opts.signal?.aborted || !shouldFallback(e)) throw e;
+        skipUntil.set(key, Date.now() + FAIL_COOLDOWN_MS);
+        next = nextUsable(key, needsTools);
+        if (!next) throw e;
+        failure = e;
       }
-      if (!next) throw e;
-      console.warn(`[mybot] 모델 폴백: ${endpoint.id}/${model} → ${ep.id}/${mdl} (${String((e as Error).message).slice(0, 80)})`);
-      origin ??= `${endpoint.id}/${model}`;
     }
+    console.warn(`[mybot] 모델 폴백: ${key} → ${next.endpoint.id}/${next.model} (${String((failure as Error).message).slice(0, 80)})`);
+    origin ??= `${endpoint.id}/${model}`;
+    ({ endpoint: ep, model: mdl } = next);
   }
 }
 
@@ -66,18 +106,21 @@ async function chatOnceAttempt(
   endpoint: Endpoint,
   model: string,
   messages: any[],
-  opts: { signal?: AbortSignal; tools?: { type: string; function: { name: string; description?: string; parameters?: object } }[]; toolChoice?: string | object } = {},
+  opts: { signal?: AbortSignal; tools?: { type: string; function: { name: string; description?: string; parameters?: object } }[]; toolChoice?: string | object; reasoningEffort?: string } = {},
 ): Promise<ChatResult> {
   // kind별 어댑터 디스패치 — responses(codex OAuth) / gemini(OAuth) / cli(로컬 브릿지)
   switch (endpoint.kind) {
-    case "responses": return responsesChatOnce(endpoint, model, messages, { signal: opts.signal, tools: opts.tools, toolChoice: opts.toolChoice });
+    case "responses": return responsesChatOnce(endpoint, model, messages, { signal: opts.signal, tools: opts.tools, toolChoice: opts.toolChoice, reasoningEffort: opts.reasoningEffort });
     case "gemini": return geminiChatOnce(endpoint, model, messages, { signal: opts.signal, tools: opts.tools });
     case "cli": return cliChatOnce(endpoint, model, messages, { signal: opts.signal });
   }
   // tool_choice 객체 형식은 프록시마다 다름 — airoute는 Responses식 폴백 형식만 받아 nested 형식을 400으로 거부.
   // 거부되면 tool_choice 없이 재시도 (호출 지시는 프롬프트·서버 폴백이 커버)
   let toolChoice: unknown = opts.toolChoice ?? "auto";
-  const makeBody = () => JSON.stringify({ model, messages, stream: false, ...(opts.tools?.length ? { tools: opts.tools, tool_choice: toolChoice } : {}) });
+  // 추론 강도 — 추론 모델이 매 호출 생성하는 숨은 thinking 토큰을 줄여 지연을 줄인다.
+  // 지원 안 하는 프로바이더는 무시하거나 400이므로 실패 시 파라미터를 빼고 재시도한다.
+  let effort: string | undefined = opts.reasoningEffort;
+  const makeBody = () => JSON.stringify({ model, messages, stream: false, ...(opts.tools?.length ? { tools: opts.tools, tool_choice: toolChoice } : {}), ...(effort ? { reasoning_effort: effort } : {}) });
   let lastErr: Error | null = null;
   const BACKOFF = [1000, 4000, 10_000]; // C9 — 지수 백오프
   let pendingWait: number | undefined; // Retry-After 헤더가 지정한 대기
@@ -107,6 +150,8 @@ async function chatOnceAttempt(
       const err = new Error(`오류 ${res.status}: ${txt}`);
       // tool_choice 형식 거부 → 형식을 빼고 재시도
       if (res.status === 400 && /tool_choice/i.test(txt) && toolChoice !== "auto") { toolChoice = "auto"; continue; }
+      // reasoning_effort 미지원 → 파라미터를 빼고 재시도 (한 번만)
+      if (res.status === 400 && effort && /reasoning|effort/i.test(txt)) { effort = undefined; continue; }
       if (res.status >= 500 || res.status === 429) {
         lastErr = err;
         // C9 — Retry-After 헤더 준수 (지정 없으면 위 백오프 적용)
@@ -141,33 +186,37 @@ export async function* streamChat(
   endpoint: Endpoint,
   model: string,
   messages: ChatMessage[],
-  opts: { signal?: AbortSignal; temperature?: number; maxTokens?: number } = {},
+  opts: { signal?: AbortSignal; temperature?: number; maxTokens?: number; reasoningEffort?: string } = {},
 ): AsyncGenerator<StreamEvent> {
   let ep = endpoint, mdl = model, origin: string | null = null;
   for (;;) {
+    const key = `${ep.id}/${mdl}`;
     let failMsg: string | null = null;
-    let produced = false;
-    let noted = !origin;
-    try {
-      for await (const ev of streamChatOnce(ep, mdl, messages, opts)) {
-        if (!noted) { yield { type: "reasoning", text: `⚠️ ${origin} 실패 — ${ep.id}/${mdl}로 폴백했습니다\n` }; noted = true; }
-        if (ev.type === "error" && !produced && isTransientErr(new Error(ev.error ?? ""))) { failMsg = ev.error ?? "오류"; break; }
-        if (ev.type === "content") produced = true;
-        yield ev;
+    let next: Resolved | null = null;
+    if (coolingDown(key) && (next = nextUsable(key, false))) {
+      failMsg = "최근 실패로 건너뜀 — 대기 없이 다음 모델로";
+    } else {
+      let produced = false;
+      let noted = !origin;
+      try {
+        for await (const ev of streamChatOnce(ep, mdl, messages, opts)) {
+          if (!noted) { yield { type: "reasoning", text: `⚠️ ${origin} 실패 — ${ep.id}/${mdl}로 폴백했습니다\n` }; noted = true; }
+          if (ev.type === "error" && !produced && shouldFallback(new Error(ev.error ?? ""))) { failMsg = ev.error ?? "오류"; break; }
+          if (ev.type === "content") produced = true;
+          yield ev;
+        }
+      } catch (e) {
+        if (opts.signal?.aborted || produced || !shouldFallback(e)) throw e; // 본문 출력이 시작된 뒤엔 중간 전환 금지
+        failMsg = String((e as Error).message);
       }
-    } catch (e) {
-      if (opts.signal?.aborted || produced || !isTransientErr(e)) throw e; // 본문 출력이 시작된 뒤엔 중간 전환 금지
-      failMsg = String((e as Error).message);
+      if (!failMsg) return;
+      skipUntil.set(key, Date.now() + FAIL_COOLDOWN_MS);
+      next = nextUsable(key, false);
+      if (!next) { yield { type: "error", error: failMsg }; return; }
     }
-    if (!failMsg) return;
-    let next = nextInChain(`${ep.id}/${mdl}`);
-    while (next) {
-      try { ({ endpoint: ep, model: mdl } = resolveModel(next)); break; }
-      catch { next = nextInChain(next); }
-    }
-    if (!next) { yield { type: "error", error: failMsg }; return; }
-    console.warn(`[mybot] 스트림 폴백: ${endpoint.id}/${model} → ${ep.id}/${mdl} (${failMsg.slice(0, 80)})`);
+    console.warn(`[mybot] 스트림 폴백: ${key} → ${next.endpoint.id}/${next.model} (${failMsg.slice(0, 80)})`);
     origin ??= `${endpoint.id}/${model}`;
+    ({ endpoint: ep, model: mdl } = next);
   }
 }
 
@@ -175,14 +224,16 @@ async function* streamChatOnce(
   endpoint: Endpoint,
   model: string,
   messages: ChatMessage[],
-  opts: { signal?: AbortSignal; temperature?: number; maxTokens?: number } = {},
+  opts: { signal?: AbortSignal; temperature?: number; maxTokens?: number; reasoningEffort?: string } = {},
 ): AsyncGenerator<StreamEvent> {
   // kind별 어댑터 디스패치
-  if (endpoint.kind === "responses") { yield* responsesStream(endpoint, model, messages, { signal: opts.signal }); return; }
+  if (endpoint.kind === "responses") { yield* responsesStream(endpoint, model, messages, { signal: opts.signal, reasoningEffort: opts.reasoningEffort }); return; }
   if (endpoint.kind === "gemini") { yield* geminiStream(endpoint, model, messages, { signal: opts.signal }); return; }
   if (endpoint.kind === "cli") { yield* cliStream(endpoint, model, messages, { signal: opts.signal }); return; }
 
-  const res = await fetch(`${endpoint.baseUrl}/chat/completions`, {
+  // 추론 강도 — 미지원 프로바이더는 400으로 거부하므로 실패 시 파라미터를 빼고 한 번 재시도
+  let effort: string | undefined = opts.reasoningEffort;
+  const doFetch = () => fetch(`${endpoint.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -194,11 +245,17 @@ async function* streamChatOnce(
       stream: true,
       ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
       ...(opts.maxTokens ? { max_tokens: opts.maxTokens } : {}),
+      ...(effort ? { reasoning_effort: effort } : {}),
       stream_options: { include_usage: true },
     }),
     // 호출별 상한은 외부 signal과 무관하게 항상 적용 — 무응답 프로바이더 hang 방지
     signal: opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(300_000)]) : AbortSignal.timeout(300_000),
   });
+  let res = await doFetch();
+  if (!res.ok && res.status === 400 && effort && /reasoning|effort/i.test(await res.text().catch(() => ""))) {
+    effort = undefined;
+    res = await doFetch();
+  }
 
   if (!res.ok || !res.body) {
     const body = await res.text().catch(() => "");

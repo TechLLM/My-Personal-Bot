@@ -46,3 +46,71 @@ test("조직 유지 지침이 없는 옛 기본 역할문은 최신 기본 역�
   expect(getRole()).toContain("조직 유지");
   expect(getRole()).not.toContain("[CEO 권한]");
 });
+
+test("bsk·ego_run 도구가 브라우저 경로로 디스패치된다 (MCP 새움 방지)", async () => {
+  const { isBrowserish } = await import("./toolloop");
+  expect(isBrowserish("bsk")).toBe(true);
+  expect(isBrowserish("ego_run")).toBe(true);
+  expect(isBrowserish("browser_open")).toBe(true);
+  expect(isBrowserish("shell_run")).toBe(false);
+  expect(isBrowserish("agent_list")).toBe(false);
+});
+
+// 2026-09-18 승인 루프 사고 회귀 — {"bots":[],"name":"X"} 형태의 호출이 빈 배열 때문에
+// "이름이 없습니다"로 실패해 승인→실행실패→재요청 팝업이 6회 반복됐다
+test("agent_create — 빈 bots 배열과 함께 온 단일 name은 단일 생성으로 처리된다", async () => {
+  const { callBuiltin } = await import("./team");
+  const out = await callBuiltin("agent_create", { bots: [], model: "", name: "회귀테스트봇", role: "테스트 역할" }, BOSS_ID);
+  expect(out).toContain("봇 생성됨: 회귀테스트봇");
+  db.prepare("DELETE FROM agents WHERE name = '회귀테스트봇'").run();
+});
+
+test("execToolCall — 빈 배열 인자가 제거돼 승인 게이트가 단일 생성으로 인식한다", async () => {
+  const { execToolCall } = await import("./toolloop");
+  const r = await execToolCall(
+    { id: "t1", name: "agent_create", arguments: JSON.stringify({ bots: [], name: "회귀테스트봇2", role: "역할" }) },
+    { agentId: BOSS_ID, context: "", browserKey: "k" },
+  );
+  expect(r.out).toContain("사용자 승인이 필요합니다");
+  const pend = db.prepare("SELECT COUNT(*) c FROM approval_requests WHERE status = 'pending' AND tool = 'agent_create'").get() as { c: number };
+  expect(pend.c).toBe(1);
+  db.prepare("DELETE FROM approval_requests").run();
+});
+
+test("gateApproval — 이름이 진짜 없는 agent_create는 팝업 없이 즉시 오류를 돌려준다", async () => {
+  const { gateApproval } = await import("./approvals");
+  const out = gateApproval("agent_create", { role: "역할만 있음" }, BOSS_ID, "테스트");
+  expect(out).toContain("이름이 없습니다");
+  const pend = db.prepare("SELECT COUNT(*) c FROM approval_requests WHERE status = 'pending'").get() as { c: number };
+  expect(pend.c).toBe(0);
+});
+
+test("agent_direct — instructions 빈 배열과 지시 없음은 실행 없이 오류를 돌려준다", async () => {
+  const { execToolCall } = await import("./toolloop");
+  const r = await execToolCall(
+    { id: "t2", name: "agent_direct", arguments: JSON.stringify({ names: ["누군가"], instructions: [] }) },
+    { agentId: BOSS_ID, context: "", browserKey: "k" },
+  );
+  expect(r.out).toContain("지시 내용이 없습니다");
+});
+
+test("같은 대상의 승인 실행이 연속 실패하면 추가 팝업 없이 실패를 돌려준다", async () => {
+  const { gateApproval } = await import("./approvals");
+  const ins = db.prepare("INSERT INTO approval_requests (id, tool, args, summary, agent_id, status, result, created_at, resolved_at) VALUES (?, 'agent_create', ?, 's', ?, 'approved', '오류: 생성할 봇 이름이 없습니다', ?, ?)");
+  ins.run("e1", JSON.stringify({ name: "실패봇" }), BOSS_ID, 1, Date.now());
+  ins.run("e2", JSON.stringify({ name: "실패봇", role: "다른 문구" }), BOSS_ID, 2, Date.now());
+  const out = gateApproval("agent_create", { name: "실패봇", role: "또 다른 문구" }, BOSS_ID, "테스트");
+  expect(out).toContain("연속 실패");
+  const pend = db.prepare("SELECT COUNT(*) c FROM approval_requests WHERE status = 'pending'").get() as { c: number };
+  expect(pend.c).toBe(0);
+  db.prepare("DELETE FROM approval_requests").run();
+});
+
+test("looksLikeToolError — 도구 오류 문자열과 성공 문자열을 구분한다", async () => {
+  const { looksLikeToolError } = await import("./approvals");
+  expect(looksLikeToolError("오류: 생성할 봇 이름이 없습니다")).toBe(true);
+  expect(looksLikeToolError("권한 없음: 봇 생성은 Eggbot만 수행합니다")).toBe(true);
+  expect(looksLikeToolError("실행 오류: UNIQUE constraint failed")).toBe(true);
+  expect(looksLikeToolError("봇 생성됨: 골든테스트봇")).toBe(false);
+  expect(looksLikeToolError("봇 삭제됨: X [알림] 조직 관리는 Eggbot 전담입니다")).toBe(false);
+});

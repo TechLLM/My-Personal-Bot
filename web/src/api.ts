@@ -75,8 +75,11 @@ export function mybotFetch(input: string, init: RequestInit = {}): Promise<Respo
   });
 }
 
-const j = (r: Response) => {
-  if (!r.ok) throw new Error(`${r.status}`);
+const j = async (r: Response) => {
+  if (!r.ok) {
+    const body = (await r.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `HTTP ${r.status}`);
+  }
   return r.json();
 };
 
@@ -86,6 +89,7 @@ export const api = {
   providers: () => mybotFetch("/api/models/providers").then(j) as Promise<{ providers: ProviderCard[] }>,
   testProvider: (id: string) => mybotFetch(`/api/models/providers/${id}/test`, { method: "POST" }).then(j) as Promise<{ ok: boolean; ms?: number; detail?: string; error?: string }>,
   setProviderKey: (id: string, key: string) => mybotFetch(`/api/models/providers/${id}/key`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key }) }).then(j),
+  reauthProvider: (id: string) => mybotFetch(`/api/models/providers/${id}/reauth`, { method: "POST" }).then(j) as Promise<{ ok: boolean; method?: string; detail?: string; error?: string; needsKey?: boolean }>,
   toggleProvider: (id: string) => mybotFetch(`/api/models/providers/${id}/toggle`, { method: "POST" }).then(j),
   addCustomProvider: (p: { id: string; name?: string; baseUrl: string; apiKey?: string; models?: string[] }) =>
     mybotFetch("/api/models/providers/custom", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) }).then(j),
@@ -101,6 +105,7 @@ export const api = {
 
   agents: () => mybotFetch("/api/agents").then(j) as Promise<{ agents: Agent[] }>,
   agentsRunning: () => mybotFetch("/api/agents/running").then(j) as Promise<{ running: { id: string; tool: string | null }[] }>,
+  stopAllRuns: () => mybotFetch("/api/agents/stop-all", { method: "POST" }).then(j) as Promise<{ ok: boolean; stopped: { runs: number; chats: number; messages: number } }>,
   addAgent: (a: { name: string; role_prompt: string; model?: string; avatar?: string }) =>
     mybotFetch("/api/agents", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(a) }).then(j),
   updateAgent: (id: string, patch: Partial<Agent>) =>
@@ -135,7 +140,18 @@ export const api = {
   deleteGroup: (id: string) => mybotFetch(`/api/groups/${id}`, { method: "DELETE" }).then(j),
   groupConversation: (id: string) => mybotFetch(`/api/groups/${id}/conversation`, { method: "POST" }).then(j) as Promise<{ conversation_id: string }>,
   duplicateAgent: (id: string) => mybotFetch(`/api/agents/${id}/duplicate`, { method: "POST" }).then(j),
+  // 자기개선 업데이트 센터 — 개발 인스턴스가 검증한 개선 패키지를 사용자가 버전 업데이트로 적용
+  evolveUpdates: () => mybotFetch("/api/evolve/updates").then(j) as Promise<{ appVersion: number; updates: EvolveUpdate[] }>,
+  applyUpdate: (id: string) => mybotFetch(`/api/evolve/updates/${id}/apply`, { method: "POST" }).then(j),
+  revertUpdate: (id: string) => mybotFetch(`/api/evolve/updates/${id}/revert`, { method: "POST" }).then(j),
+  rejectUpdate: (id: string) => mybotFetch(`/api/evolve/updates/${id}/reject`, { method: "POST" }).then(j),
 };
+
+export interface EvolveUpdate {
+  id: string; version: number | null; status: "pending" | "applied" | "rejected" | "reverted";
+  restart_required: number; source: string | null; created_at: number; applied_at: number | null;
+  payload: { summary: string; measurement: { verdict: string; reason: string; baseline?: { passRate: number; avgLatencyMs: number }; candidate?: { passRate: number; avgLatencyMs: number } }; ops: { kind: string; surface: string; target: string }[] };
+}
 
 export interface ApprovalRequest {
   id: string;

@@ -1,6 +1,6 @@
 // 모델 해석 — "<providerId>/<model>" 형식으로 등록된 프로바이더에 직접 연결 (프록시 없음)
 import { getSetting } from "../db";
-import { allProviders, findProvider, resolveAuth, providerEnabled, findCli, type ProviderDef, type ResolvedAuth } from "./registry";
+import { allProviders, findProvider, resolveAuth, providerEnabled, findCli, dedupeAirouteModels, type ProviderDef, type ResolvedAuth } from "./registry";
 
 export interface Endpoint {
   id: string;
@@ -159,7 +159,7 @@ export async function listRemoteModels(endpoint: Endpoint): Promise<{ id: string
     if (res.ok) {
       const data = (await res.json()) as { data?: { id: string }[] };
       const ids = (data.data ?? []).map((m) => ({ id: m.id, label: m.id }));
-      if (ids.length) return ids;
+      if (ids.length) return endpoint.id === "airoute" ? dedupeAirouteModels(ids) : ids;
     }
   } catch {}
   return (def?.models ?? []).map((id) => ({ id, label: id })); // 실패 시 정적 목록

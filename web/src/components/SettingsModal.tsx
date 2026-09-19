@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
+import { applyTheme, getTheme, type Theme } from "../theme";
 import { api, type ProviderCard, type Agent, type Model, type SiteLogin, mybotFetch } from "../api";
 import {
   X, Crown, AlarmClock, Trash2, Folder, Cpu, Search, Image as ImageIcon, Bot,
   Clock, Wrench, Globe, Bell, Brain, Settings2, Loader2, ScrollText,
-  ChevronDown, ChevronUp, Plus, Zap, KeyRound,
+  ChevronDown, ChevronUp, Plus, Zap, KeyRound, LogIn,
 } from "lucide-react";
 import { AgentIcon } from "./icons";
 
-type Section = "providers" | "search" | "image" | "agents" | "audit" | "routines" | "tools" | "browser" | "notify" | "memory" | "general";
+type Section = "providers" | "search" | "image" | "agents" | "audit" | "routines" | "tools" | "browser" | "notify" | "memory" | "updates" | "general";
 
 const SECTIONS: { id: Section; label: string; icon: any }[] = [
   { id: "providers", label: "모델 · 프로바이더", icon: Cpu },
@@ -20,6 +21,7 @@ const SECTIONS: { id: Section; label: string; icon: any }[] = [
   { id: "browser", label: "브라우저·계정", icon: Globe },
   { id: "notify", label: "알림", icon: Bell },
   { id: "memory", label: "메모리", icon: Brain },
+  { id: "updates", label: "업데이트", icon: Zap },
   { id: "general", label: "일반", icon: Settings2 },
 ];
 
@@ -29,6 +31,16 @@ function ProviderRow({ p, onChanged }: { p: ProviderCard; onChanged: () => void 
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [keyOpen, setKeyOpen] = useState(false);
+  const [reauthing, setReauthing] = useState(false);
+  const [waiting, setWaiting] = useState(false); // 브라우저 로그인 완료 대기 — 인증 반영까지 폴링
+
+  // 브라우저 로그인 진행 중 인증이 반영될 때까지 5초 간격으로 카드 상태를 갱신 (최대 ~2분)
+  useEffect(() => {
+    if (!waiting) return;
+    let n = 0;
+    const t = setInterval(() => { n++; onChanged(); if (p.authed || n >= 24) { setWaiting(false); clearInterval(t); } }, 5000);
+    return () => clearInterval(t);
+  }, [waiting, p.authed]);
 
   const test = async () => {
     setTesting(true); setResult(null);
@@ -37,6 +49,21 @@ function ProviderRow({ p, onChanged }: { p: ProviderCard; onChanged: () => void 
       setResult(r.ok ? `✓ 연결 성공 (${r.ms}ms)${r.detail ? ` — ${r.detail}` : ""}` : `✗ ${r.error}`);
     } catch (e) { setResult(`✗ ${(e as Error).message}`); }
     setTesting(false);
+  };
+  const reauth = async () => {
+    setReauthing(true); setResult(null);
+    try {
+      const r = await api.reauthProvider(p.id);
+      if (r.ok) {
+        setResult(`✓ ${r.detail ?? "인증됐습니다"}`);
+        if (r.method === "login") setWaiting(true); // 브라우저 로그인 완료를 기다리며 상태 폴링
+        onChanged();
+      } else {
+        setResult(`✗ ${r.error ?? "재인증 실패"}`);
+        if (r.needsKey) setKeyOpen(true);
+      }
+    } catch (e) { setResult(`✗ ${(e as Error).message}`); }
+    setReauthing(false);
   };
   const saveKey = async () => {
     if (!key.trim()) return;
@@ -60,17 +87,22 @@ function ProviderRow({ p, onChanged }: { p: ProviderCard; onChanged: () => void 
           <span className={`absolute top-[2px] h-[14px] w-[14px] rounded-full bg-white transition-all ${p.enabled ? "left-[16px]" : "left-[2px]"}`} />
         </button>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="text-xs font-medium">{p.name}</span>
-            <span className="rounded bg-stone-200 px-1.5 py-0.5 text-[9px] text-stone-600">{p.authLabel}</span>
+            <span className="shrink-0 whitespace-nowrap rounded bg-stone-200 px-1.5 py-0.5 text-micro text-stone-600">{p.authLabel}</span>
           </div>
           <div className="mt-0.5 flex items-center gap-1.5">
             <span className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
-            <span className={`text-[10px] ${status.c}`}>{status.t}</span>
-            {p.staticModels.length > 0 && <span className="text-[10px] text-stone-400">· 모델 {p.staticModels.length}개</span>}
+            <span className={`text-2xs ${status.c}`}>{status.t}</span>
+            {p.staticModels.length > 0 && <span className="text-2xs text-stone-400">· 모델 {p.staticModels.length}개</span>}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
+          {(p.authType === "oauth" || p.authType === "cli") && (!p.authed || p.expired) && (
+            <button onClick={reauth} disabled={reauthing || !p.enabled} className="rounded-lg p-1.5 text-amber-600 hover:bg-amber-100 hover:text-amber-700 disabled:opacity-40" title={p.expired ? "토큰 만료 — 재인증" : "로그인 / 재인증"}>
+              {reauthing || waiting ? <Loader2 size={13} className="animate-spin" /> : <LogIn size={13} />}
+            </button>
+          )}
           {p.authType === "apikey" && (
             <button onClick={() => setKeyOpen(!keyOpen)} className="rounded-lg p-1.5 text-stone-500 hover:bg-stone-200 hover:text-stone-800" title={p.hasManualKey ? "키 교체" : "API 키 입력"}>
               <KeyRound size={13} />
@@ -86,20 +118,37 @@ function ProviderRow({ p, onChanged }: { p: ProviderCard; onChanged: () => void 
           )}
         </div>
       </div>
-      {p.doc && p.enabled && !p.authed && <p className="mt-1.5 text-[10px] text-stone-400">{p.doc}</p>}
+      {p.doc && p.enabled && !p.authed && <p className="mt-1.5 text-2xs text-stone-400">{p.doc}</p>}
       {keyOpen && (
         <div className="mt-2 flex gap-1.5">
           <input type="password" className="flex-1 rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none" placeholder="API 키 입력" value={key} onChange={(e) => setKey(e.target.value)} onKeyDown={(e) => e.key === "Enter" && saveKey()} autoFocus />
           <button onClick={saveKey} className="rounded-lg bg-stone-900 px-2.5 text-xs font-medium text-white">저장</button>
         </div>
       )}
-      {result && <p className={`mt-1.5 text-[10px] ${result.startsWith("✓") ? "text-emerald-600" : "text-red-600"}`}>{result}</p>}
+      {result && <p className={`mt-1.5 text-2xs ${result.startsWith("✓") ? "text-emerald-600" : "text-red-600"}`}>{result}</p>}
     </div>
   );
 }
 
+// 입력 컴포넌트는 반드시 모듈 스코프에 둔다 — 컴포넌트 안에서 정의하면 렌더마다 새 타입이 만들어져
+// React가 input을 통째로 리마운트한다. 그러면 한 글자 칠 때마다 포커스가 빠져 다시 클릭해야 했다
+// (2026-09-18 실측: 입력 직후 해당 input이 DOM에서 사라지고 document.activeElement가 body로 갔다)
+function Field({ k, label, ph, s, update }: { k: string; label: string; ph?: string; s: Record<string, string>; update: (patch: Record<string, string>) => void }) {
+  return (
+    <label className="block">
+      <span className="text-xs text-stone-600">{label}</span>
+      <input className="mt-1 w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none" value={s[k] ?? ""} placeholder={ph} onChange={(e) => update({ [k]: e.target.value })} />
+    </label>
+  );
+}
+
+function H({ children }: { children: React.ReactNode }) {
+  return <h3 className="mb-3 font-display text-[15px] font-semibold text-stone-900">{children}</h3>;
+}
+
 export function SettingsModal({ models: initialModels, onClose }: { models: Model[]; onClose: () => void }) {
   const [section, setSection] = useState<Section>("providers");
+  const [theme, setTheme] = useState<Theme>(getTheme());
   const [models, setModels] = useState<Model[]>(initialModels); // 모달 내부 모델 목록 — 프로바이더 변경 시 즉시 갱신
   const [s, setS] = useState<Record<string, string>>({});
   const [memories, setMemories] = useState<any[]>([]);
@@ -112,6 +161,11 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   const [workspaces, setWorkspaces] = useState<any[]>([]);
   const [skills, setSkills] = useState<any[]>([]);
   const [routines, setRoutines] = useState<any[]>([]);
+  const [updates, setUpdates] = useState<any[]>([]);
+  const [updProg, setUpdProg] = useState<{ id: string; pct: number } | null>(null); // 적용 중인 업데이트의 진행 표시
+  const [updErr, setUpdErr] = useState<Record<string, string>>({}); // 카드별 오류 메시지 — 실패를 조용히 삼키지 않는다
+  const [appVersion, setAppVersion] = useState(0);
+  const [updBusy, setUpdBusy] = useState(false);
   const [wName, setWName] = useState(""); const [wInst, setWInst] = useState("");
   const [skName, setSkName] = useState(""); const [skPrompt, setSkPrompt] = useState("");
   const [rName, setRName] = useState(""); const [rPrompt, setRPrompt] = useState("");
@@ -147,9 +201,10 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   const [recDraft, setRecDraft] = useState<{ name: string; trigger: string; steps: string; notes: string } | null>(null);
 
   const testNotify = (channel: string) => {
-    setTestMsg("발송 중…");
+    const label = channel === "telegram" ? "텔레그램" : channel === "imap" ? "메일 읽기" : "메일 발송";
+    setTestMsg(channel === "imap" ? "메일함 접속 중…" : "발송 중…");
     mybotFetch("/api/notify/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channel }) })
-      .then(async (r) => setTestMsg(r.ok ? `${channel === "telegram" ? "텔레그램" : "메일"} 테스트 발송 성공` : `실패: ${(await r.json()).error}`))
+      .then(async (r) => setTestMsg(r.ok ? `${label} 테스트 성공` : `실패: ${(await r.json()).error}`))
       .catch((e) => setTestMsg(`실패: ${e.message}`));
   };
 
@@ -176,6 +231,32 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
     mybotFetch(`/api/approvals/activity?${qs}`).then((r) => r.json()).then(setAudit).catch(() => {});
   };
   useEffect(() => { if (section === "audit") loadAudit(); }, [section, auditAgent, auditDays]);
+  const loadUpdates = () => api.evolveUpdates().then((d) => { setUpdates(d.updates); setAppVersion(d.appVersion); }).catch(() => {});
+  useEffect(() => { if (section === "updates") loadUpdates(); }, [section]);
+  // 업데이트 동작 실행 — 적용은 진행 바를 보여주고, 실패는 서버 오류 메시지를 카드에 표시한다
+  const updAct = (id: string, fn: () => Promise<unknown>, withProgress = false) => {
+    setUpdBusy(true);
+    setUpdErr((m) => { const n = { ...m }; delete n[id]; return n; });
+    let tick: ReturnType<typeof setInterval> | undefined;
+    if (withProgress) {
+      setUpdProg({ id, pct: 10 });
+      // 서버 확정 전에는 92%까지만 진행 — 응답이 오면 100%로 완료한다
+      tick = setInterval(() => setUpdProg((p) => (p && p.id === id ? { id, pct: Math.min(92, p.pct + Math.max(2, (92 - p.pct) * 0.3)) } : p)), 200);
+    }
+    fn()
+      .then(async () => {
+        if (tick) clearInterval(tick);
+        if (withProgress) setUpdProg({ id, pct: 100 });
+        await loadUpdates();
+        if (withProgress) setTimeout(() => setUpdProg((p) => (p?.id === id ? null : p)), 1400);
+      })
+      .catch((e) => {
+        if (tick) clearInterval(tick);
+        setUpdProg(null);
+        setUpdErr((m) => ({ ...m, [id]: (e as Error).message || "요청 실패" }));
+      })
+      .finally(() => setUpdBusy(false));
+  };
 
   // 녹화 중 상태 폴링 — 10분 자동 종료도 UI에 반영
   useEffect(() => {
@@ -191,50 +272,43 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
       .then((r) => { if (r.ok) { setDirty(false); setSavedMsg("✓ 저장됨"); setTimeout(() => setSavedMsg(""), 1500); } else setSavedMsg("저장 실패"); });
   };
 
-  const Field = ({ k, label, ph }: { k: string; label: string; ph?: string }) => (
-    <label className="block">
-      <span className="text-xs text-stone-600">{label}</span>
-      <input className="mt-1 w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none" value={s[k] ?? ""} placeholder={ph} onChange={(e) => update({ [k]: e.target.value })} />
-    </label>
-  );
   const Input = "w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none";
-  const Btn = "rounded-lg bg-stone-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-stone-700";
-  const Sub = "rounded-lg bg-stone-200 px-2.5 py-1 text-xs text-stone-700 hover:bg-stone-300";
-  const H = ({ children }: { children: React.ReactNode }) => <h3 className="mb-3 font-display text-[15px] font-semibold text-stone-900">{children}</h3>;
+  const Btn = "rounded-lg bg-stone-900 px-3 py-2 text-xs font-medium text-white hover:bg-stone-700 md:px-2.5 md:py-1";
+  const Sub = "rounded-lg bg-stone-200 px-3 py-2 text-xs text-stone-700 hover:bg-stone-300 md:px-2.5 md:py-1";
 
   const authed = providers.filter((p) => p.enabled && p.authed);
   const shownMemories = memOpen ? memories : memories.slice(0, 5);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/30 p-4" onClick={onClose}>
-      <div className="flex h-[80vh] w-full max-w-3xl overflow-hidden rounded-2xl border border-stone-200 bg-white" onClick={(e) => e.stopPropagation()}>
-        {/* ─── 좌측 섹션 사이드바 ─── */}
-        <nav className="flex w-44 shrink-0 flex-col border-r border-stone-200/80 bg-white p-2">
-          <div className="mb-2 flex items-center justify-between px-2 pt-1">
+    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-stone-950/30 md:items-center md:p-4" onClick={onClose}>
+      <div className="flex h-full w-full max-w-3xl flex-col overflow-hidden bg-white md:h-[80vh] md:flex-row md:rounded-2xl md:border md:border-stone-200" onClick={(e) => e.stopPropagation()}>
+        {/* ─── 섹션 내비 — 데스크톱은 좌측 사이드바, 모바일은 전체 화면 상단의 가로 탭 ─── */}
+        <nav className="no-scrollbar flex shrink-0 items-center gap-1 overflow-x-auto border-b border-stone-200/80 bg-white px-2 pb-2 pt-[max(0.5rem,env(safe-area-inset-top))] md:w-44 md:flex-col md:items-stretch md:gap-0 md:overflow-visible md:border-b-0 md:border-r md:p-2">
+          <div className="mr-1 flex shrink-0 items-center px-2 md:mb-2 md:mr-0 md:justify-between md:pt-1">
             <h2 className="font-display text-base font-semibold text-stone-900">설정</h2>
           </div>
           {SECTIONS.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               onClick={() => setSection(id)}
-              className={`mb-0.5 flex items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs transition-colors ${section === id ? "bg-stone-200 text-stone-900" : "text-stone-500 hover:bg-white hover:text-stone-700"}`}
+              className={`flex h-10 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-3 text-left text-xs transition-colors md:mb-0.5 md:h-auto md:shrink md:px-2.5 md:py-2 ${section === id ? "bg-stone-200 text-stone-900" : "text-stone-500 hover:bg-stone-100 hover:text-stone-700"}`}
             >
-              <Icon size={13} className="shrink-0" />
+              <Icon size={14} className="shrink-0" />
               <span className="truncate">{label}</span>
-              {id === "providers" && authed.length > 0 && <span className="ml-auto rounded bg-emerald-50 px-1 text-[9px] text-emerald-600">{authed.length}</span>}
+              {id === "providers" && authed.length > 0 && <span className="ml-auto rounded bg-emerald-50 px-1 text-micro text-emerald-600">{authed.length}</span>}
             </button>
           ))}
-          <div className="mt-auto px-2 pb-1 text-[10px] text-stone-300">MyBot 로컬 설정</div>
+          <div className="mt-auto hidden px-2 pb-1 text-2xs text-stone-300 md:block">MyBot 로컬 설정</div>
         </nav>
 
         {/* ─── 우측 콘텐츠 ─── */}
-        <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex-1 overflow-y-auto p-5">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="flex-1 overflow-y-auto p-4 md:p-5">
 
             {section === "providers" && (
               <div>
                 <H>모델 · 프로바이더</H>
-                <p className="mb-3 text-[11px] leading-relaxed text-stone-500">
+                <p className="mb-3 text-caption leading-relaxed text-stone-500">
                   각 AI 서비스에 프록시 없이 직접 연결합니다. OAuth 프로바이더는 해당 CLI의 로그인 상태를 자동으로 재사용하고,
                   API 키는 설정에 직접 입력하거나 로컬 자격증명 저장소에서 자동 인식됩니다.
                 </p>
@@ -259,9 +333,9 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                       if (r?.error) setCpMsg(`실패: ${r.error}`);
                       else { setCpMsg(""); setCpId(""); setCpName(""); setCpUrl(""); setCpKey(""); setCpModels(""); refreshProviders(); }
                     }}>등록</button>
-                    {cpMsg && <span className="text-[10px] text-red-600">{cpMsg}</span>}
+                    {cpMsg && <span className="text-2xs text-red-600">{cpMsg}</span>}
                   </div>
-                  <p className="mt-1.5 text-[10px] text-stone-400">Ollama: http://127.0.0.1:11434/v1 · LM Studio: http://127.0.0.1:1234/v1</p>
+                  <p className="mt-1.5 text-2xs text-stone-400">Ollama: http://127.0.0.1:11434/v1 · LM Studio: http://127.0.0.1:1234/v1</p>
                 </div>
 
                 <label className="mt-4 block">
@@ -270,20 +344,20 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     <option value="">자동 (인증된 첫 프로바이더)</option>
                     {models.map((m) => <option key={m.id} value={m.id}>{m.providerName} · {m.label}</option>)}
                   </select>
-                  <span className="mt-0.5 block text-[10px] text-stone-400">인증된 프로바이더의 모델만 표시됩니다 — 목록에 없으면 위에서 프로바이더를 연결하세요</span>
+                  <span className="mt-0.5 block text-2xs text-stone-400">인증된 프로바이더의 모델만 표시됩니다 — 목록에 없으면 위에서 프로바이더를 연결하세요</span>
                 </label>
 
                 <label className="mt-3 block">
                   <span className="text-xs text-stone-600">폴백 체인 — 모델 장애(429·5xx·잔액부족) 시 자동 전환 순서</span>
                   <input className="mt-1 w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none" value={s.fallback_chain ?? ""} placeholder="예: minimax/MiniMax-M3 → zai/glm-5.3 → opencode-zen" onChange={(e) => update({ fallback_chain: e.target.value })} />
-                  <span className="mt-0.5 block text-[10px] text-stone-400">쉼표나 → 로 구분. 프로바이더만 적으면 첫 모델 사용. 비워두면 폴백 없음</span>
+                  <span className="mt-0.5 block text-2xs text-stone-400">쉼표나 → 로 구분. 프로바이더만 적으면 첫 모델 사용. 비워두면 폴백 없음</span>
                 </label>
 
                 <div className="mt-3 grid grid-cols-2 gap-2">
-                  <Field k="run_deadline_sec" label="봇 작업 상한(초)" ph="480" />
-                  <Field k="tool_rounds" label="도구 단계 상한" ph="12" />
-                  <Field k="delegate_cap_sec" label="위임 상한(초)" ph="540" />
-                  <Field k="run_total_cap_sec" label="실행 총 상한(초)" ph="900" />
+                  <Field s={s} update={update} k="run_deadline_sec" label="봇 작업 상한(초)" ph="480" />
+                  <Field s={s} update={update} k="tool_rounds" label="도구 단계 상한" ph="12" />
+                  <Field s={s} update={update} k="delegate_cap_sec" label="위임 상한(초)" ph="540" />
+                  <Field s={s} update={update} k="run_total_cap_sec" label="실행 총 상한(초)" ph="900" />
                 </div>
               </div>
             )}
@@ -291,7 +365,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
             {section === "agents" && (
               <div>
                 <H>에이전트 봇</H>
-                <p className="mb-3 text-[11px] leading-relaxed text-stone-500">
+                <p className="mb-3 text-caption leading-relaxed text-stone-500">
                   CEO 봇이 모든 봇의 관리자입니다 — 지시를 받아 직접 수행하거나 팀장·전문 봇에게 분배합니다.
                   모든 봇은 해당 분야 20년 경력의 시니어 전문가로 동작합니다.
                 </p>
@@ -299,20 +373,20 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   {agents.map((a) => (
                     <div key={a.id} className="rounded-lg bg-white px-2.5 py-2 text-xs">
                       <div className="flex items-center gap-2">
-                        <AgentIcon name={a.name} seed={a.avatar} size={14} className="shrink-0" />
+                        <AgentIcon name={a.name} seed={a.avatar} size={16} className="shrink-0" />
                         <span className="font-medium">{a.name}</span>
                         {a.is_boss ? (
-                          <span className="flex items-center gap-0.5 rounded bg-amber-100 px-1 text-[9px] text-amber-700"><Crown size={9} /> CEO</span>
+                          <span className="flex items-center gap-0.5 rounded bg-amber-100 px-1 text-micro text-amber-700"><Crown size={9} /> CEO</span>
                         ) : (
-                          <button className="rounded bg-stone-200 px-1 text-[9px] text-stone-500 hover:text-amber-700" title="이 봇을 CEO로 지정" onClick={() => api.setAgentBoss(a.id).then(load)}>CEO 지정</button>
+                          <button className="rounded bg-stone-200 px-1 text-micro text-stone-500 hover:text-amber-700" title="이 봇을 CEO로 지정" onClick={() => api.setAgentBoss(a.id).then(load)}>CEO 지정</button>
                         )}
-                        {a.is_lead ? <span className="rounded bg-sky-100 px-1 text-[9px] text-sky-600">팀장</span> : null}
-                        <select className="max-w-[160px] truncate rounded bg-stone-200 px-1 py-0.5 text-[10px] text-stone-600 outline-none" value={a.model ?? ""} title={a.model_label ?? a.model ?? ""} onChange={(e) => api.updateAgent(a.id, { model: e.target.value }).then(load)}>
+                        {a.is_lead ? <span className="rounded bg-sky-100 px-1 text-micro text-sky-600">팀장</span> : null}
+                        <select className="max-w-[160px] truncate rounded bg-stone-200 px-1 py-0.5 text-2xs text-stone-600 outline-none" value={a.model ?? ""} title={a.model_label ?? a.model ?? ""} onChange={(e) => api.updateAgent(a.id, { model: e.target.value }).then(load)}>
                           {models.map((m) => <option key={m.id} value={m.id}>{m.providerName} · {m.label}</option>)}
                           {a.model && !models.find((m) => m.id === a.model) && <option value={a.model}>{a.model}</option>}
                         </select>
                         {routines.some((r) => r.agent_id === a.id && r.enabled) && (
-                          <span className="flex items-center gap-0.5 rounded bg-amber-100 px-1 text-[9px] text-amber-700"><AlarmClock size={9} /> 루틴</span>
+                          <span className="flex items-center gap-0.5 rounded bg-amber-100 px-1 text-micro text-amber-700"><AlarmClock size={9} /> 루틴</span>
                         )}
                         <button className="ml-auto text-stone-400 hover:text-stone-700" title="봇 구성을 JSON으로보내기" onClick={() => {
                           mybotFetch(`/api/agents/${a.id}/export`).then((r) => r.json()).then((d) => {
@@ -356,7 +430,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   </label>
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2">
-                  <Field k="agent_cap_total" label="전체 봇 정원(초과 시 승인 필요)" ph="20" />
+                  <Field s={s} update={update} k="agent_cap_total" label="전체 봇 정원(초과 시 승인 필요)" ph="20" />
                 </div>
               </div>
             )}
@@ -376,31 +450,31 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     <option value="90">90일</option>
                   </select>
                 </div>
-                <p className="mb-1 text-[10px] font-medium text-stone-500">실행 이력 ({audit?.runs.length ?? 0})</p>
+                <p className="mb-1 text-2xs font-medium text-stone-500">실행 이력 ({audit?.runs.length ?? 0})</p>
                 <div className="max-h-52 space-y-1 overflow-y-auto">
                   {(audit?.runs ?? []).map((r) => (
-                    <div key={r.id} className="rounded-lg bg-white px-2.5 py-1.5 text-[11px]">
+                    <div key={r.id} className="rounded-lg bg-white px-2.5 py-1.5 text-caption">
                       <div className="flex items-center gap-1.5">
-                        <AgentIcon name={r.agent_name ?? "?"} seed={r.avatar} size={12} className="shrink-0" />
+                        <AgentIcon name={r.agent_name ?? "?"} seed={r.avatar} size={16} className="shrink-0" />
                         <span className="font-medium">{r.agent_name ?? "(삭제된 봇)"}</span>
-                        <span className={`rounded px-1 text-[9px] ${r.status === "done" ? "bg-emerald-100 text-emerald-700" : r.status === "error" ? "bg-red-100 text-red-600" : "bg-stone-200 text-stone-500"}`}>{r.status}</span>
-                        {r.routine_id && <span className="rounded bg-amber-100 px-1 text-[9px] text-amber-700">루틴</span>}
-                        {r.resume_count > 0 && <span className="rounded bg-sky-100 px-1 text-[9px] text-sky-600">재개{r.resume_count}회</span>}
-                        <span className="ml-auto text-[9px] text-stone-400">{new Date(r.created_at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                        <span className={`rounded px-1 text-micro ${r.status === "done" ? "bg-emerald-100 text-emerald-700" : r.status === "error" ? "bg-red-100 text-red-600" : "bg-stone-200 text-stone-500"}`}>{r.status}</span>
+                        {r.routine_id && <span className="rounded bg-amber-100 px-1 text-micro text-amber-700">루틴</span>}
+                        {r.resume_count > 0 && <span className="rounded bg-sky-100 px-1 text-micro text-sky-600">재개{r.resume_count}회</span>}
+                        <span className="ml-auto text-micro text-stone-400">{new Date(r.created_at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
                       </div>
                       <div className="mt-0.5 truncate text-stone-500">{r.task}</div>
                     </div>
                   ))}
                   {audit && !audit.runs.length && <p className="text-xs text-stone-400">기록 없음</p>}
                 </div>
-                <p className="mb-1 mt-3 text-[10px] font-medium text-stone-500">승인 요청 ({audit?.approvals.length ?? 0})</p>
+                <p className="mb-1 mt-3 text-2xs font-medium text-stone-500">승인 요청 ({audit?.approvals.length ?? 0})</p>
                 <div className="max-h-40 space-y-1 overflow-y-auto">
                   {(audit?.approvals ?? []).map((r) => (
-                    <div key={r.id} className="rounded-lg bg-white px-2.5 py-1.5 text-[11px]">
+                    <div key={r.id} className="rounded-lg bg-white px-2.5 py-1.5 text-caption">
                       <div className="flex items-center gap-1.5">
                         <span className="font-medium">{r.tool}</span>
-                        <span className={`rounded px-1 text-[9px] ${r.status === "approved" ? "bg-emerald-100 text-emerald-700" : r.status === "denied" ? "bg-red-100 text-red-600" : "bg-amber-100 text-amber-700"}`}>{r.status}</span>
-                        <span className="ml-auto text-[9px] text-stone-400">{r.agent_name ?? "—"} · {new Date(r.created_at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                        <span className={`rounded px-1 text-micro ${r.status === "approved" ? "bg-emerald-100 text-emerald-700" : r.status === "denied" ? "bg-red-100 text-red-600" : "bg-amber-100 text-amber-700"}`}>{r.status}</span>
+                        <span className="ml-auto text-micro text-stone-400">{r.agent_name ?? "—"} · {new Date(r.created_at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
                       </div>
                       <div className="mt-0.5 truncate text-stone-500">{r.summary}</div>
                     </div>
@@ -422,7 +496,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                         <span className="text-stone-500">{r.trigger_type === "webhook" ? "웹훅" : r.trigger_type === "email" ? "이메일" : r.schedule}</span>
                         {r.agent_id && (
                           <span className="flex items-center gap-1 text-stone-400">
-                            <AgentIcon name={agents.find((a) => a.id === r.agent_id)?.name} seed={agents.find((a) => a.id === r.agent_id)?.avatar} size={12} />
+                            <AgentIcon name={agents.find((a) => a.id === r.agent_id)?.name} seed={agents.find((a) => a.id === r.agent_id)?.avatar} size={16} />
                             {agents.find((a) => a.id === r.agent_id)?.name ?? "봇"}
                           </span>
                         )}
@@ -435,15 +509,15 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                       </div>
                       <div className="mt-0.5 truncate text-stone-500">{r.prompt}</div>
                       {r.webhook_token && (
-                        <div className="mt-1 truncate text-[10px] text-stone-400">
+                        <div className="mt-1 truncate text-2xs text-stone-400">
                           웹훅 URL: <code className="rounded bg-stone-100 px-1">POST /api/hooks/{r.webhook_token}</code>
                         </div>
                       )}
                       {rRuns[r.id] && (
                         <div className="mt-1.5 max-h-40 space-y-1 overflow-y-auto rounded bg-stone-50 p-1.5">
-                          {rRuns[r.id]!.length === 0 && <div className="text-[10px] text-stone-400">실행 이력 없음</div>}
+                          {rRuns[r.id]!.length === 0 && <div className="text-2xs text-stone-400">실행 이력 없음</div>}
                           {rRuns[r.id]!.map((run: any) => (
-                            <div key={run.id} className="text-[10px] text-stone-600">
+                            <div key={run.id} className="text-2xs text-stone-600">
                               <span className={run.status === "done" ? "text-emerald-600" : run.status === "error" ? "text-red-500" : "text-amber-600"}>{run.status === "done" ? "성공" : run.status === "error" ? "실패" : run.status}</span>
                               {" "}{new Date(run.created_at).toLocaleString("ko-KR", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                               {run.finished_at && <span className="text-stone-400"> · {Math.round((run.finished_at - run.created_at) / 1000)}s · {run.steps}단계</span>}
@@ -486,9 +560,9 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   {rTrig === "webhook" && (
                     <div className="space-y-1.5">
                       <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] text-stone-500">매칭 규칙:</span>
-                        <button className="rounded bg-stone-200 px-1.5 py-0.5 text-[10px] hover:bg-stone-300" onClick={() => { setRMatchField("user_name"); setRMatchSender(""); setRMatchKw(""); }}>Slack 프리셋</button>
-                        <button className="rounded bg-stone-200 px-1.5 py-0.5 text-[10px] hover:bg-stone-300" onClick={() => { setRMatchField("sender.login"); setRMatchSender(""); setRMatchKw(""); }}>GitHub 프리셋</button>
+                        <span className="text-2xs text-stone-500">매칭 규칙:</span>
+                        <button className="rounded bg-stone-200 px-1.5 py-0.5 text-2xs hover:bg-stone-300" onClick={() => { setRMatchField("user_name"); setRMatchSender(""); setRMatchKw(""); }}>Slack 프리셋</button>
+                        <button className="rounded bg-stone-200 px-1.5 py-0.5 text-2xs hover:bg-stone-300" onClick={() => { setRMatchField("sender.login"); setRMatchSender(""); setRMatchKw(""); }}>GitHub 프리셋</button>
                       </div>
                       <div className="flex gap-1.5">
                         <input className={`${Input} flex-1`} placeholder="발신자 필드 (점 경로 — Slack: user_name, GitHub: sender.login)" value={rMatchField} onChange={(e) => setRMatchField(e.target.value)} />
@@ -510,9 +584,9 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                       });
                   }}>루틴 추가</button>
                   {hookUrl && (
-                    <div className="rounded-lg bg-sky-50 px-2.5 py-2 text-[11px] text-sky-800">
+                    <div className="rounded-lg bg-sky-50 px-2.5 py-2 text-caption text-sky-800">
                       웹훅 URL이 발급됐습니다 — 이 주소로 POST하면 루틴이 발화됩니다:
-                      <code className="mt-1 block select-all break-all rounded bg-white px-2 py-1 font-mono text-[10px]">{hookUrl}</code>
+                      <code className="mt-1 block select-all break-all rounded bg-white px-2 py-1 font-mono text-2xs">{hookUrl}</code>
                     </div>
                   )}
                 </div>
@@ -535,11 +609,11 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   <option value="ddg">DuckDuckGo (차단 빈번)</option>
                 </select>
                 <div className="space-y-2.5">
-                  <Field k="searxng_url" label="SearXNG URL" ph="http://127.0.0.1:8080" />
-                  <Field k="tavily_key" label="Tavily API 키" />
-                  <Field k="brave_key" label="Brave API 키" />
-                  <Field k="exa_key" label="Exa API 키" ph="exa.ai — 무료 크레딧" />
-                  <Field k="jina_key" label="Jina API 키" ph="jina.ai — 무료 10M 토큰" />
+                  <Field s={s} update={update} k="searxng_url" label="SearXNG URL" ph="http://127.0.0.1:8080" />
+                  <Field s={s} update={update} k="tavily_key" label="Tavily API 키" />
+                  <Field s={s} update={update} k="brave_key" label="Brave API 키" />
+                  <Field s={s} update={update} k="exa_key" label="Exa API 키" ph="exa.ai — 무료 크레딧" />
+                  <Field s={s} update={update} k="jina_key" label="Jina API 키" ph="jina.ai — 무료 10M 토큰" />
                 </div>
               </div>
             )}
@@ -548,9 +622,9 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
               <div>
                 <H>이미지 생성</H>
                 <div className="space-y-2.5">
-                  <Field k="image_endpoint" label="Images API 엔드포인트" ph="http://127.0.0.1:11441/v1 또는 Draw Things http://127.0.0.1:7888" />
-                  <Field k="image_key" label="이미지 API 키(선택)" />
-                  <Field k="image_model" label="이미지 모델" ph="dall-e-3 / flux 등" />
+                  <Field s={s} update={update} k="image_endpoint" label="Images API 엔드포인트" ph="http://127.0.0.1:11441/v1 또는 Draw Things http://127.0.0.1:7888" />
+                  <Field s={s} update={update} k="image_key" label="이미지 API 키(선택)" />
+                  <Field s={s} update={update} k="image_model" label="이미지 모델" ph="dall-e-3 / flux 등" />
                 </div>
               </div>
             )}
@@ -572,10 +646,10 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                         {/* C19 — 프로젝트 배정 봇: 이 프로젝트 대화는 봇들의 공유 메모리·전용 파일 폴더를 쓴다 */}
                         <div className="mt-1 flex flex-wrap gap-1">
                           {agents.filter((a) => a.workspace_id === w.id).map((a) => (
-                            <span key={a.id} className="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] text-sky-700">{a.name}</span>
+                            <span key={a.id} className="rounded bg-sky-100 px-1.5 py-0.5 text-2xs text-sky-700">{a.name}</span>
                           ))}
                           {wsAgentsOpen === w.id && agents.map((a) => (
-                            <label key={a.id} className="flex items-center gap-1 rounded bg-stone-100 px-1.5 py-0.5 text-[10px]">
+                            <label key={a.id} className="flex items-center gap-1 rounded bg-stone-100 px-1.5 py-0.5 text-2xs">
                               <input type="checkbox" checked={a.workspace_id === w.id} onChange={() => {
                                 const cur = new Set(agents.filter((x) => x.workspace_id === w.id).map((x) => x.id));
                                 if (cur.has(a.id)) cur.delete(a.id); else cur.add(a.id);
@@ -605,12 +679,12 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                         <span className="font-mono text-sky-600">/{sk.name}</span>
                         <span className="flex-1 truncate text-stone-500" title={sk.last_fail ? `최근 실패: ${sk.last_fail}` : sk.prompt}>{sk.prompt}</span>
                         {sk.run_count > 0 && (
-                          <span className={`shrink-0 text-[10px] ${sk.run_count && sk.ok_count / sk.run_count < 0.5 ? "text-red-500" : "text-stone-400"}`}>
+                          <span className={`shrink-0 text-2xs ${sk.run_count && sk.ok_count / sk.run_count < 0.5 ? "text-red-500" : "text-stone-400"}`}>
                             성공 {sk.ok_count}/{sk.run_count}
                           </span>
                         )}
                         {sk.disabled ? (
-                          <button className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 hover:bg-amber-200" title="성공률 미달로 자동 비활성됨 — 재학습 후 다시 켜세요"
+                          <button className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-2xs text-amber-700 hover:bg-amber-200" title="성공률 미달로 자동 비활성됨 — 재학습 후 다시 켜세요"
                             onClick={() => mybotFetch(`/api/skills/${sk.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ disabled: false }) }).then(load)}>비활성 — 켜기</button>
                         ) : null}
                         <button className="text-stone-400 hover:text-red-600" onClick={() => mybotFetch(`/api/skills/${sk.id}`, { method: "DELETE" }).then(load)}>삭제</button>
@@ -628,7 +702,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                 </div>
                 <div>
                   <H>MCP 서버 (stdio · remote HTTP)</H>
-                  <p className="mb-2 text-[11px] leading-relaxed text-stone-400">
+                  <p className="mb-2 text-caption leading-relaxed text-stone-400">
                     외부 MCP 서버의 도구를 봇이 사용합니다. stdio는 로컬 명령 실행, remote는 HTTP 엔드포인트 URL입니다.
                   </p>
                   <div className="space-y-1.5">
@@ -681,7 +755,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   <div className="space-y-1.5">
                     {personas.map((p) => (
                       <div key={p.id} className="flex items-center gap-2 rounded-lg bg-white px-2.5 py-1.5 text-xs">
-                        <AgentIcon name={p.name} size={13} className="text-stone-500" />
+                        <AgentIcon name={p.name} size={16} className="text-stone-500" />
                         <span>{p.name}</span>
                         <span className="flex-1 truncate text-stone-500">{p.prompt || "(기본)"}</span>
                         {!p.builtin && <button className="text-stone-400 hover:text-red-600" onClick={() => mybotFetch(`/api/personas/${p.id}`, { method: "DELETE" }).then(load)}>삭제</button>}
@@ -704,7 +778,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
               <div className="space-y-6">
                 <div>
                   <H>브라우저 (봇이 사용)</H>
-                  <p className="mb-2 text-[11px] leading-relaxed text-stone-400">
+                  <p className="mb-2 text-caption leading-relaxed text-stone-400">
                     봇이 쓰는 내장 Chromium입니다. "열기"를 누르면 맥미니 화면에 창이 뜨니, 거기서 한 번 로그인해 두면 봇이 그 세션을 그대로 사용합니다.
                   </p>
                   <div className="flex gap-1.5">
@@ -715,7 +789,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                 </div>
                 <div>
                   <H>사이트 계정 (봇 자동 로그인)</H>
-                  <p className="mb-2 text-[11px] leading-relaxed text-stone-400">
+                  <p className="mb-2 text-caption leading-relaxed text-stone-400">
                     로그인이 필요한 사이트의 계정을 등록하면 봇이 브라우저로 자동 로그인합니다. 비밀번호는 로컬 DB에만 저장되고 모델에는 노출되지 않습니다.
                   </p>
                   <div className="space-y-1.5">
@@ -746,7 +820,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                 </div>
                 <div>
                   <H>시연 녹화 → 스킬</H>
-                  <p className="mb-2 text-[11px] leading-relaxed text-stone-400">
+                  <p className="mb-2 text-caption leading-relaxed text-stone-400">
                     녹화를 시작하면 브라우저 창이 열립니다. 그 안에서 업무를 직접 한 번 수행하면 조작이 기록돼, 봇이 재사용할 절차(스킬) 초안으로 변환됩니다. 최대 10분 — 비밀번호 입력은 자동으로 마스킹됩니다.
                   </p>
                   {recDraft ? (
@@ -787,14 +861,14 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
             {section === "notify" && (
               <div>
                 <H>결과 알림</H>
-                <p className="mb-3 text-[11px] text-stone-400">기본은 채팅창에만 표시됩니다. 체크한 채널로 답변·루틴 결과를 함께 받습니다.</p>
+                <p className="mb-3 text-caption text-stone-400">기본은 채팅창에만 표시됩니다. 체크한 채널로 답변·루틴 결과를 함께 받습니다.</p>
                 <div className="space-y-2.5">
                   <label className="flex items-center gap-2 text-xs text-stone-600">
                     <input type="checkbox" checked={s.notify_telegram === "1"} onChange={(e) => update({ notify_telegram: e.target.checked ? "1" : "0" })} />
                     답변을 텔레그램으로도 받기
                   </label>
-                  <Field k="telegram_bot_token" label="텔레그램 봇 토큰" ph="@BotFather에서 발급 (123456:ABC…)" />
-                  <Field k="telegram_chat_id" label="텔레그램 채팅 ID" ph="봇에게 말 건 뒤 getUpdates로 확인" />
+                  <Field s={s} update={update} k="telegram_bot_token" label="텔레그램 봇 토큰" ph="@BotFather에서 발급 (123456:ABC…)" />
+                  <Field s={s} update={update} k="telegram_chat_id" label="텔레그램 채팅 ID" ph="봇에게 말 건 뒤 getUpdates로 확인" />
                   <label className="flex items-center gap-2 text-xs text-stone-600">
                     <input type="checkbox" checked={s.telegram_listen === "1"} onChange={(e) => update({ telegram_listen: e.target.checked ? "1" : "0" })} />
                     텔레그램으로 대장봇에게 업무 지시 받기 — 봇이 읽고 실행한 뒤 회신
@@ -804,17 +878,30 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     답변을 이메일로도 받기
                   </label>
                   <div className="grid grid-cols-2 gap-1.5">
-                    <Field k="smtp_host" label="SMTP 호스트" ph="smtp.gmail.com" />
-                    <Field k="smtp_port" label="포트" ph="587 (465는 SSL)" />
-                    <Field k="smtp_user" label="SMTP 계정" />
-                    <Field k="smtp_pass" label="SMTP 비밀번호/앱 비밀번호" />
-                    <Field k="smtp_from" label="보내는 주소(선택)" />
-                    <Field k="email_to" label="받는 주소" />
+                    <Field s={s} update={update} k="smtp_host" label="SMTP 호스트" ph="smtp.gmail.com" />
+                    <Field s={s} update={update} k="smtp_port" label="포트" ph="587 (465는 SSL)" />
+                    <Field s={s} update={update} k="smtp_user" label="SMTP 계정" />
+                    <Field s={s} update={update} k="smtp_pass" label="SMTP 비밀번호/앱 비밀번호" />
+                    <Field s={s} update={update} k="smtp_from" label="보내는 주소(선택)" />
+                    <Field s={s} update={update} k="email_to" label="받는 주소" />
                   </div>
+                  <div className="pt-2 text-xs font-medium text-stone-600">메일 읽기 (IMAP)</div>
+                  <p className="text-2xs text-stone-400">봇이 메일 목록·본문을 직접 읽습니다 — 그룹웨어 화면을 브라우저로 여는 것보다 빠르고 정확합니다. 메일 도착 트리거 루틴에도 쓰입니다.</p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <Field s={s} update={update} k="imap_host" label="IMAP 호스트" ph="imap.gmail.com / 사내 메일 서버" />
+                    <Field s={s} update={update} k="imap_port" label="포트" ph="993 (SSL)" />
+                    <Field s={s} update={update} k="imap_user" label="IMAP 계정" ph="name@company.com" />
+                    <Field s={s} update={update} k="imap_pass" label="IMAP 비밀번호/앱 비밀번호" />
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-stone-600">
+                    <input type="checkbox" checked={s.imap_tls !== "0"} onChange={(e) => update({ imap_tls: e.target.checked ? "1" : "0" })} />
+                    SSL/TLS 사용 (기본 켜짐 — 993 포트)
+                  </label>
                   <div className="flex items-center gap-2 pt-1">
                     <button className={Sub} onClick={() => testNotify("telegram")}>텔레그램 테스트</button>
-                    <button className={Sub} onClick={() => testNotify("email")}>메일 테스트</button>
-                    {testMsg && <span className="text-[11px] text-stone-500">{testMsg}</span>}
+                    <button className={Sub} onClick={() => testNotify("email")}>메일 발송 테스트</button>
+                    <button className={Sub} onClick={() => testNotify("imap")}>메일 읽기 테스트</button>
+                    {testMsg && <span className="text-caption text-stone-500">{testMsg}</span>}
                   </div>
                 </div>
               </div>
@@ -839,7 +926,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   {!memories.length && <p className="text-xs text-stone-400">아직 기억된 정보가 없습니다</p>}
                 </div>
                 {memories.length > 5 && (
-                  <button onClick={() => setMemOpen(!memOpen)} className="mt-2 flex items-center gap-1 text-[11px] text-stone-500 hover:text-stone-700">
+                  <button onClick={() => setMemOpen(!memOpen)} className="mt-2 flex items-center gap-1 text-caption text-stone-500 hover:text-stone-700">
                     {memOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                     {memOpen ? "접기" : `${memories.length - 5}개 더 보기`}
                   </button>
@@ -847,26 +934,92 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
               </div>
             )}
 
+            {section === "updates" && (
+              <div>
+                <H>버전 업데이트 <span className="ml-1 text-xs font-normal text-stone-500">현재 v{appVersion}</span></H>
+                <p className="mb-3 text-caption text-stone-500">새 버전이 준비되면 여기에서 직접 적용합니다.</p>
+                <div className="space-y-2">
+                  {updates.map((u) => {
+                    const m = u.payload?.measurement;
+                    const prog = updProg && updProg.id === u.id ? updProg : null;
+                    const gain = m?.baseline && m?.candidate
+                      ? `통과율 ${Math.round(m.baseline.passRate * 100)}%→${Math.round(m.candidate.passRate * 100)}% · 지연 ${Math.round(m.baseline.avgLatencyMs / 1000)}s→${Math.round(m.candidate.avgLatencyMs / 1000)}s`
+                      : m?.reason ?? "";
+                    return (
+                      <div key={u.id} className="rounded-lg bg-white px-3 py-2.5 text-xs">
+                        <div className="flex items-center gap-2">
+                          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${{ pending: "bg-amber-100 text-amber-700", applied: "bg-emerald-100 text-emerald-700", rejected: "bg-stone-200 text-stone-500", reverted: "bg-stone-200 text-stone-500" }[u.status as string] ?? "bg-stone-200 text-stone-500"}`}>
+                            {{ pending: "대기", applied: `v${u.version} 적용됨`, rejected: "거부됨", reverted: "되돌림" }[u.status as string] ?? u.status}
+                          </span>
+                          <span className="flex-1 font-medium text-stone-800">{u.payload?.summary}</span>
+                        </div>
+                        {gain && <div className="mt-1 text-caption text-stone-500">{gain}</div>}
+                        {!!u.restart_required && <div className="mt-1 text-caption text-amber-600">적용 후 반영까지 잠시 시간이 걸릴 수 있습니다</div>}
+                        <div className="mt-2 flex gap-1.5">
+                          {u.status === "pending" && (
+                            <>
+                              <button disabled={updBusy} onClick={() => updAct(u.id, () => api.applyUpdate(u.id), true)}
+                                className="rounded-md bg-stone-900 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-stone-700 disabled:opacity-40">업데이트 적용</button>
+                              <button disabled={updBusy} onClick={() => updAct(u.id, () => api.rejectUpdate(u.id))}
+                                className="rounded-md bg-stone-200 px-2.5 py-1 text-[11px] text-stone-600 hover:bg-stone-300 disabled:opacity-40">거부</button>
+                            </>
+                          )}
+                          {u.status === "applied" && (
+                            <button disabled={updBusy} onClick={() => updAct(u.id, () => api.revertUpdate(u.id))}
+                              className="rounded-md bg-stone-200 px-2.5 py-1 text-[11px] text-stone-600 hover:bg-stone-300 disabled:opacity-40">이 버전 되돌리기</button>
+                          )}
+                        </div>
+                        {prog && (
+                          <div className="mt-2">
+                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-stone-200">
+                              <div className={`h-full rounded-full transition-all duration-200 ${prog.pct >= 100 ? "bg-emerald-500" : "bg-stone-700"}`} style={{ width: `${prog.pct}%` }} />
+                            </div>
+                            <div className="mt-1 text-[10px] text-stone-500">{prog.pct >= 100 ? "적용 완료" : "업데이트 적용 중…"}</div>
+                          </div>
+                        )}
+                        {!!updErr[u.id] && <div className="mt-1.5 text-[11px] font-medium text-red-600">{updErr[u.id]}</div>}
+                      </div>
+                    );
+                  })}
+                  {!updates.length && <p className="text-xs text-stone-400">적용 가능한 업데이트가 없습니다</p>}
+                </div>
+              </div>
+            )}
+
             {section === "general" && (
               <div className="space-y-6">
+                <div>
+                  <H>화면 테마</H>
+                  <div className="flex gap-1.5">
+                    {([["light", "밝게"], ["dark", "어둡게"], ["system", "시스템 설정"]] as const).map(([v, label]) => (
+                      <button
+                        key={v}
+                        onClick={() => { applyTheme(v); setTheme(v); }}
+                        className={`rounded-lg px-3 py-1.5 text-xs ${theme === v ? "bg-stone-900 text-white" : "bg-stone-200 text-stone-700 hover:bg-stone-300"}`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <div>
                   <H>시스템 프롬프트</H>
                   <textarea className={Input} rows={4} value={s.system_prompt ?? ""} onChange={(e) => update({ system_prompt: e.target.value })} />
                 </div>
                 <div>
                   <H>보안</H>
-                  <Field k="access_code" label="접속 암호 (설정 시 API 전체에 필요)" ph="비워두면 LAN 개방" />
+                  <Field s={s} update={update} k="access_code" label="접속 암호 (설정 시 API 전체에 필요)" ph="비워두면 LAN 개방" />
                 </div>
               </div>
             )}
           </div>
 
           {/* 하단 저장 바 */}
-          <div className="flex items-center gap-3 border-t border-stone-200 px-5 py-3">
-            <button onClick={saveAll} className="rounded-lg bg-stone-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-stone-700">저장</button>
-            {dirty && <span className="text-[11px] text-amber-600">저장되지 않은 변경 사항 있음</span>}
-            {savedMsg && <span className="text-[11px] text-emerald-600">{savedMsg}</span>}
-            <button onClick={onClose} className="ml-auto text-xs text-stone-500 hover:text-stone-800">닫기</button>
+          <div className="flex items-center gap-3 border-t border-stone-200 px-4 pb-[max(0.625rem,env(safe-area-inset-bottom))] pt-2.5 md:px-5 md:py-3">
+            <button onClick={saveAll} className="h-10 rounded-lg bg-stone-900 px-5 text-xs font-semibold text-white hover:bg-stone-700 md:h-8 md:px-4">저장</button>
+            {dirty && <span className="text-caption text-amber-600">저장되지 않은 변경 사항 있음</span>}
+            {savedMsg && <span className="text-caption text-emerald-600">{savedMsg}</span>}
+            <button onClick={onClose} className="ml-auto h-10 rounded-lg px-3 text-xs text-stone-500 hover:bg-stone-100 hover:text-stone-800 md:h-8">닫기</button>
           </div>
         </div>
       </div>

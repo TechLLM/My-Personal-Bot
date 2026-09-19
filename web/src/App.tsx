@@ -10,8 +10,8 @@ import { CredentialModal } from "./components/CredentialModal";
 import { HandoffModal } from "./components/HandoffModal";
 import { BrowserView } from "./components/BrowserView";
 import { ApprovalModal } from "./components/ApprovalModal";
-import { BotLobby } from "./components/BotLobby";
-import { Menu, Crown } from "lucide-react";
+import { BotLobby, roleSummary } from "./components/BotLobby";
+import { Menu, Crown, X } from "lucide-react";
 import { AgentIcon } from "./components/icons";
 import { WorkingStatus } from "./components/WorkingStatus";
 
@@ -43,6 +43,7 @@ export default function App() {
   const [liveViewKey, setLiveViewKey] = useState<string | null>(null); // 직접 대화 봇의 브라우저 run 키 (A3)
   const [viewKey, setViewKey] = useState<string | null>(null); // 열려 있는 컴퓨터 뷰 패널의 run 키
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]); // 봇의 위험 액션 승인 대기열
+  const [pendingUpdates, setPendingUpdates] = useState(0); // 개발이 보낸 미적용 버전 업데이트 수
   const [groups, setGroups] = useState<Group[]>([]); // 그룹채팅 목록
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null); // 현재 열린 그룹 대화
   const [runningInfo, setRunningInfo] = useState<Record<string, string | null>>({}); // 서버에서 실행 중인 봇: id → 현재 도구 — 사이드바 실시간 작업 표시용
@@ -126,6 +127,14 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
+  // 버전 업데이트 대기 수 — 설정 배지 + SSE 'evolve' 이벤트로도 갱신
+  useEffect(() => {
+    const poll = () => api.evolveUpdates().then((d) => setPendingUpdates(d.updates.filter((u) => u.status === "pending").length)).catch(() => {});
+    poll();
+    const t = setInterval(poll, 30000);
+    return () => clearInterval(t);
+  }, []);
+
   // 테이크오버 — 봇이 2FA·CAPTCHA 등 사람 단계를 만나면 인계 대기열에 올라온다
   useEffect(() => {
     const poll = () => api.handoffs().then((d) => setHandoffs(d.requests)).catch(() => {});
@@ -182,6 +191,26 @@ export default function App() {
     setTeamEvents([]);
     setLiveViewKey(null); setViewKey(null);
   }, []);
+
+  // 서버 푸시(SSE)로 봇 목록 실시간 갱신 — 봇이 다른 봇을 생성·삭제·수정하면
+  // 서버가 'agents' 이벤트를 쏘고, 열린 탭이 즉시 목록을 다시 가져온다 (새로고침 불필요)
+  useEffect(() => {
+    const key = localStorage.getItem("mybot_key");
+    const es = new EventSource("/api/events" + (key ? `?key=${encodeURIComponent(key)}` : ""));
+    es.addEventListener("evolve", () => {
+      api.evolveUpdates().then((d) => setPendingUpdates(d.updates.filter((u) => u.status === "pending").length)).catch(() => {});
+    });
+    es.addEventListener("agents", () => {
+      refreshAgents();
+      // 봇 삭제는 그 봇의 세션 대화도 함께 지운다 — 대화 목록도 갱신하고,
+      // 지금 보고 있는 대화가 지워졌으면 로비로 돌린다
+      api.conversations().then((d) => {
+        setConversations(d.conversations);
+        if (convIdRef.current && !d.conversations.some((cv) => cv.id === convIdRef.current)) newConversation();
+      }).catch(() => {});
+    });
+    return () => es.close();
+  }, [refreshAgents, newConversation]);
 
   // 봇 선택 = 그 봇의 메인 세션으로 진입 — 루틴 단발 대화가 아닌 메인 세션(위임·루틴 작업 내역이 쌓이는 곳)
   const selectBot = useCallback((a: Agent) => {
@@ -339,6 +368,17 @@ export default function App() {
     setStreaming(false);
   }, []);
 
+  // 모든 봇 실행 중지 — 이 대화뿐 아니라 백그라운드 위임·봇 간 메시지까지 서버에서 한 번에 끊는다
+  const stopAll = useCallback(() => {
+    setQueued([]);
+    abortRef.current?.abort();
+    setStreaming(false);
+    api.stopAllRuns()
+      .then(() => api.agentsRunning())
+      .then((d) => setRunningInfo(Object.fromEntries(d.running.map((r) => [r.id, r.tool]))))
+      .catch(() => {});
+  }, []);
+
   const regenerate = useCallback((m: Message) => {
     if (streaming || m.role !== "assistant") return;
     setStreaming(true);
@@ -462,24 +502,31 @@ export default function App() {
         onClose={() => setSidebarOpen(false)}
         workingId={streaming ? activeAgent?.id ?? null : null}
         working={runningInfo}
+        onStopAll={stopAll}
+        updateCount={pendingUpdates}
       />
       <main className="relative flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center gap-2 border-b border-stone-200/60 px-3 py-2 sm:px-4 sm:py-2.5">
-          <button className="-ml-1 p-1.5 text-stone-500 hover:text-stone-800" onClick={() => setSidebarOpen(!sidebarOpen)}><Menu size={16} strokeWidth={1.8} /></button>
-          <span className="text-sm text-stone-600 truncate">
-            {convId ? currentConv?.agent_name ?? currentConv?.title ?? "세션" : pendingAgent ? `${pendingAgent.name}와의 새 세션` : "봇 선택"}
-          </span>
-          {!convId && pendingAgent && (
-            <span className="flex shrink-0 items-center gap-1 rounded-full bg-stone-200 px-2 py-0.5 text-[11px] text-stone-600">
-              {!!pendingAgent.is_boss && <Crown size={10} className="text-amber-600" />}
-              <AgentIcon name={pendingAgent.name} seed={pendingAgent.avatar} size={11} /> {pendingAgent.name}
-              <button className="ml-0.5 text-stone-400 hover:text-stone-700" onClick={() => setPendingAgent(null)}>×</button>
+        <header className="flex min-h-14 items-center gap-1.5 border-b border-stone-200/60 px-2 pt-[env(safe-area-inset-top)] md:min-h-[52px] md:px-3">
+          <button
+            className="grid size-10 shrink-0 place-items-center rounded-xl text-stone-500 hover:bg-stone-200/60 hover:text-stone-800 md:size-9"
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            aria-label={sidebarOpen ? "사이드바 닫기" : "사이드바 열기"}
+          ><Menu size={20} strokeWidth={1.8} /></button>
+          {convId && currentConv?.agent_name ? (
+            <span className="flex min-w-0 items-center gap-2" title="이 세션을 담당하는 봇 — 모델을 바꿔도 봇의 기억·맥락은 유지됩니다">
+              <AgentIcon name={currentConv.agent_name} seed={currentConv.agent_avatar} size={26} className="shrink-0" />
+              <span className="truncate text-[15px] font-semibold text-stone-900">{currentConv.agent_name}</span>
             </span>
-          )}
-          {convId && currentConv?.agent_name && (
-            <span className="flex shrink-0 items-center gap-1 rounded-full bg-stone-200 px-2 py-0.5 text-[11px] text-stone-600" title="이 세션을 담당하는 봇 — 모델을 바꿔도 봇의 기억·맥락은 유지됩니다">
-              <AgentIcon name={currentConv.agent_name} seed={currentConv.agent_avatar} size={11} /> {currentConv.agent_name}
+          ) : !convId && pendingAgent ? (
+            <span className="flex min-w-0 items-center gap-2">
+              <AgentIcon name={pendingAgent.name} seed={pendingAgent.avatar} size={26} className="shrink-0" />
+              <span className="truncate text-[15px] font-semibold text-stone-900">{pendingAgent.name}</span>
+              {!!pendingAgent.is_boss && <Crown size={14} className="shrink-0 text-amber-600" />}
+              <span className="shrink-0 rounded-full bg-stone-200/70 px-2 py-0.5 text-2xs font-medium text-stone-600">새 세션</span>
+              <button className="grid size-8 shrink-0 place-items-center rounded-lg text-stone-400 hover:bg-stone-200/60 hover:text-stone-700" onClick={() => setPendingAgent(null)} title="봇 선택 해제" aria-label="봇 선택 해제"><X size={16} /></button>
             </span>
+          ) : (
+            <span className="truncate text-[15px] font-semibold text-stone-800">{convId ? currentConv?.title ?? "세션" : "봇 선택"}</span>
           )}
         </header>
 
@@ -490,24 +537,20 @@ export default function App() {
               <BotLobby agents={agents} agentsLoaded={agentsLoaded} models={models} defaultModel={defaultModel} routineAgentIds={routineAgentIds} createSignal={createSignal} onSelect={selectBot} onRefresh={refreshAgents} />
             )}
             {empty && convId && (
-              <div className="mt-[25vh] text-center">
+              <div className="mb-rise mt-[16vh] text-center md:mt-[22vh]">
                 {currentConv?.agent_name && (
-                  <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-stone-200 text-stone-700">
-                    <AgentIcon name={currentConv.agent_name} seed={currentConv.agent_avatar} size={22} />
-                  </div>
+                  <div className="mb-4 flex justify-center"><AgentIcon name={currentConv.agent_name} seed={currentConv.agent_avatar} size={64} /></div>
                 )}
-                <h1 className="font-display text-2xl font-semibold text-stone-900">{currentConv?.agent_name ?? currentConv?.title ?? "새 세션"}</h1>
-                <p className="mt-1 text-xs text-stone-500">이 봇에게 업무를 지시하세요</p>
+                <h1 className="font-display text-2xl font-bold text-stone-900">{currentConv?.agent_name ?? currentConv?.title ?? "새 세션"}</h1>
+                <p className="mt-1.5 text-sm text-stone-500">이 봇에게 업무를 지시하세요</p>
               </div>
             )}
             {empty && !convId && pendingAgent && (
-              <div className="mt-[25vh] text-center">
-                <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-stone-200 text-stone-700">
-                  <AgentIcon name={pendingAgent.name} seed={pendingAgent.avatar} size={22} />
-                </div>
-                <h1 className="font-display text-2xl font-semibold text-stone-900">{pendingAgent.name}</h1>
-                <p className="mt-1 text-xs text-stone-500 max-w-md mx-auto">{pendingAgent.role_prompt || "이 봇에게 업무를 지시하세요"}</p>
-                <p className="mt-0.5 font-mono text-[10px] text-stone-400">{pendingAgent.model_label ?? pendingAgent.model}</p>
+              <div className="mb-rise mt-[16vh] text-center md:mt-[22vh]">
+                <div className="mb-4 flex justify-center"><AgentIcon name={pendingAgent.name} seed={pendingAgent.avatar} size={64} /></div>
+                <h1 className="font-display text-2xl font-bold text-stone-900">{pendingAgent.name}</h1>
+                <p className="mx-auto mt-1.5 line-clamp-3 max-w-md text-sm text-stone-500">{pendingAgent.role_prompt ? roleSummary(pendingAgent.role_prompt, pendingAgent.name) : "이 봇에게 업무를 지시하세요"}</p>
+                <p className="mt-2 font-mono text-2xs text-stone-400">{pendingAgent.model_label ?? pendingAgent.model}</p>
               </div>
             )}
             <div className="space-y-6">
@@ -538,17 +581,16 @@ export default function App() {
           </div>
         </div>
 
-        {/* 위쪽을 읽는 동안 새 메시지·회신이 도착하면 표시 — 누르면 최신으로 이동 */}
-        {showJump && (
-          <button
-            onClick={() => { nearBottomRef.current = true; setShowJump(false); scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); }}
-            className="absolute bottom-32 left-1/2 z-10 -translate-x-1/2 rounded-full border border-stone-200 bg-white px-3.5 py-1.5 text-xs font-medium text-stone-600 shadow-[0_4px_16px_rgba(0,0,0,0.08)] hover:bg-stone-50"
-          >↓ 새 내용 — 최신으로</button>
-        )}
-
         {/* 봇이 하나도 없으면 입력창 없음 — 첫 화면은 봇 생성부터 */}
         {(!agentsLoaded || agents.length > 0 || convId || pendingAgent) && (
-          <div className="px-3 pt-1 sm:px-4 pb-[calc(3.5rem+env(safe-area-inset-bottom))]">
+          <div className="relative px-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-1 md:px-4 md:pb-[calc(3.5rem+env(safe-area-inset-bottom))]">
+            {/* 위쪽을 읽는 동안 새 메시지·회신이 도착하면 표시 — 입력창 바로 위, 누르면 최신으로 이동 */}
+            {showJump && (
+              <button
+                onClick={() => { nearBottomRef.current = true; setShowJump(false); scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" }); }}
+                className="absolute bottom-full left-1/2 z-10 mb-2 h-10 -translate-x-1/2 whitespace-nowrap rounded-full border border-stone-200 bg-white px-4 text-xs font-medium text-stone-600 shadow-[0_6px_20px_-6px_rgba(28,25,23,0.2)] hover:bg-stone-50"
+              >↓ 새 내용 — 최신으로</button>
+            )}
             <div className="mx-auto max-w-3xl">
               <Composer models={models} model={effectiveModel} onModelChange={changeModel} onSend={send} onStop={stop} streaming={streaming} queued={queued} onRemoveQueued={(i) => setQueued((prev) => prev.filter((_, j) => j !== i))} personas={personas} personaId={personaId} onPersonaChange={setPersonaId} skills={skills} />
             </div>
@@ -559,7 +601,7 @@ export default function App() {
       {liveViewKey && !viewKey && (
         <button
           onClick={() => setViewKey(liveViewKey)}
-          className="fixed bottom-4 right-4 z-40 rounded-full border border-stone-200 bg-white px-3.5 py-2 text-xs font-medium text-stone-600 shadow-[0_4px_16px_rgba(0,0,0,0.08)] hover:bg-stone-50"
+          className="fixed right-3 top-[calc(4rem+env(safe-area-inset-top))] z-40 h-10 rounded-full border border-stone-200 bg-white px-4 text-xs font-medium text-stone-600 shadow-[0_6px_20px_-6px_rgba(28,25,23,0.2)] hover:bg-stone-50 md:bottom-4 md:right-4 md:top-auto"
         >
           🖥 봇 화면 보기
         </button>

@@ -1,37 +1,124 @@
 @import "tailwindcss";
+@import "pretendard/dist/web/variable/pretendardvariable-dynamic-subset.css";
 @import "highlight.js/styles/github.css";
 
-/* ── 디자인 토큰 — 웜 모노크롬 + 절제된 파스텔 액센트 ── */
+/* 마우스 기기에서만 hover로 감추는 요소용 — 터치 기기에선 항상 보여야 누를 수 있음 */
+@custom-variant can-hover (@media (hover: hover) and (pointer: fine));
+
+/* ── 타이포 토큰 — 작은 글자 단계는 화면 폭에 따라 값이 바뀜 (아래 :root) ── */
+@theme {
+  --font-sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif;
+  --font-mono: "Geist Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  --text-micro: var(--fs-micro);       /* 배지 */
+  --text-micro--line-height: 1.3;
+  --text-2xs: var(--fs-2xs);           /* 메타·모델명 */
+  --text-2xs--line-height: 1.4;
+  --text-caption: var(--fs-caption);   /* 보조 설명 */
+  --text-caption--line-height: 1.45;
+  --text-body: var(--fs-body);         /* 대화 본문 */
+  --text-body--line-height: 1.7;
+}
+
+/* ── 디자인 토큰 — 웜 모노크롬 + 파스텔 봇 얼굴 ── */
 :root {
   --canvas: #F7F6F3;
+  --panel: #EFEDE8;
   --ink: #2F3437;
   --ink-strong: #16181A;
   --ink-mute: #787774;
   --line: #E7E5E1;
-  --serif: "Newsreader", "Instrument Serif", ui-serif, Georgia, "Apple SD Gothic Neo", serif;
-  --sans: "Pretendard", "SF Pro Display", -apple-system, "Helvetica Neue", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
-  --mono: "Geist Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  --sans: var(--font-sans);
+  --mono: var(--font-mono);
+
+  /* 모바일 기본값 — 좁은 화면에서는 작은 글자 단계를 한 칸씩 키움 */
+  --fs-micro: 11.5px;
+  --fs-2xs: 12px;
+  --fs-caption: 13px;
+  --fs-body: 16px;
+  --text-xs: 0.8125rem;
+  --text-sm: 0.9375rem;
+}
+@media (min-width: 768px) {
+  :root {
+    --fs-micro: 10.5px;
+    --fs-2xs: 11px;
+    --fs-caption: 12px;
+    --fs-body: 15px;
+    --text-xs: 0.75rem;
+    --text-sm: 0.875rem;
+  }
 }
 
+/* ── 다크 테마 ──
+   Tailwind v4는 모든 색을 var(--color-*)로 컴파일한다(.bg-stone-200 → background-color: var(--color-stone-200)).
+   그래서 팔레트 변수만 뒤집으면 화면 곳곳의 stone-*·white 클래스 500여 곳이 그대로 따라온다.
+   웜 모노크롬 성격은 유지하고 명도만 뒤집되, 보조 텍스트(400~500)는 가독성을 위해 중간 명도로 남긴다. */
+html.dark {
+  color-scheme: dark;
+  --color-white: #171614;        /* 카드·패널 바탕 */
+  --color-stone-50: #1b1917;
+  --color-stone-100: #222020;
+  --color-stone-200: #2d2a28;
+  --color-stone-300: #3c3835;
+  --color-stone-400: #8b847c;
+  --color-stone-500: #a49c94;
+  --color-stone-600: #bdb5ad;
+  --color-stone-700: #d7d1cb;
+  --color-stone-800: #e9e5e0;
+  --color-stone-900: #f6f3ef;    /* 본문 텍스트 */
+  --color-stone-950: #fbf9f7;
+
+  --canvas: #121110;
+  --panel: #1a1917;
+  --ink: #E9E5E0;
+  --ink-strong: #F7F5F2;
+  --ink-mute: #9A948C;
+  --line: #2d2a28;
+}
+
+/* 코드 하이라이트 — github.css는 밝은 테마 고정이라 다크에서 눈이 부시다 */
+html.dark .hljs { background: #1b1917; color: #e9e5e0; }
+html.dark .hljs-comment, html.dark .hljs-quote { color: #8b847c; }
+html.dark .hljs-keyword, html.dark .hljs-selector-tag, html.dark .hljs-literal { color: #ff9e9e; }
+html.dark .hljs-string, html.dark .hljs-attr, html.dark .hljs-addition { color: #a8e0a0; }
+html.dark .hljs-title, html.dark .hljs-name, html.dark .hljs-section { color: #9ec5ff; }
+html.dark .hljs-number, html.dark .hljs-symbol, html.dark .hljs-built_in { color: #f0c088; }
+
 html, body, #root { height: 100%; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body {
   background: var(--canvas);
   color: var(--ink);
   font-family: var(--sans);
-  letter-spacing: -0.011em;
+  letter-spacing: -0.01em;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  -webkit-tap-highlight-color: transparent;
+  word-break: keep-all;          /* 한글을 음절이 아닌 어절 단위로 줄바꿈 */
+  overflow-wrap: break-word;     /* 긴 영문·URL은 넘치지 않게 */
 }
-.font-display { font-family: var(--serif); letter-spacing: -0.025em; }
+button, a, label, select, [role="button"] { touch-action: manipulation; }
+.font-display { font-family: var(--sans); letter-spacing: -0.03em; }
 
-::selection { background: #E1F3FE; }
+/* iOS는 16px 미만 입력칸에 포커스하면 화면을 확대함 — 모바일 입력 글자는 16px 이상 */
+@media (max-width: 767px) {
+  input, textarea, select { font-size: max(16px, 1em); }
+}
+
+::selection { background: #DCEEFB; }
+
+/* 가로 스크롤 줄 — 스크롤바 없이 손가락으로 밀기 */
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
 
 /* ── 마크다운 — 문서처럼 읽히는 타이포그래피 ── */
-.markdown { line-height: 1.68; }
+.markdown { line-height: 1.7; word-break: keep-all; overflow-wrap: anywhere; }
 .markdown pre {
   background: #F6F8FA;                 /* 라이트 에디터 캔버스 */
   border: 1px solid var(--line);
   border-left: 2px solid #9CCFEC;      /* 좌측 액센트 — 에디터 gutter */
-  border-radius: 0.5rem;
+  border-radius: 0.625rem;
   padding: 0.75rem 1rem;
   overflow-x: auto;
   font-size: 0.85rem;
@@ -41,28 +128,30 @@ body {
 }
 .markdown pre code { font-family: inherit; }
 .markdown code:not(pre code) {
-  background: #EFF1F3;
-  border-radius: 0.25rem;
-  padding: 0.1rem 0.3rem;
+  background: #EFEDE8;
+  border-radius: 0.3rem;
+  padding: 0.1rem 0.35rem;
   font-size: 0.85em;
   font-family: var(--mono);
 }
 /* diff 블록 — GitHub 라이트 색상 */
 .markdown .hljs-addition { color: #1A7F37; background: #DAFBE1; display: inline-block; width: 100%; }
 .markdown .hljs-deletion { color: #D1242F; background: #FFEBE9; display: inline-block; width: 100%; }
-.markdown p { margin: 0.5rem 0; }
-.markdown ul, .markdown ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+.markdown p { margin: 0.55rem 0; }
+.markdown ul, .markdown ol { margin: 0.55rem 0; padding-left: 1.4rem; }
 .markdown ul { list-style: disc; }
 .markdown ol { list-style: decimal; }
-.markdown h1, .markdown h2, .markdown h3 { font-weight: 650; letter-spacing: -0.02em; margin: 1.1rem 0 0.5rem; color: var(--ink-strong); }
+.markdown li { margin: 0.2rem 0; }
+.markdown li::marker { color: #A8A29E; }
+.markdown h1, .markdown h2, .markdown h3 { font-weight: 700; letter-spacing: -0.025em; margin: 1.25rem 0 0.5rem; color: var(--ink-strong); }
 .markdown h1 { font-size: 1.4rem; }
 .markdown h2 { font-size: 1.2rem; }
 .markdown h3 { font-size: 1.05rem; }
-.markdown table { border-collapse: collapse; margin: 0.75rem 0; }
-.markdown th, .markdown td { border: 1px solid var(--line); padding: 0.35rem 0.75rem; }
+.markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 0.75rem 0; }
+.markdown th, .markdown td { border: 1px solid var(--line); padding: 0.4rem 0.75rem; }
 .markdown th { background: #FBFBFA; font-weight: 600; }
 .markdown blockquote { border-left: 3px solid var(--line); padding-left: 1rem; color: var(--ink-mute); margin: 0.5rem 0; }
-.markdown a { color: #1F6C9F; text-decoration: underline; text-decoration-color: #B9DFF2; }
+.markdown a { color: #1F6C9F; text-decoration: underline; text-decoration-color: #B9DFF2; text-underline-offset: 2px; }
 
 @keyframes pulse-soft { 0%,100% { opacity: 1 } 50% { opacity: 0.4 } }
 .thinking-dot { animation: pulse-soft 1.2s ease-in-out infinite; }
@@ -99,3 +188,11 @@ body {
 /* 진입 모션 — 조용한 페이드+상승 */
 @keyframes mb-rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 .mb-rise { animation: mb-rise .55s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+/* 모바일 사이드바 — 왼쪽에서 밀려 들어옴 */
+@keyframes mb-drawer { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+@keyframes mb-fade { from { opacity: 0; } to { opacity: 1; } }
+@media (max-width: 767px) {
+  .mb-drawer { animation: mb-drawer .32s cubic-bezier(0.16, 1, 0.3, 1); }
+  .mb-fade { animation: mb-fade .25s ease-out; }
+}

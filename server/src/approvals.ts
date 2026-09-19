@@ -6,7 +6,11 @@ import { db, uid, now, getSetting } from "./db";
 // 규칙 우선순위: require > allow > 기본 위험 패턴. Require가 항상 이김 (그록과 동일)
 
 // 기본 위험 패턴 — 규칙이 없어도 이름만으로 승인 요구 (파괴적·외부 영향 액션)
-const DEFAULT_RISKY = /send_email|send_telegram|delete|publish|purchase|payment|pay_|_pay|submit_form|drop|execute_sql|shell_run/i;
+// skill_save — 스킬은 전 봇이 재사용하는 조직 자산이라 저장 전 사용자 승인
+// agent_create/update/reorder/delete — 봇 설정 변경은 사용자 승인 후 반영 (조직 관리 채널)
+// shell_run 제외(2026-09-18 소유자 결정) — 작업 디렉터리 샌드박스·30초 상한 안에서만 돌고,
+// ls·find 같은 조회까지 팝업을 띄워 승인 51건이 만료되고 업무가 통째로 멈췄다
+const DEFAULT_RISKY = /send_email|send_telegram|delete|publish|purchase|payment|pay_|_pay|submit_form|drop|execute_sql|skill_save|agent_(create|update|reorder)|computer_/i;
 // 승인 면제 — 이름에 위험 단어가 있어도 실제로는 안전한 도구
 const DEFAULT_SAFE = /routine_list|agent_list|read_|list_|_list|search|lookup/i;
 
@@ -45,15 +49,21 @@ function evalCond(condJson: string, args: Record<string, unknown>): boolean {
 }
 
 // agent_create 인자에서 생성 예정 수 — bots/names 배열 또는 단일 name
+// 빈 배열은 "인자 없음" — {"bots":[],"name":"X"}는 단일 생성 1건으로 센다
 function prospectiveCreateCount(args: Record<string, unknown>): number {
-  if (Array.isArray(args.bots)) return args.bots.length;
-  if (Array.isArray(args.agents)) return args.agents.length;
-  if (Array.isArray(args.names)) return args.names.length;
+  if (Array.isArray(args.bots) && args.bots.length) return args.bots.length;
+  if (Array.isArray(args.agents) && args.agents.length) return args.agents.length;
+  if (Array.isArray(args.names) && args.names.length) return args.names.length;
   return (args.name ?? args.bot_name ?? args.agent) ? 1 : 0;
 }
 
+// 승인 실행 결과가 도구 측 오류 문자열인지 — "봇 생성됨" 같은 성공 결과와 구분해
+// 실패 재개 안내·재요청 차단·디듀프 메시지 분기에 쓴다
+const TOOL_ERROR_RE = /^(오류|실행 오류|도구 오류|브라우저 오류|권한 없음|알 수 없는 도구|봇 없음|상위 봇 없음|라우팅 규칙|순환 차단|위임 깊이 제한|자기 자신|하위 봇 한도 초과|업무 트리)/;
+export const looksLikeToolError = (result: string) => TOOL_ERROR_RE.test(result.trim());
+
 // 도구 실행 전 호출 — 승인 필요면 요청을 만들고 안내 문자열 반환, 아니면 null
-export function gateApproval(tool: string, args: Record<string, unknown>, agentId: string | null, resumeTask: string): string | null {
+export function gateApproval(tool: string, args: Record<string, unknown>, agentId: string | null, resumeTask: string, chain?: string[]): string | null {
   let required = approvalDecision(tool, args) === "require";
   // A6/C7 — 봇 생성은 정원 내면 승인 면제(팀장 포함). 전체 정원(agent_cap_total, 기본 20)
   // 초과분만 승인 대상. 팀장의 max_children 한도는 도구 내부에서 거부하므로 여기선 보지 않는다.
@@ -63,13 +73,31 @@ export function gateApproval(tool: string, args: Record<string, unknown>, agentI
     if (want > 0 && total + want > (Number(getSetting("agent_cap_total")) || 20)) required = true;
   }
   if (!required) return null;
+  // 형식이 깨진 호출은 팝업을 만들지 않고 즉시 오류를 돌려준다 — 승인→실행실패→재요청 팝업 루프 방지.
+  // 봇은 이 오류를 보고 인자를 고쳐 다시 요청할 수 있다 (사용자 승인을 소모하지 않는다)
+  if (tool === "agent_create" && !prospectiveCreateCount(args))
+    return '오류: 생성할 봇 이름이 없습니다 — {"name":"메일분석봇","role":"20년 경력의 메일 분석 시니어"} 형식 또는 {"bots":[{"name":"봇1","role":"..."},{"name":"봇2","role":"..."}]} 배치 형식으로 호출하세요';
   const argsJson = canonicalArgs(args);
   // 최근에 이미 승인·실행된 동일 호출 — 승인 재개 봇의 재시도가 같은 팝업을 반복해 띄우는 것을 차단.
   // 재실행은 하지 않고 이전 실행 결과를 그대로 돌려준다 (비멱등 도구의 이중 실행 방지).
   const done = db.prepare("SELECT result FROM approval_requests WHERE status = 'approved' AND tool = ? AND agent_id IS ? AND args = ? AND resolved_at > ? ORDER BY resolved_at DESC LIMIT 1")
     .get(tool, agentId ?? null, argsJson, now() - 10 * 60_000) as { result: string | null } | undefined;
   if (done && !(done.result ?? "").startsWith("실행 오류") && !deleteTargetStillExists(tool, args)) {
-    return `이미 승인되어 실행 완료된 동일한 호출입니다 — 이전 실행 결과: ${(done.result ?? "").slice(0, 500)}\n이 호출을 다시 요청하지 말고 작업을 계속하세요.`;
+    const res = done.result ?? "";
+    return looksLikeToolError(res)
+      ? `이전에 승인·실행됐으나 실패한 동일한 호출입니다 — 실패 결과: ${res.slice(0, 500)}\n같은 인자로 재요청하면 같은 실패입니다 — 인자를 수정해 요청하거나, 불가능하면 실패를 보고하세요.`
+      : `이미 승인되어 실행 완료된 동일한 호출입니다 — 이전 실행 결과: ${res.slice(0, 500)}\n이 호출을 다시 요청하지 말고 작업을 계속하세요.`;
+  }
+  // 같은 대상에 대한 승인 실행이 연속 실패했으면 팝업을 더 띄우지 않는다 — 역할 문구만 조금 바꾼 재요청이
+  // 인자 디듀프를 우회해 승인 팝업을 무한 반복한 사고(2026-09-18 골든테스트봇, 6회 승인·0건 생성) 방지
+  if (tool.startsWith("agent_")) {
+    const targetName = String(args.name ?? args.bot_name ?? args.agent ?? args.to ?? args.target ?? "").trim();
+    if (targetName) {
+      const prev = db.prepare("SELECT result FROM approval_requests WHERE status = 'approved' AND tool = ? AND resolved_at > ? AND COALESCE(json_extract(args,'$.name'), json_extract(args,'$.bot_name'), json_extract(args,'$.agent'), json_extract(args,'$.to'), json_extract(args,'$.target')) = ? ORDER BY resolved_at DESC LIMIT 2")
+        .all(tool, now() - 30 * 60_000, targetName) as { result: string | null }[];
+      if (prev.length >= 2 && prev.every((r) => looksLikeToolError(r.result ?? "")))
+        return `같은 대상(${targetName})에 대한 승인 실행이 연속 실패했습니다 — 최근 실패: ${(prev[0].result ?? "").slice(0, 300)}\n같은 의도의 재요청을 반복하지 말고, 호출 형식을 바로잡거나 불가능하면 실패를 보고하세요.`;
+    }
   }
   // 최근에 거부된 동일 호출 — 거부를 우회하는 재요청 팝업을 차단
   const denied = db.prepare("SELECT id FROM approval_requests WHERE status = 'denied' AND tool = ? AND agent_id IS ? AND args = ? AND resolved_at > ? LIMIT 1")
@@ -77,11 +105,18 @@ export function gateApproval(tool: string, args: Record<string, unknown>, agentI
   if (denied) {
     return `사용자가 이 호출(${tool})을 이미 거부했습니다 — 같은 호출을 다시 요청하지 말고, 다른 방법이 있으면 그것으로 진행하고 없으면 거부됐다고 보고하세요.`;
   }
+  // 같은 봇에 대한 설정 수정이 이미 대기 중이면 최신 요청으로 교체 — 문구만 조금씩 다른 수정 요청이
+  // 봇마다 5~7건씩 팝업으로 쌓였던 사고(2026-09-18) 방지. 요청한 봇이 달라도 대상이 같으면 교체한다
+  if (tool === "agent_update") {
+    const target = String(args.name ?? args.to ?? args.agent ?? args.target ?? args.bot ?? "");
+    if (target) db.prepare("UPDATE approval_requests SET status = 'expired', result = '같은 봇에 대한 새 수정 요청으로 대체됨', resolved_at = ? WHERE status = 'pending' AND tool = 'agent_update' AND args != ? AND COALESCE(json_extract(args, '$.name'), json_extract(args, '$.to'), json_extract(args, '$.agent'), json_extract(args, '$.target'), json_extract(args, '$.bot')) = ?")
+      .run(now(), argsJson, target);
+  }
   const dup = db.prepare("SELECT id FROM approval_requests WHERE status = 'pending' AND tool = ? AND agent_id IS ? AND args = ?").get(tool, agentId ?? null, argsJson) as any;
   if (!dup) {
     const summary = summarizeArgs(tool, args);
-    db.prepare("INSERT INTO approval_requests (id, tool, args, summary, agent_id, resume, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)")
-      .run(uid(), tool, argsJson, summary, agentId ?? null, resumeTask.slice(0, 500), now());
+    db.prepare("INSERT INTO approval_requests (id, tool, args, summary, agent_id, resume, status, created_at, chain) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)")
+      .run(uid(), tool, argsJson, summary, agentId ?? null, resumeTask.slice(0, 500), now(), chain?.length ? JSON.stringify(chain) : null);
   }
   return `이 작업(${tool})은 사용자 승인이 필요합니다 — 화면의 승인 팝업에서 승인되면 자동으로 실행되고 작업이 이어집니다. 사용자에게 승인을 기다리고 있다고 알리고, 다른 작업으로 진행하세요. 같은 도구를 다시 호출해 재시도하지 마세요.`;
 }
@@ -109,6 +144,25 @@ function canonicalArgs(args: Record<string, unknown>): string {
 }
 
 function summarizeArgs(tool: string, args: Record<string, unknown>): string {
+  // 스킬 저장 승인 — 사용자가 절차 전체를 보고 승인 여부를 판단해야 하므로 잘라내지 않고 표시
+  if (tool === "skill_save") {
+    const trigger = args.trigger ? `\n적용 조건: ${String(args.trigger).slice(0, 200)}` : "";
+    const notes = args.notes ? `\n주의점: ${String(args.notes).slice(0, 300)}` : "";
+    return `skill_save — 스킬 "${String(args.name ?? "").slice(0, 60)}"${trigger}\n절차:\n${String(args.steps ?? "").slice(0, 1200)}${notes}`.slice(0, 1800);
+  }
+  // 조직 변경 승인 — 무엇이 바뀌는지(대상·필드·일괄 생성 목록)를 명확히 표시
+  if (tool.startsWith("agent_")) {
+    const parts = Object.entries(args ?? {}).map(([k, v]) =>
+      k === "bots" && Array.isArray(v)
+        ? `bots: ${v.map((b: any) => b?.name ?? "?").join(", ")}`
+        : `${k}: ${String(v).slice(0, 300)}`);
+    return `${tool}(${parts.join(", ")})`.slice(0, 900);
+  }
+  // 데스크톱 제어 승인 — 무슨 화면 액션인지 한국어로 표시
+  if (tool.startsWith("computer_")) {
+    const label: Record<string, string> = { computer_look: "화면 분석", computer_apps: "실행 앱 목록", computer_activate: `앱 전면 전환 (${args.app})`, computer_click: `화면 클릭 (${args.x}, ${args.y})`, computer_doubleclick: `화면 더블클릭 (${args.x}, ${args.y})`, computer_rightclick: `화면 우클릭 (${args.x}, ${args.y})`, computer_type: `텍스트 입력 "${String(args.text ?? "").slice(0, 120)}"`, computer_key: `키 입력 ${args.key}`, computer_scroll: `스크롤 (${args.x}, ${args.y}) ${args.clicks ?? ""}`, computer_drag: `드래그 (${args.x1},${args.y1})→(${args.x2},${args.y2})` };
+    return `데스크톱 제어 — ${label[tool] ?? `${tool}(${JSON.stringify(args).slice(0, 200)})`}`;
+  }
   const parts = Object.entries(args ?? {}).slice(0, 4).map(([k, v]) => `${k}: ${String(v).slice(0, 120)}`);
   return `${tool}(${parts.join(", ")})`.slice(0, 400);
 }
@@ -127,16 +181,33 @@ export function dispatchAgentMessage(msgId: string) {
     const target = getAgent(msg.to_agent_id);
     if (!target) { db.prepare("UPDATE agent_messages SET status = 'failed', reply = '봇을 찾을 수 없음', done_at = ? WHERE id = ?").run(now(), msgId); return; }
     const sender = msg.from_agent_id ? getAgent(msg.from_agent_id) : null;
+    // 메시지 사슬 = 보낸 봇까지의 상위 봇 id. 받는 봇은 사슬의 봇에게 되돌아 지시·메시지를 보낼 수 없다
+    let chain: string[] = [];
+    try { chain = JSON.parse(msg.chain ?? "[]"); } catch {}
     runAgentDetached(target, {
       label: `[${sender?.name ?? "사용자"} 메시지] ${msg.content.slice(0, 150)}`,
       task: `[${sender?.name ?? "사용자"} 봇의 비동기 메시지입니다. 처리하고 회신할 내용을 보고하세요 — 회신은 보낸 봇의 세션에 전달됩니다]\n\n${msg.content}`,
       sessionTitle: `[${sender?.name ?? "사용자"} 메시지] ${msg.content}`,
       sessionTask: msg.content,
       replyTo: sender,
+      chain,
       verifyIntent: false, // 메시지 본문은 보고·알림 — 지시-실측 검증 대상이 아님 (보고 속 단어를 지시로 오독해 반대 실행을 강제하는 사고 방지)
       onDone: (state) => {
         db.prepare("UPDATE agent_messages SET status = ?, reply = ?, done_at = ? WHERE id = ?")
           .run(state.status === "done" ? "done" : "failed", (state.result?.trim() || "(결과 없음)").slice(0, 4000), now(), msgId);
+        // 회신을 발신 봇이 실제로 받아 처리하게 재실행 — 세션에 기록만 하면 아무도 읽지 않는 데드레터가 됨
+        // 재실행 사슬에 회신한 봇을 넣어, 회신에 다시 메시지로 답하는 보고-회신 핑퐁을 구조적으로 막는다
+        // (추가 안전장치: 봇 쌍 메시지 10건/30분 + 봇별 실행 15회/시간 상한)
+        if (sender && state.status === "done" && getAgent(sender.id)) {
+          runAgentDetached(sender, {
+            label: `[${target.name} 회신] ${msg.content.slice(0, 120)}`,
+            task: `[${target.name} 봇이 보낸 회신이 도착했습니다 — 내용을 검토해 취합·보고·후속 조치 등 다음 단계를 이어가세요. ${target.name}에게 접수·확인 회신을 다시 보내지 마세요]\n\n${(state.result?.trim() || "(결과 없음)").slice(0, 3000)}`,
+            sessionTitle: `[${target.name} 회신] ${msg.content.slice(0, 80)}`,
+            sessionTask: msg.content,
+            chain: [...chain.filter((id) => id !== sender.id), target.id],
+            verifyIntent: false, // 회신 전달은 지시가 아님 — 지시-실측 검증 대상에서 제외
+          });
+        }
       },
     });
   })().catch(() => {});
@@ -219,14 +290,15 @@ export const approvalsRoute = new Hono()
   });
 
 // 승인된 도구를 실제 실행 → 결과 저장 → 봇 작업 재개
-async function executeApproved(req: any) {
+export async function executeApproved(req: any) {
   const { callBuiltin } = await import("./team");
   const { browserTool, BROWSER_TOOLS } = await import("./browser");
   const { mcpCall, mcpTools } = await import("./mcp");
   const args = JSON.parse(req.args ?? "{}");
   let result: string;
   try {
-    if (BROWSER_TOOLS.some((t: any) => t.function.name === req.tool)) result = await browserTool(req.id, req.tool, args);
+    if (req.tool.startsWith("computer_")) result = await (await import("./computer")).computerTool(req.tool, args);
+    else if (BROWSER_TOOLS.some((t: any) => t.function.name === req.tool)) result = await browserTool(req.id, req.tool, args);
     else {
       const mcpNames = (await mcpTools().catch(() => [] as any[])).map((t: any) => t.function?.name ?? t.name);
       if (mcpNames.includes(req.tool)) result = await mcpCall(req.tool, args);
@@ -234,7 +306,10 @@ async function executeApproved(req: any) {
     }
   } catch (e) { result = `실행 오류: ${(e as Error).message}`; }
   db.prepare("UPDATE approval_requests SET result = ? WHERE id = ?").run(result.slice(0, 4000), req.id);
-  resumeAgent(req, `사용자가 승인한 작업 "${req.summary}"을 실행했습니다. 실행 결과:\n${result}\n\n원래 작업을 이어서 진행하고 결과를 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`);
+  // 실행 실패는 실패라고 명시한다 — "실행했습니다"로 뭉개면 봇이 같은 깨진 호출을 재제출해 승인 루프가 된다
+  resumeAgent(req, looksLikeToolError(result)
+    ? `사용자가 승인한 작업 "${req.summary}"을 실행했지만 실패했습니다.\n실패 결과:\n${result}\n\n같은 인자로 재요청하면 같은 실패가 발생합니다 — 인자를 수정하거나 다른 방법으로 진행하고, 불가능하면 실패를 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`
+    : `사용자가 승인한 작업 "${req.summary}"을 실행했습니다. 실행 결과:\n${result}\n\n원래 작업을 이어서 진행하고 결과를 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`);
 }
 
 async function notifyDenied(req: any) {
@@ -256,10 +331,30 @@ async function resumeAgent(req: any, task: string) {
     appendToAgentSession(agentSessionConvId(agent.id), `[승인 처리 — 결과 기록] ${req.tool}`, await normalizeReport(agent.name, req.resume || req.tool, task), agent.model, null);
     return;
   }
+  // 승인으로 재개된 작업의 결과를 지시 체인으로 돌려보낸다 — 위임한 상위 봇에게 완료 회신을 전달해
+  // 사용자의 원래 지시가 "승인 대기"로 끝난 뒤 결과가 사용자 대화에 도착하게 한다 (agent_message 회신 재수화와 같은 패턴)
+  let reqChain: string[] = [];
+  try { reqChain = JSON.parse(req.chain ?? "[]"); } catch {}
+  const parentId = reqChain.filter((id) => id !== agent.id).at(-1);
+  const parent = parentId ? getAgent(parentId) : null;
   runAgentDetached(agent, {
     label: `[승인 처리됨] ${req.tool} — 작업 재개`,
     task,
     sessionTitle: `[승인 처리 — 작업 재개] ${req.tool}`,
     sessionTask: req.resume || req.tool,
+    notifyTitle: `승인 작업 · ${agent.name} · ${req.tool}`,
+    onDone: parent
+      ? (state) => {
+          if (state.status !== "done" || !getAgent(parent.id)) return;
+          runAgentDetached(parent, {
+            label: `[승인 작업 회신] ${agent.name} · ${req.tool}`,
+            task: `[${agent.name} 봇이 사용자 승인을 받아 실행한 작업 "${req.summary}"의 결과가 도착했습니다 — 내용을 검토해 사용자에게 취합·보고하세요. ${agent.name}에게 접수·확인 회신을 다시 보내지 마세요]\n\n${(state.result?.trim() || "(결과 없음)").slice(0, 3000)}`,
+            sessionTitle: `[승인 작업 완료] ${req.tool}`,
+            sessionTask: req.resume || req.summary,
+            chain: [...reqChain.filter((id) => id !== parent.id), agent.id],
+            verifyIntent: false, // 완료 회신 전달은 지시가 아님 — 지시-실측 검증 대상에서 제외
+          });
+        }
+      : undefined,
   });
 }

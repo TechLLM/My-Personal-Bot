@@ -26,13 +26,13 @@ export function BrowserView({ viewKey, onClose }: { viewKey: string; onClose: ()
   }, [viewKey]);
 
   return (
-    <div className="fixed bottom-4 right-4 z-40 w-[420px] overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-[0_12px_40px_rgba(0,0,0,0.12)]">
-      <div className="flex items-center gap-2 border-b border-stone-100 px-3 py-2">
+    <div className="fixed inset-x-3 top-[calc(4rem+env(safe-area-inset-top))] z-40 overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-[0_12px_40px_rgba(0,0,0,0.12)] md:inset-x-auto md:bottom-4 md:right-4 md:top-auto md:w-[420px]">
+      <div className="flex items-center gap-2 border-b border-stone-100 py-1 pl-3 pr-1">
         <Monitor size={14} className={live ? "text-emerald-600" : "text-stone-400"} />
         <span className="flex-1 truncate text-xs font-medium text-stone-700">
           봇 화면{live ? "" : " — 대기 중"}
         </span>
-        <button onClick={onClose} className="text-stone-400 hover:text-stone-700"><X size={14} /></button>
+        <button onClick={onClose} className="grid size-9 place-items-center rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-700 md:size-8" aria-label="봇 화면 닫기"><X size={16} /></button>
       </div>
       <div className="aspect-[16/10] w-full bg-stone-950">
         {frame ? (
@@ -43,8 +43,8 @@ export function BrowserView({ viewKey, onClose }: { viewKey: string; onClose: ()
       </div>
       {frame && (
         <div className="border-t border-stone-100 px-3 py-1.5">
-          {frame.action && <div className="truncate text-[10px] text-stone-400">{frame.action}</div>}
-          <div className="truncate font-mono text-[10px] text-stone-500">{frame.url}</div>
+          {frame.action && <div className="truncate text-2xs text-stone-400">{frame.action}</div>}
+          <div className="truncate font-mono text-2xs text-stone-500">{frame.url}</div>
         </div>
       )}
     </div>

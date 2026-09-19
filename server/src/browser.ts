@@ -401,7 +401,7 @@ async function locate(page: Page, target: string): Promise<{ frame: Frame; selec
 let visionPick: { endpoint: Endpoint; model: string } | null | undefined;
 export function clearVisionPick() { visionPick = undefined; } // 설정 변경 시 재선택
 
-async function resolveVisionModel(): Promise<{ endpoint: Endpoint; model: string } | null> {
+export async function resolveVisionModel(): Promise<{ endpoint: Endpoint; model: string } | null> {
   if (visionPick !== undefined) return visionPick;
   const { resolveModel, defaultModelId, getEndpoints, guessCapabilities } = await import("./providers");
   const { findProvider, resolveAuth } = await import("./providers/registry");

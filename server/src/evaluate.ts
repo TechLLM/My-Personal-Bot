@@ -53,7 +53,7 @@ ${result.slice(0, 4000)}
 JSON만 출력하세요: {"score":0-100,"issues":["부족한 점 최대 3개, 구체적으로"]}
 80점 이상이면 issues는 빈 배열. 도구를 못 쓰는 작업이었다면 2번은 지식 기준으로 평가.`,
       },
-    ], { signal: opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(60_000)]) : AbortSignal.timeout(60_000) });
+    ], { signal: opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(60_000)]) : AbortSignal.timeout(60_000), reasoningEffort: "low" });
     const m = (res.content ?? "").match(/\{[\s\S]*"score"[\s\S]*\}/);
     if (!m) return { pass: true, score: 100, issues: [] }; // 파싱 실패 시 통과 — 평가기 장애가 작업을 막지 않게
     const j = JSON.parse(m[0]);

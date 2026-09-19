@@ -14,6 +14,8 @@ import { agentsRoute, teamRoute, ensureBossAgent } from "./team";
 import { browserRoute, sitesRoute } from "./browser";
 import { notifyRoute, startTelegramBot } from "./notify";
 import { approvalsRoute } from "./approvals";
+import { eventsRoute } from "./events";
+import { evolveRoute, startEvolveLoop } from "./evolve";
 import { groupsRoute } from "./routes/groups";
 import { startMaintenance } from "./maintenance";
 
@@ -49,6 +51,8 @@ api.route("/sites", sitesRoute);
 api.route("/team", teamRoute);
 api.route("/notify", notifyRoute);
 api.route("/approvals", approvalsRoute);
+api.route("/events", eventsRoute);
+api.route("/evolve", evolveRoute);
 api.route("/groups", groupsRoute);
 seedPersonas();
 // 구형 평문 비밀번호를 AES-256-GCM으로 일괄 암호화 (1회성 마이그레이션)
@@ -86,6 +90,10 @@ for (const m of db.prepare("SELECT id FROM agent_messages WHERE status = 'pendin
 startScheduler();
 startTelegramBot();
 startMaintenance(); // 보존 정리 — 실행이력·승인·브라우저 캐시 (업무지침서 C16)
+// 재시작으로 끊긴 자기개선 사이클 잠금 해제 — finished_at NULL은 crash로 확정
+db.prepare("UPDATE experiments SET verdict = 'crash', reason = '서버 재시작으로 사이클 중단', finished_at = ? WHERE finished_at IS NULL").run(now());
+// 자기개선학습 사이클은 개발 인스턴스(MYBOT_ENV=dev)에서만 돈다 — 서비스는 검증된 패키지를 버전 업데이트로만 수령
+if (process.env.MYBOT_ENV === "dev") startEvolveLoop();
 
 app.route("/api", api);
 

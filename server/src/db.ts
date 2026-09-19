@@ -214,6 +214,7 @@ try { db.exec("ALTER TABLE agent_runs ADD COLUMN tool_log TEXT"); } catch {}
 try { db.exec("ALTER TABLE agent_runs ADD COLUMN routine_id TEXT"); } catch {} // 루틴별 실행이력 보존·조회 키
 try { db.exec("ALTER TABLE agent_runs ADD COLUMN resume_count INTEGER"); } catch {} // 재시작 후 재개 횟수 — 3회 초과 시 error 확정
 try { db.exec("ALTER TABLE approval_rules ADD COLUMN cond TEXT"); } catch {} // A12 — 인자 조건 규칙 {"field","op","value"}
+try { db.exec("ALTER TABLE approval_requests ADD COLUMN chain TEXT"); } catch {} // 요청 봇의 위임 사슬 — 승인 재개 완료 시 상위 봇에게 결과 회신용
 try { db.exec("ALTER TABLE site_logins ADD COLUMN success_check TEXT"); } catch {} // C20 — 사이트별 로그인 성공 기준 (CSS 선택자 또는 url:정규식)
 try { db.exec("ALTER TABLE skills ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0"); } catch {} // A8 — 성공률 미달 자동 비활성
 // C15 — 장기기억 FTS5: content 전문검색 인덱스 + 중요도(weight)·마지막 회상(last_seen)·아카이브(archived)
@@ -263,24 +264,59 @@ try { db.exec("ALTER TABLE agents ADD COLUMN parent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN is_lead INTEGER NOT NULL DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN max_children INTEGER"); } catch {}
 try { db.exec("ALTER TABLE agents ADD COLUMN sort_order REAL"); } catch {}
-try { db.exec("ALTER TABLE agents ADD COLUMN special_role TEXT"); } catch {} // 'org_admin'(Eggbot, 봇 관리 전담) / 'secretary'(비서실장, 업무 라우팅)
-// 조직 역할 자동 배정 — 이름 기준 1회 백필 (Eggbot=조직관리, 비서실장=라우팅)
-db.exec("UPDATE agents SET special_role = 'org_admin' WHERE name = 'Eggbot' AND special_role IS NULL");
-db.exec("UPDATE agents SET special_role = 'secretary' WHERE name = '비서실장봇' AND special_role IS NULL");
+try { db.exec("ALTER TABLE agents ADD COLUMN special_role TEXT"); } catch {} // 'org_admin'(Eggbot, 봇 관리 전담)
+// 조직 역할 자동 배정 — 이름 기준 1회 백필 (Eggbot=조직관리)
+// 역할이 이미 배정돼 있으면 백필하지 않음 — Eggbot 개명 후 새 "Eggbot"이 org_admin을 얻는 중복을 차단
+db.exec("UPDATE agents SET special_role = 'org_admin' WHERE name = 'Eggbot' AND special_role IS NULL AND NOT EXISTS (SELECT 1 FROM agents WHERE special_role = 'org_admin')");
+// 비서실장(secretary) 역할 폐지(2026-09-18) — CEO가 팀장·전문 봇에게 직접 배정한다. 남은 표시는 일반 봇으로 되돌림
+db.exec("UPDATE agents SET special_role = NULL WHERE special_role = 'secretary'");
 // 업무 트리 무결성 — 최대 2단계(CEO→팀장→봇). 잘못된 배정은 기동 시 자동 복구:
-// ① 특수 역할 봇(Eggbot·비서실장)은 항상 CEO 직속 ② 팀장도 CEO 직속
+// ① 특수 역할 봇(Eggbot)은 항상 CEO 직속 ② 팀장도 CEO 직속
 // ③ parent는 팀장·CEO만 가능 ④ 3단계 이상 금지
 db.exec("UPDATE agents SET parent_id = NULL WHERE special_role IS NOT NULL AND parent_id IS NOT NULL");
 db.exec("UPDATE agents SET parent_id = NULL WHERE is_lead = 1 AND parent_id IS NOT NULL");
 db.exec("UPDATE agents SET parent_id = NULL WHERE parent_id IS NOT NULL AND parent_id NOT IN (SELECT id FROM agents WHERE is_lead = 1 OR is_boss = 1)");
 db.exec("UPDATE agents SET parent_id = NULL WHERE parent_id IN (SELECT id FROM agents WHERE parent_id IS NOT NULL)");
+// 삭제된 봇의 고아 세션 정리 — 봇이 사라져도 세션·메시지가 남아 무한 누적되던 문제 방지 (messages는 FK cascade)
+db.exec("DELETE FROM conversations WHERE mode = 'bot' AND agent_id IS NOT NULL AND agent_id NOT IN (SELECT id FROM agents)");
 { // 정렬값 백필 — 기존 표시 순서(CEO→핀→생성순)를 유지한 채 순번 부여
   let i = (db.prepare("SELECT COALESCE(MAX(sort_order), 0) m FROM agents").get() as any).m;
   for (const r of db.prepare("SELECT id FROM agents WHERE sort_order IS NULL ORDER BY is_boss DESC, pinned DESC, created_at").all() as any[])
     db.prepare("UPDATE agents SET sort_order = ? WHERE id = ?").run(++i, r.id);
 }
+try { db.exec("ALTER TABLE agent_messages ADD COLUMN chain TEXT"); } catch {} // 보낸 쪽 위임·메시지 사슬(JSON 봇 id 배열) — 순환 메시지 차단용
 try { db.exec("ALTER TABLE credential_requests ADD COLUMN agent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE credential_requests ADD COLUMN resume TEXT"); } catch {}
+// 자기개선 실험 원장 — 모든 사이클의 후보·측정·판정·적용 여부를 남긴다 (tasks/self-improvement-contract.md)
+try { db.exec(`CREATE TABLE IF NOT EXISTS experiments (
+  id TEXT PRIMARY KEY,
+  cycle INTEGER NOT NULL,          -- 사이클 번호 (날짜 내 순번)
+  surface TEXT NOT NULL,           -- 변경 대상 표면 id (surfaces.json)
+  target TEXT,                     -- 표면 내 대상 (스킬명·봇명·파일 경로)
+  candidate TEXT,                  -- 후보 요약 (diff는 candidate_path 파일로)
+  candidate_path TEXT,             -- 후보 diff·본문 저장 경로
+  baseline TEXT,                   -- 기준선 측정 JSON {pass, latency_ms, cost}
+  result TEXT,                     -- 후보 측정 JSON {pass, latency_ms, cost}
+  verdict TEXT,                    -- keep | discard | inconclusive | crash
+  reason TEXT,                     -- 판정 사유
+  applied INTEGER NOT NULL DEFAULT 0, -- 소유자 승인으로 실제 반영됐는지
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER
+)`); } catch {}
+
+// 개발 인스턴스가 검증을 마친 개선 패키지 — 서비스는 저장만 하고 사용자의 버전 업데이트로만 적용된다
+try { db.exec(`CREATE TABLE IF NOT EXISTS evolve_updates (
+  id TEXT PRIMARY KEY,
+  version INTEGER,                   -- 적용 시 부여되는 서비스 버전 번호
+  payload TEXT NOT NULL,             -- 패키지 JSON {summary, measurement{baseline,candidate,verdict,reason}, ops[]}
+  status TEXT NOT NULL DEFAULT 'pending', -- pending | applied | rejected | reverted
+  revert TEXT,                       -- 적용 전 상태로 되돌리는 ops JSON
+  restart_required INTEGER NOT NULL DEFAULT 0, -- 코드 표면 포함 — 적용·되돌리기 후 재시작 필요
+  source TEXT,                       -- 출처 (개발 인스턴스 실험 id)
+  created_at INTEGER NOT NULL,
+  applied_at INTEGER
+)`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_experiments_created ON experiments(created_at)"); } catch {}
 // 봇 아바타를 선형 얼굴 시드로 통일 — 기존 이모지 아바타도 전환
 db.exec("UPDATE agents SET avatar = 'face:' || id WHERE avatar IS NULL OR avatar NOT LIKE 'face:%'");
 // CEO 봇이 하나도 없으면 기존 대장을 CEO로 승격
