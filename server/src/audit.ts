@@ -105,7 +105,9 @@ export function auditOrg(): Finding[] {
   // ── 스킬 ──
   for (const s of db.prepare("SELECT * FROM skills").all() as any[]) {
     if (s.disabled) add("skill.disabled", "주의", "꺼진 스킬", s.name, "성공률 미달로 자동 비활성됐을 수 있습니다 — 절차를 고쳐 다시 켜거나 삭제하세요.");
-    if (!String(s.prompt ?? "").includes("[적용 조건]")) add("skill.no_condition", "참고", "적용 조건이 없는 스킬", s.name, "[적용 조건]을 적어야 봇이 언제 쓸지 판단합니다.");
+    // 짧은 프롬프트는 "요약·번역" 같은 기본 템플릿이라 적용 조건이 필요 없다 — 학습된 절차 스킬만 본다
+    if (String(s.prompt ?? "").length >= 200 && !String(s.prompt ?? "").includes("[적용 조건]"))
+      add("skill.no_condition", "참고", "적용 조건이 없는 스킬", s.name, "[적용 조건]을 적어야 봇이 언제 쓸지 판단합니다.");
   }
   for (const r of db.prepare("SELECT s.name, COUNT(*) n, COALESCE(SUM(r.ok),0) ok FROM skill_runs r JOIN skills s ON s.id = r.skill_id WHERE r.ok IS NOT NULL GROUP BY s.name HAVING n >= 3").all() as any[])
     if (r.ok / r.n < 0.5) add("skill.low_success", "주의", "스킬 성공률이 낮습니다", `${r.name}: ${r.ok}/${r.n}`, "실패 사례를 절차에 반영하세요.");
