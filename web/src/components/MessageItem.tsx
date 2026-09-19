@@ -7,6 +7,7 @@ import { Brain, Bot, FileText, Volume2 } from "lucide-react";
 import { AgentIcon } from "./icons";
 import { WorkingStatus } from "./WorkingStatus";
 import { HtmlPreview } from "./HtmlPreview";
+import { AuthenticatedImage } from "./AuthenticatedImage";
 
 // 저장된 과거 메시지·스트리밍 중간에 섞인 장식 이모지를 렌더 단에서 제거 — 정돈된 선형 표기 유지
 const stripEmoji = (s: string) => s.replace(/\p{Extended_Pictographic}️?/gu, "").replace(/‍/g, "");
@@ -101,7 +102,7 @@ export function MessageItem({
           <div className="max-w-[88%] whitespace-pre-wrap break-words rounded-[22px] rounded-br-md bg-stone-200 px-4 py-2.5 text-body text-stone-900 md:max-w-[80%]">
             {m.attachments && (JSON.parse(m.attachments) as { url: string; mime: string; name: string }[]).map((a, i) =>
               a.mime.startsWith("image/") ? (
-                <img key={i} src={a.url} className="mb-2 max-h-64 rounded-xl" alt={a.name} />
+                <AuthenticatedImage key={i} src={a.url} className="mb-2 max-h-64 rounded-xl" alt={a.name} />
               ) : (
                 <div key={i} className="mb-2 flex items-center gap-1.5 rounded-lg bg-white/60 px-2.5 py-1.5 text-xs"><FileText size={13} /> {a.name}</div>
               ),
@@ -143,6 +144,7 @@ export function MessageItem({
             remarkPlugins={[remarkGfm]}
             rehypePlugins={[rehypeHighlight]}
             components={{
+              img: ({ src, alt }) => <AuthenticatedImage src={src} alt={alt} />,
               // html·svg 코드블록은 격리된 미리보기로 — 봇이 표·차트·카드 같은 결과 화면을 직접 그릴 수 있다.
               // 원문은 hast 노드에서 꺼낸다 — rehypeHighlight가 코드를 토큰 span으로 쪼개 children은 문자열이 아니다
               pre({ children, node, ...props }) {

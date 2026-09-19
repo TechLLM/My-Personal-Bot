@@ -60,17 +60,47 @@ export function authHeaders(): Record<string, string> {
   return k ? { "x-mybot-key": k } : {};
 }
 
+// SSE over fetch keeps the access code out of URLs and proxy logs.
+export class AuthenticatedEventStream extends EventTarget {
+  onerror: (() => void) | null = null;
+  private closed = false;
+  private controller = new AbortController();
+  private timer?: ReturnType<typeof setTimeout>;
+  constructor(private url: string) { super(); void this.connect(); }
+  close() { this.closed = true; clearTimeout(this.timer); this.controller.abort(); }
+  private async connect() {
+    try {
+      const response = await fetch(this.url, { headers: authHeaders(), signal: this.controller.signal });
+      if (!response.ok || !response.body) throw new Error("stream unavailable");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "", event = "message", data: string[] = [];
+      try {
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          buffer += decoder.decode(chunk.value, { stream: true });
+          let end: number;
+          while ((end = buffer.indexOf("\n")) >= 0) {
+            const line = buffer.slice(0, end).replace(/\r$/, ""); buffer = buffer.slice(end + 1);
+            if (line.startsWith("event:")) event = line.slice(6).trim();
+            else if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+            else if (!line) {
+              if (data.length) this.dispatchEvent(new MessageEvent(event, { data: data.join("\n") }));
+              event = "message"; data = [];
+            }
+          }
+        }
+      } finally { reader.releaseLock(); }
+    } catch { if (!this.closed) this.onerror?.(); }
+    if (!this.closed) this.timer = setTimeout(() => void this.connect(), 3000);
+  }
+}
+
 export function mybotFetch(input: string, init: RequestInit = {}): Promise<Response> {
   const headers = { ...authHeaders(), ...(init.headers as Record<string, string> ?? {}) };
   return fetch(input, { ...init, headers }).then((r) => {
-    if (r.status === 401) {
-      const k = prompt("MyBot 접속 암호를 입력하세요");
-      if (k) {
-        localStorage.setItem("mybot_key", k);
-        const h2 = { ...authHeaders(), ...(init.headers as Record<string, string> ?? {}) };
-        return fetch(input, { ...init, headers: h2 });
-      }
-    }
+    if (r.status === 401 || r.status === 503) window.dispatchEvent(new Event("mybot-auth-required"));
     return r;
   });
 }

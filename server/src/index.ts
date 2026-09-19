@@ -1,5 +1,4 @@
 import { Hono } from "hono";
-import { cors } from "hono/cors";
 import { serveStatic } from "hono/bun";
 import { join } from "node:path";
 import { db, getSetting, now } from "./db";
@@ -18,23 +17,16 @@ import { eventsRoute } from "./events";
 import { evolveRoute, startEvolveLoop } from "./evolve";
 import { groupsRoute } from "./routes/groups";
 import { startMaintenance } from "./maintenance";
+import { installAccessControl, accessOrigins, readAccessCode } from "./access";
 
 const PORT = Number(process.env.MYBOT_PORT ?? 5274);
+const HOST = process.env.MYBOT_HOST ?? "127.0.0.1";
 
 const app = new Hono();
-app.use("/api/*", cors());
-
-// 접속 암호 설정 시 /api 전체 보호 (health 제외)
-app.use("/api/*", async (c, next) => {
-  if (c.req.path === "/api/health") return next();
-  const code = getSetting("access_code");
-  if (!code) return next();
-  const key = c.req.header("x-mybot-key") ?? c.req.query("key");
-  if (key !== code) return c.json({ error: "unauthorized" }, 401);
-  return next();
-});
+installAccessControl(app, () => readAccessCode(join(import.meta.dir, "../data/access.key"), () => getSetting("access_code")), accessOrigins(PORT));
 
 const api = new Hono();
+api.get("/access", c => c.json({ authenticated: true }));
 api.get("/health", (c) => c.json({ ok: true, name: "mybot", ts: Date.now() }));
 api.route("/models", modelsRoute);
 api.route("/chat", chatRoute);
@@ -108,7 +100,7 @@ app.get("/*", async (c) => {
   return c.html(html, 200, { "Cache-Control": "no-cache" });
 });
 
-console.log(`[mybot] 시작 중 — http://127.0.0.1:${PORT}`); // 실제 바인딩은 아래 default export 이후
+console.log(`[mybot] 시작 중 — http://${HOST}:${PORT}`);
 
 // HTTPS 리스너 — server/.certs에 mkcert 인증서가 있으면 함께 연다 (HTTP도 그대로 유지)
 // 인증서 생성: bun scripts/gen-cert.ts / 브라우저 신뢰: 각 기기에 mkcert 루트 CA 설치
@@ -122,11 +114,12 @@ if (await Bun.file(certFile).exists() && await Bun.file(keyFile).exists()) {
   try {
     Bun.serve({
       port: httpsPort,
+      hostname: HOST,
       fetch: app.fetch,
       idleTimeout: 255,
       tls: { cert: Bun.file(certFile), key: Bun.file(keyFile) },
     });
-    console.log(`[mybot] listening on https://0.0.0.0:${httpsPort}`);
+    console.log(`[mybot] listening on https://${HOST}:${httpsPort}`);
   } catch (e) {
     console.error(`[mybot] HTTPS(${httpsPort}) 시작 실패 — HTTP만 계속합니다. 이미 다른 MyBot 인스턴스가 떠 있는지 확인하세요: ${(e as Error).message}`);
   }
@@ -134,4 +127,4 @@ if (await Bun.file(certFile).exists() && await Bun.file(keyFile).exists()) {
   console.log("[mybot] HTTPS 비활성 — 인증서가 없습니다 (생성: bun scripts/gen-cert.ts)");
 }
 
-export default { port: PORT, fetch: app.fetch, idleTimeout: 255 };
+export default { hostname: HOST, port: PORT, fetch: app.fetch, idleTimeout: 255 };

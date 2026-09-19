@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, streamChat, runTeam, mybotFetch, type Agent, type Conversation, type Message, type Model, type TeamPlanTask, type SiteRequest, type Group, type ApprovalRequest, type HandoffRequest } from "./api";
+import { AuthenticatedEventStream, api, streamChat, runTeam, mybotFetch, type Agent, type Conversation, type Message, type Model, type TeamPlanTask, type SiteRequest, type Group, type ApprovalRequest, type HandoffRequest } from "./api";
 import { Sidebar } from "./components/Sidebar";
 import { Composer, type Mode, type Persona } from "./components/Composer";
 import { MessageItem } from "./components/MessageItem";
@@ -195,8 +195,7 @@ export default function App() {
   // 서버 푸시(SSE)로 봇 목록 실시간 갱신 — 봇이 다른 봇을 생성·삭제·수정하면
   // 서버가 'agents' 이벤트를 쏘고, 열린 탭이 즉시 목록을 다시 가져온다 (새로고침 불필요)
   useEffect(() => {
-    const key = localStorage.getItem("mybot_key");
-    const es = new EventSource("/api/events" + (key ? `?key=${encodeURIComponent(key)}` : ""));
+    const es = new AuthenticatedEventStream("/api/events");
     es.addEventListener("evolve", () => {
       api.evolveUpdates().then((d) => setPendingUpdates(d.updates.filter((u) => u.status === "pending").length)).catch(() => {});
     });

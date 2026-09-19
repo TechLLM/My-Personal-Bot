@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { X, Monitor } from "lucide-react";
+import { AuthenticatedEventStream } from "../api";
 
 interface Frame {
   image: string;
@@ -13,13 +14,10 @@ interface Frame {
 export function BrowserView({ viewKey, onClose }: { viewKey: string; onClose: () => void }) {
   const [frame, setFrame] = useState<Frame | null>(null);
   const [live, setLive] = useState(false);
-  const esRef = useRef<EventSource | null>(null);
+  const esRef = useRef<AuthenticatedEventStream | null>(null);
 
   useEffect(() => {
-    // EventSource는 헤더를 실을 수 없어 접속 암호를 쿼리로 넘긴다 (/api/events와 같은 방식).
-    // 암호를 설정하면 이 스트림만 401로 끊겨 브라우저 화면이 비던 문제를 막는다
-    const key = localStorage.getItem("mybot_key");
-    const es = new EventSource(`/api/browser/view/${encodeURIComponent(viewKey)}${key ? `?key=${encodeURIComponent(key)}` : ""}`);
+    const es = new AuthenticatedEventStream(`/api/browser/view/${encodeURIComponent(viewKey)}`);
     esRef.current = es;
     es.addEventListener("frame", (e) => {
       try { setFrame(JSON.parse((e as MessageEvent).data)); setLive(true); } catch {}
