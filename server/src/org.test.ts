@@ -245,3 +245,20 @@ test("남은 도구 단계는 상한의 3/4 지점에서 한 번만 알린다", 
   expect(budgetWarnAt(8, 12)).toBe(true);
   expect(budgetWarnAt(31, 32)).toBe(false);  // 마지막 직전엔 알려도 소용없다
 });
+
+// 루틴은 등록 시점의 지시문을 매번 그대로 실행한다 — 부실하면 매일 부실한 결과가 반복된다
+// (실측 2026-09-19: "중요도순 5건 내외 간결 요약" 한 줄 루틴이 매일 얕은 브리핑을 냈다)
+test("한 줄짜리 루틴 지시문은 등록을 막고 무엇을 담아야 하는지 알려준다", async () => {
+  const weak = await callBuiltin("routine_add", { name: "뉴스", prompt: "매일 뉴스 요약", schedule: "daily:08:30" }, ids.lead);
+  expect(weak).toContain("너무 짧습니다");
+  expect(weak).toContain("완료로 볼지");
+  expect((db.prepare("SELECT COUNT(*) c FROM routines").get() as { c: number }).c).toBe(0); // 등록되지 않는다
+
+  const good = await callBuiltin("routine_add", {
+    name: "뉴스 브리핑",
+    schedule: "daily:08:30",
+    prompt: "매일 08:30 KST 기준 주요 뉴스를 '뉴스브리핑-전문가형식' 스킬 절차대로 정치·경제·국제·산업·사회 분야별로 정리해 보고한다. 각 항목에 매체명·발행시각·기사 URL을 붙이고 미확인은 따로 적는다. 분야 커버리지를 채우면 완료다.",
+  }, ids.lead);
+  expect(good).toContain("루틴 등록됨");
+  db.prepare("DELETE FROM routines").run();
+});

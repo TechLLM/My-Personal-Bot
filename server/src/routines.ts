@@ -31,7 +31,8 @@ async function runRoutineInner(r: any): Promise<string> {
   const { done } = runAgentDetached(agent, {
     model: agent.model ?? r.model ?? undefined, // 원래 로직 유지 — 봇 모델 우선, 없으면 루틴 지정 모델
     label: `[루틴] ${r.name}: ${r.prompt}`,
-    task: `예약된 정기 업무입니다. 수행하고 결과를 보고하세요.\n\n${r.prompt}`,
+    // 정기 실행은 대화 맥락이 없다 — 지시문의 기준을 지키게 하고, 같은 주제의 스킬을 쓰게 유도한다
+    task: `예약된 정기 업무입니다. 수행하고 결과를 보고하세요.\n\n${r.prompt}\n\n[정기 실행 안내] 이 지시문은 매번 같은 내용으로 실행됩니다. 지시문에 적힌 범위·형식·완료 기준을 그대로 지키고, 같은 주제의 학습된 스킬이 있으면 skill_list로 확인해 그 절차를 따르세요. 건수·분야가 지정돼 있으면 임의로 줄이지 마세요.`,
     routineId: r.id ?? null,
     sessionTitle: `[루틴] ${r.name}\n${r.prompt}`,
     sessionTask: r.prompt,
