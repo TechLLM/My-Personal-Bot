@@ -47,6 +47,37 @@ export function modelProblem(model: string | null): string | null {
   return findProvider(pid) ? null : `등록되지 않은 프로바이더: ${pid}`;
 }
 
+export interface Run { status: string; steps: number | null; created_at: number }
+
+// 실패율을 7일 한 창으로만 보면 이미 고친 문제가 일주일 내내 "위험"으로 남는다.
+// 24시간과 7일을 함께 재고, 최근 하루가 잠잠하면 심각도를 낮춰 지금 조치가 필요한 것만 위험으로 남긴다.
+// (개선지침서 A-1 — 착수 시점 실측: 7일 177/1243=14.2%, 24시간 0/89=0%)
+export function failRateFinding(runs: Run[], now = Date.now()):
+  { severity: Severity; title: string; detail: string; fix: string } | null {
+  const tally = (rows: Run[]) => {
+    const err = rows.filter((r) => r.status === "error").length;
+    return { n: rows.length, err, pct: rows.length ? err / rows.length : 0 };
+  };
+  const week = tally(runs);
+  const day = tally(runs.filter((r) => r.created_at > now - 86_400_000));
+  if (week.n < 10 || week.pct <= 0.1) return null;
+
+  // 최근 하루의 표본이 너무 적으면 "잠잠하다"고 단정하지 않는다 — 섣불리 위험을 낮추지 않는다
+  const settled = day.n >= 5 && day.pct <= 0.1;
+  const trend = day.n < 5 ? "최근 24시간 표본이 적어 추세를 판단하지 않습니다"
+    : day.pct <= week.pct * 0.5 ? "개선 중"
+    : day.pct >= week.pct * 1.5 ? "악화 중" : "비슷한 수준";
+  const pct = (t: { err: number; n: number; pct: number }) => `${t.err}/${t.n} (${Math.round(t.pct * 100)}%)`;
+  return {
+    severity: settled ? "주의" : "위험",
+    title: settled ? "실패가 최근에는 잦아들었습니다 (지난 7일 기준으로는 높음)" : "최근 실패율이 높습니다",
+    detail: `7일 ${pct(week)} · 24시간 ${pct(day)} — ${trend}`,
+    fix: settled
+      ? "지난 7일 수치는 이미 지나간 실패가 끌어올린 것입니다. 원인이 해결됐는지만 확인하세요."
+      : "실패 결과의 사유를 확인하세요 — 프로바이더 인증·한도 문제가 흔합니다.",
+  };
+}
+
 export function auditOrg(): Finding[] {
   const f: Finding[] = [];
   const agents = db.prepare("SELECT * FROM agents").all() as AgentRow[];
@@ -112,12 +143,12 @@ export function auditOrg(): Finding[] {
   for (const r of db.prepare("SELECT s.name, COUNT(*) n, COALESCE(SUM(r.ok),0) ok FROM skill_runs r JOIN skills s ON s.id = r.skill_id WHERE r.ok IS NOT NULL GROUP BY s.name HAVING n >= 3").all() as any[])
     if (r.ok / r.n < 0.5) add("skill.low_success", "주의", "스킬 성공률이 낮습니다", `${r.name}: ${r.ok}/${r.n}`, "실패 사례를 절차에 반영하세요.");
 
-  // ── 운영 지표(최근 7일) ──
+  // ── 운영 지표 ──
   const since = Date.now() - 7 * 86_400_000;
-  const runs = db.prepare("SELECT status, steps FROM agent_runs WHERE created_at > ?").all(since) as { status: string; steps: number | null }[];
+  const runs = db.prepare("SELECT status, steps, created_at FROM agent_runs WHERE created_at > ?").all(since) as Run[];
   if (runs.length >= 10) {
-    const err = runs.filter((r) => r.status === "error").length;
-    if (err / runs.length > 0.1) add("ops.fail_rate", "위험", "최근 7일 실패율이 높습니다", `${err}/${runs.length} (${Math.round((err / runs.length) * 100)}%)`, "실패 결과의 사유를 확인하세요 — 프로바이더 인증·한도 문제가 흔합니다.");
+    const f = failRateFinding(runs);
+    if (f) add("ops.fail_rate", f.severity, f.title, f.detail, f.fix);
     const capped = runs.filter((r) => (r.steps ?? 0) >= 12).length;
     if (capped / runs.length > 0.2) add("ops.step_cap", "주의", "단계 상한에 걸리는 실행이 많습니다", `${capped}/${runs.length}`, "반복 조회를 줄이거나 tool_rounds·tool_rounds_browser를 조정하세요.");
   }

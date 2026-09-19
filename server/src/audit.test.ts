@@ -1,6 +1,6 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { db, now } from "./db";
-import { auditOrg, formatAudit, repeatedParagraph, modelProblem } from "./audit";
+import { auditOrg, formatAudit, repeatedParagraph, modelProblem, failRateFinding, type Run } from "./audit";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
 
@@ -114,4 +114,47 @@ test("짧은 템플릿 스킬은 적용 조건을 요구하지 않는다", () =>
   add.run("s2", "그룹웨어-메일조회", "절차를 길게 설명하는 학습된 스킬 본문입니다. ".repeat(12)); // 절차 스킬 — 요구
   const found = auditOrg().filter((x) => x.id === "skill.no_condition").map((x) => x.detail);
   expect(found).toEqual(["그룹웨어-메일조회"]);
+});
+
+// --- 실패율 창 (개선지침서 A-1) ---
+// 7일 한 창으로만 보면 이미 고친 문제가 일주일 내내 "위험"으로 남는다.
+
+const NOW = 1_700_000_000_000;
+const runs = (n: number, err: number, agoMs: number): Run[] =>
+  Array.from({ length: n }, (_, i) => ({ status: i < err ? "error" : "ok", steps: 1, created_at: NOW - agoMs }));
+
+test("어제까지 실패가 몰렸고 오늘은 잠잠하면 위험에서 주의로 낮춘다", () => {
+  // 착수 시점 실측과 같은 모양 — 7일 177/1243(14%), 24시간 0/89(0%)
+  const f = failRateFinding([...runs(1154, 177, 3 * 86_400_000), ...runs(89, 0, 3600_000)], NOW)!;
+  expect(f.severity).toBe("주의");
+  expect(f.detail).toContain("24시간 0/89 (0%)");
+  expect(f.detail).toContain("개선 중");
+  expect(f.fix).toContain("이미 지나간 실패");
+});
+
+test("오늘도 비슷하게 실패하고 있으면 위험으로 남긴다", () => {
+  const f = failRateFinding([...runs(100, 20, 3 * 86_400_000), ...runs(50, 15, 3600_000)], NOW)!;
+  expect(f.severity).toBe("위험");
+  expect(f.detail).toContain("비슷한 수준"); // 30%는 23%의 1.5배에 못 미친다
+});
+
+test("오늘 실패가 급증하면 악화 중이라고 알린다", () => {
+  const f = failRateFinding([...runs(150, 15, 3 * 86_400_000), ...runs(50, 40, 3600_000)], NOW)!;
+  expect(f.severity).toBe("위험");
+  expect(f.detail).toContain("악화 중");
+});
+
+test("최근 24시간 표본이 적으면 섣불리 위험을 낮추지 않는다", () => {
+  // 오늘 3건이 다 성공이어도 그것만으로 해결됐다고 볼 수 없다
+  const f = failRateFinding([...runs(200, 40, 3 * 86_400_000), ...runs(3, 0, 3600_000)], NOW)!;
+  expect(f.severity).toBe("위험");
+  expect(f.detail).toContain("표본이 적어");
+});
+
+test("7일 실패율이 임계 이하면 아무 소견도 내지 않는다", () => {
+  expect(failRateFinding(runs(200, 10, 3 * 86_400_000), NOW)).toBeNull();
+});
+
+test("표본이 10건 미만이면 판단하지 않는다", () => {
+  expect(failRateFinding(runs(9, 9, 3600_000), NOW)).toBeNull();
 });
