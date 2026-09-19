@@ -51,3 +51,54 @@ test("프롬프트에 넣을 실재 목록에서 비활성 스킬은 빠진다",
 test("봇·루틴 목록도 함께 제공한다", () => {
   expect(liveTargets().map((g) => g.table)).toEqual(["skills", "agents", "routines"]);
 });
+
+// --- preflight 안전 검사 (개선지침서 A-4) ---
+// 자기개선이 스스로 안전장치를 무르게 만들지 못하도록 막는 마지막 관문이다.
+// 아래 검사가 하나라도 빠지면 봇이 테스트를 지우거나 보호 코드를 고쳐 통과시킬 수 있다.
+
+import { preflightCandidate } from "./evolve";
+
+const codeCandidate = (over: Record<string, unknown> = {}) =>
+  ({ surface: "src", target: "server/src/report.ts", filePath: "server/src/report.ts", newContent: "export const x = 1;\n", summary: "s", ...over }) as any;
+
+test("보호 경로는 후보가 될 수 없다", async () => {
+  const fails = await preflightCandidate(codeCandidate({ target: "server/src/access.ts", filePath: "server/src/access.ts" }));
+  expect(fails.some((f) => f.includes("보호 경로"))).toBe(true);
+});
+
+test("테스트 파일은 표면이 될 수 없다 — 테스트를 지워 통과시키는 길을 막는다", async () => {
+  const fails = await preflightCandidate(codeCandidate({ target: "server/src/audit.test.ts", filePath: "server/src/audit.test.ts" }));
+  expect(fails.some((f) => f.includes("테스트 파일"))).toBe(true);
+});
+
+test("비밀값처럼 보이는 내용이 들어오면 거부한다", async () => {
+  const fails = await preflightCandidate(codeCandidate({ newContent: 'const key = "sk-abcdefghijklmnop1234";\nexport const api_key = "AKIA1234567890ABCDEF";\n' }));
+  expect(fails.some((f) => f.includes("비밀값"))).toBe(true);
+});
+
+test("빈 내용은 거부한다", async () => {
+  expect(await preflightCandidate(codeCandidate({ newContent: "   " }))).toContain("newContent 비어 있음");
+});
+
+test("없는 파일은 거부한다", async () => {
+  const fails = await preflightCandidate(codeCandidate({ target: "server/src/없는파일.ts", filePath: "server/src/없는파일.ts" }));
+  expect(fails.some((f) => f.includes("파일 없음"))).toBe(true);
+});
+
+test("db 표면 — 대상이 없거나 값이 비면 거부한다", async () => {
+  const fails = await preflightCandidate({ surface: "skill.prompt", target: "없는스킬이름", newValue: "본문", summary: "s" } as any);
+  expect(fails.some((f) => f.includes("대상 없음"))).toBe(true);
+  const empty = await preflightCandidate({ surface: "skill.prompt", target: addSkill("있는스킬"), newValue: "  ", summary: "s" } as any);
+  expect(empty).toContain("newValue 비어 있음");
+});
+
+test("역할문에서 전문가 기준 프레임이 빠지면 약화로 본다", async () => {
+  const id = "ag-" + Math.random().toString(16).slice(2, 8);
+  db.prepare("INSERT INTO agents (id, name, role_prompt, created_at) VALUES (?,?,?,0)").run(id, "테스트봇" + id, "역할문");
+  try {
+    const weak = await preflightCandidate({ surface: "agent.role", target: id, newValue: "그냥 잘 하세요", summary: "s" } as any);
+    expect(weak.some((f) => f.includes("약화"))).toBe(true);
+    const kept = await preflightCandidate({ surface: "agent.role", target: id, newValue: "[전문가 수행 기준] 기준을 지켜 수행합니다", summary: "s" } as any);
+    expect(kept.some((f) => f.includes("약화"))).toBe(false);
+  } finally { db.prepare("DELETE FROM agents WHERE id = ?").run(id); }
+});
