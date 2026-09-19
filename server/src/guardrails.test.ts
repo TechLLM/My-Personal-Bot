@@ -61,3 +61,11 @@ test("에이전트 작업 규칙 문서가 저장소에 남아 있다", () => {
   for (const f of ["CLAUDE.md", "AGENTS.md"]) expect(existsSync(join(ROOT, f))).toBe(true);
   expect(readFileSync(join(ROOT, "CLAUDE.md"), "utf8")).toContain("release");
 });
+
+// 2026-09-20 회귀: 서비스가 스스로 남긴 영수증 파일이 untracked로 잡혀
+// "커밋되지 않은 변경이 있어 적용할 수 없습니다"로 이후 모든 배포가 막혔다.
+test("서비스가 실행 중에 남기는 파일은 git이 추적하지 않는다", () => {
+  const ig = readFileSync(join(ROOT, ".gitignore"), "utf8");
+  for (const p of ["server/data/*.jsonl", "server/data/*.db", "server/data/*.key", "web/dist"])
+    expect(ig).toContain(p);
+});

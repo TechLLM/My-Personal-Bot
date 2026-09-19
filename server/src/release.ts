@@ -47,7 +47,9 @@ export function evaluateRelease(x: { hasChannel: boolean; pending: number; clean
 
 export function releaseStatus() {
   const hasChannel = git("rev-parse", "--verify", `refs/heads/${CHANNEL}`).ok;
-  const clean = !git("status", "--porcelain").out;
+  // 추적되지 않는 파일(로그·백업 등)은 fast-forward를 막지 않는다. 그것까지 "더럽다"고 보면
+  // 서비스가 스스로 남긴 영수증 한 줄에 이후 모든 배포가 막힌다 — 실제로 그렇게 막혔다.
+  const clean = !git("status", "--porcelain", "--untracked-files=no").out;
   const ff = hasChannel && git("merge-base", "--is-ancestor", "HEAD", CHANNEL).ok;
   const pending: PendingCommit[] = hasChannel
     ? git("log", "--format=%h\t%s\t%cI", `HEAD..${CHANNEL}`).out.split("\n").filter(Boolean)
@@ -225,7 +227,7 @@ export async function applyRelease(gates?: Gate[]): Promise<{ ok: true; version:
 export function revertRelease(): { ok: true; sha: string } | Fail {
   const prev = getSetting("release_prev_sha");
   if (!prev) return fail("점검", "되돌릴 지점이 없습니다");
-  if (git("status", "--porcelain").out) return fail("점검", "커밋되지 않은 변경이 있어 되돌릴 수 없습니다");
+  if (git("status", "--porcelain", "--untracked-files=no").out) return fail("점검", "커밋되지 않은 변경이 있어 되돌릴 수 없습니다");
 
   const r = git("reset", "--hard", prev);
   if (!r.ok) return fail("되돌리기", tail(r.out));
