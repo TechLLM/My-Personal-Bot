@@ -1,11 +1,21 @@
-import { test, expect, beforeEach } from "bun:test";
+import { test, expect, beforeEach, afterEach } from "bun:test";
 import { db, now } from "./db";
 import { auditOrg, formatAudit, repeatedParagraph, modelProblem } from "./audit";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
 
-const clear = () => {
-  for (const t of ["agents", "routines", "skills", "skill_runs", "agent_runs", "approval_requests"]) db.prepare(`DELETE FROM ${t}`).run();
+// 이 파일은 조직 전체를 보는 점검을 다루므로 테이블을 비워야 한다.
+// bun test는 여러 테스트 파일이 한 프로세스에서 같은 메모리 DB를 쓰므로,
+// 비우기 전에 스냅샷을 떠 두고 테스트가 끝나면 그대로 되돌린다 (다른 파일의 데이터를 지우면 그 테스트가 깨진다)
+const TABLES = ["agents", "routines", "skills", "skill_runs", "agent_runs", "approval_requests"];
+let snapshot: Record<string, Record<string, unknown>[]> = {};
+const clear = () => { for (const t of TABLES) db.prepare(`DELETE FROM ${t}`).run(); };
+const restore = () => {
+  clear();
+  for (const t of TABLES) for (const row of snapshot[t] ?? []) {
+    const cols = Object.keys(row);
+    db.prepare(`INSERT INTO ${t} (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`).run(...cols.map((c) => row[c] as never));
+  }
 };
 const ins = (over: Record<string, unknown> = {}) => {
   const a = { id: "a" + Math.random().toString(16).slice(2, 8), name: "봇" + Math.random().toString(16).slice(2, 6),
@@ -17,7 +27,12 @@ const ins = (over: Record<string, unknown> = {}) => {
 };
 const ids = (fs: ReturnType<typeof auditOrg>) => fs.map((x) => x.id);
 
-beforeEach(clear);
+beforeEach(() => {
+  snapshot = {};
+  for (const t of TABLES) snapshot[t] = db.prepare(`SELECT * FROM ${t}`).all() as Record<string, unknown>[];
+  clear();
+});
+afterEach(restore);
 
 test("정상 조직에서는 봇 관련 문제를 찾지 않는다", () => {
   ins({ is_boss: 1, name: "CEO" });
