@@ -288,6 +288,9 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   const loadUpdates = () => api.evolveUpdates().then((d) => { setUpdates(d.updates); setAppVersion(d.appVersion); }).catch(() => {});
   const loadRelease = () => api.releaseStatus().then(setRel).catch(() => setRel(null));
   useEffect(() => { if (section === "updates") { loadUpdates(); loadRelease(); } }, [section]);
+  // 메뉴 배지를 띄우려면 섹션을 열기 전에 한 번은 알아야 한다
+  useEffect(() => { loadUpdates(); loadRelease(); }, []);
+  const updBadge = updates.filter((u: any) => u.status === "pending").length + (rel?.pending.length ?? 0);
   // 적용·되돌리기는 성공하면 서버가 스스로 재시작한다 — 끊겼다 살아나면 새 화면으로 다시 불러온다
   const relAct = (label: string, fn: () => Promise<unknown>) => {
     setRelBusy(label); setRelErr("");
@@ -360,6 +363,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
               <Icon size={14} className="shrink-0" />
               <span className="truncate">{label}</span>
               {id === "providers" && authed.length > 0 && <span className="ml-auto rounded bg-emerald-50 px-1 text-micro text-emerald-600">{authed.length}</span>}
+              {id === "updates" && updBadge > 0 && <span className="ml-auto grid size-4 place-items-center rounded-full bg-amber-500 text-micro font-bold text-white">{updBadge}</span>}
             </button>
           ))}
           <div className="mt-auto hidden px-2 pb-1 text-2xs text-stone-300 md:block">MyBot 로컬 설정</div>

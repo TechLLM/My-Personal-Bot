@@ -44,6 +44,7 @@ export default function App() {
   const [viewKey, setViewKey] = useState<string | null>(null); // 열려 있는 컴퓨터 뷰 패널의 run 키
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]); // 봇의 위험 액션 승인 대기열
   const [pendingUpdates, setPendingUpdates] = useState(0); // 개발이 보낸 미적용 버전 업데이트 수
+  const [pendingReleases, setPendingReleases] = useState(0); // release 브랜치에서 온 미적용 서비스 릴리스 수
   const [groups, setGroups] = useState<Group[]>([]); // 그룹채팅 목록
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null); // 현재 열린 그룹 대화
   const [runningInfo, setRunningInfo] = useState<Record<string, string | null>>({}); // 서버에서 실행 중인 봇: id → 현재 도구 — 사이드바 실시간 작업 표시용
@@ -132,6 +133,14 @@ export default function App() {
     const poll = () => api.evolveUpdates().then((d) => setPendingUpdates(d.updates.filter((u) => u.status === "pending").length)).catch(() => {});
     poll();
     const t = setInterval(poll, 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  // 서비스 릴리스 대기 수 — release 브랜치를 보는 git 조회라 배지용으로만 느슨하게 확인한다
+  useEffect(() => {
+    const poll = () => api.releaseStatus().then((d) => setPendingReleases(d.pending.length)).catch(() => {});
+    poll();
+    const t = setInterval(poll, 60000);
     return () => clearInterval(t);
   }, []);
 
@@ -502,15 +511,21 @@ export default function App() {
         workingId={streaming ? activeAgent?.id ?? null : null}
         working={runningInfo}
         onStopAll={stopAll}
-        updateCount={pendingUpdates}
+        updateCount={pendingUpdates + pendingReleases}
       />
       <main className="relative flex min-w-0 flex-1 flex-col">
         <header className="flex min-h-14 items-center gap-1.5 border-b border-stone-200/60 px-2 pt-[env(safe-area-inset-top)] md:min-h-[52px] md:px-3">
           <button
-            className="grid size-10 shrink-0 place-items-center rounded-xl text-stone-500 hover:bg-stone-200/60 hover:text-stone-800 md:size-9"
+            className="relative grid size-10 shrink-0 place-items-center rounded-xl text-stone-500 hover:bg-stone-200/60 hover:text-stone-800 md:size-9"
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            aria-label={sidebarOpen ? "사이드바 닫기" : "사이드바 열기"}
-          ><Menu size={20} strokeWidth={1.8} /></button>
+            aria-label={`${sidebarOpen ? "사이드바 닫기" : "사이드바 열기"}${pendingUpdates + pendingReleases ? ` — 적용할 업데이트 ${pendingUpdates + pendingReleases}건` : ""}`}
+          >
+            <Menu size={20} strokeWidth={1.8} />
+            {/* 사이드바를 닫아둬도 업데이트가 온 것은 알 수 있게 한다 */}
+            {!!(pendingUpdates + pendingReleases) && !sidebarOpen && (
+              <span className="absolute right-1.5 top-1.5 size-2 rounded-full bg-amber-500 ring-2 ring-stone-50" />
+            )}
+          </button>
           {convId && currentConv?.agent_name ? (
             <span className="flex min-w-0 items-center gap-2" title="이 세션을 담당하는 봇 — 모델을 바꿔도 봇의 기억·맥락은 유지됩니다">
               <AgentIcon name={currentConv.agent_name} seed={currentConv.agent_avatar} size={26} className="shrink-0" />
