@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { applyTheme, getTheme, type Theme } from "../theme";
 import { api, type ProviderCard, type Agent, type Model, type SiteLogin, mybotFetch } from "../api";
 import {
   X, Crown, AlarmClock, Trash2, Folder, Cpu, Search, Image as ImageIcon, Bot,
@@ -147,6 +148,7 @@ function H({ children }: { children: React.ReactNode }) {
 
 export function SettingsModal({ models: initialModels, onClose }: { models: Model[]; onClose: () => void }) {
   const [section, setSection] = useState<Section>("providers");
+  const [theme, setTheme] = useState<Theme>(getTheme());
   const [models, setModels] = useState<Model[]>(initialModels); // 모달 내부 모델 목록 — 프로바이더 변경 시 즉시 갱신
   const [s, setS] = useState<Record<string, string>>({});
   const [memories, setMemories] = useState<any[]>([]);
@@ -986,6 +988,20 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
 
             {section === "general" && (
               <div className="space-y-6">
+                <div>
+                  <H>화면 테마</H>
+                  <div className="flex gap-1.5">
+                    {([["light", "밝게"], ["dark", "어둡게"], ["system", "시스템 설정"]] as const).map(([v, label]) => (
+                      <button
+                        key={v}
+                        onClick={() => { applyTheme(v); setTheme(v); }}
+                        className={`rounded-lg px-3 py-1.5 text-xs ${theme === v ? "bg-stone-900 text-white" : "bg-stone-200 text-stone-700 hover:bg-stone-300"}`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <div>
                   <H>시스템 프롬프트</H>
                   <textarea className={Input} rows={4} value={s.system_prompt ?? ""} onChange={(e) => update({ system_prompt: e.target.value })} />

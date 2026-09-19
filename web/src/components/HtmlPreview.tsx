@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Code2, Eye, Maximize2 } from "lucide-react";
+import { isDark } from "../theme";
 
 // 봇이 낸 HTML을 대화창에서 렌더한다.
 // 봇 출력에는 읽어온 메일·웹페이지 내용이 섞이므로 격리가 전제다:
@@ -20,9 +21,9 @@ const MEASURE = `<script>
 })();
 </script>`;
 
-const BASE = `<style>
-  :root { color-scheme: light; }
-  body { margin: 0; padding: 14px; background: #fff; color: #1c1917;
+const base = (dark: boolean) => `<style>
+  :root { color-scheme: ${dark ? "dark" : "light"}; }
+  body { margin: 0; padding: 14px; background: ${dark ? "#171614" : "#fff"}; color: ${dark ? "#e9e5e0" : "#1c1917"};
     font-family: Pretendard, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 14px; line-height: 1.6; }
   * { box-sizing: border-box; }
   table { border-collapse: collapse; }
@@ -33,6 +34,12 @@ export function HtmlPreview({ code, streaming }: { code: string; streaming?: boo
   const [tab, setTab] = useState<"view" | "code">(streaming ? "code" : "view");
   const [touched, setTouched] = useState(false);
   useEffect(() => { if (!streaming && !touched) setTab("view"); }, [streaming, touched]);
+  const [dark, setDark] = useState(isDark());
+  useEffect(() => {
+    const onTheme = () => setDark(isDark());
+    window.addEventListener("mybot-theme", onTheme);
+    return () => window.removeEventListener("mybot-theme", onTheme);
+  }, []);
   const [height, setHeight] = useState(180);
   const [full, setFull] = useState(false);
   const frame = useRef<HTMLIFrameElement>(null);
@@ -48,7 +55,7 @@ export function HtmlPreview({ code, streaming }: { code: string; streaming?: boo
   }, []);
 
   const doc = `<!doctype html><html lang="ko"><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="${CSP}">${BASE}</head><body>${code}${MEASURE}</body></html>`;
+<meta http-equiv="Content-Security-Policy" content="${CSP}">${base(dark)}</head><body>${code}${MEASURE}</body></html>`;
 
   return (
     <div className={`my-2 overflow-hidden rounded-2xl border border-stone-200 bg-white ${full ? "fixed inset-3 z-50 flex flex-col shadow-2xl" : ""}`}>

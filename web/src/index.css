@@ -49,6 +49,41 @@
   }
 }
 
+/* ── 다크 테마 ──
+   Tailwind v4는 모든 색을 var(--color-*)로 컴파일한다(.bg-stone-200 → background-color: var(--color-stone-200)).
+   그래서 팔레트 변수만 뒤집으면 화면 곳곳의 stone-*·white 클래스 500여 곳이 그대로 따라온다.
+   웜 모노크롬 성격은 유지하고 명도만 뒤집되, 보조 텍스트(400~500)는 가독성을 위해 중간 명도로 남긴다. */
+html.dark {
+  color-scheme: dark;
+  --color-white: #171614;        /* 카드·패널 바탕 */
+  --color-stone-50: #1b1917;
+  --color-stone-100: #222020;
+  --color-stone-200: #2d2a28;
+  --color-stone-300: #3c3835;
+  --color-stone-400: #8b847c;
+  --color-stone-500: #a49c94;
+  --color-stone-600: #bdb5ad;
+  --color-stone-700: #d7d1cb;
+  --color-stone-800: #e9e5e0;
+  --color-stone-900: #f6f3ef;    /* 본문 텍스트 */
+  --color-stone-950: #fbf9f7;
+
+  --canvas: #121110;
+  --panel: #1a1917;
+  --ink: #E9E5E0;
+  --ink-strong: #F7F5F2;
+  --ink-mute: #9A948C;
+  --line: #2d2a28;
+}
+
+/* 코드 하이라이트 — github.css는 밝은 테마 고정이라 다크에서 눈이 부시다 */
+html.dark .hljs { background: #1b1917; color: #e9e5e0; }
+html.dark .hljs-comment, html.dark .hljs-quote { color: #8b847c; }
+html.dark .hljs-keyword, html.dark .hljs-selector-tag, html.dark .hljs-literal { color: #ff9e9e; }
+html.dark .hljs-string, html.dark .hljs-attr, html.dark .hljs-addition { color: #a8e0a0; }
+html.dark .hljs-title, html.dark .hljs-name, html.dark .hljs-section { color: #9ec5ff; }
+html.dark .hljs-number, html.dark .hljs-symbol, html.dark .hljs-built_in { color: #f0c088; }
+
 html, body, #root { height: 100%; }
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 body {

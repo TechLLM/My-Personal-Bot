@@ -8,6 +8,16 @@
     <link rel="icon" href="/favicon.png" type="image/png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <title>MyBot</title>
+    <script>
+      // 첫 페인트 전에 테마를 적용한다 — 번들이 로드된 뒤 바꾸면 밝은 화면이 한 번 번쩍인다
+      (function () {
+        try {
+          var t = localStorage.getItem("mybot-theme") || "system";
+          if (t === "dark" || (t !== "light" && matchMedia("(prefers-color-scheme: dark)").matches))
+            document.documentElement.classList.add("dark");
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
