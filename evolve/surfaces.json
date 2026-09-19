@@ -11,6 +11,7 @@
   ],
   "protected": [
     "server/src/access.ts",
+    "server/src/release.ts",
     "server/src/evaluate.ts",
     "server/src/approvals.ts",
     "server/src/evolve.ts",

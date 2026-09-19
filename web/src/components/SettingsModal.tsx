@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { applyTheme, getTheme, type Theme } from "../theme";
-import { api, type ProviderCard, type Agent, type Model, type SiteLogin, mybotFetch } from "../api";
+import { api, type ProviderCard, type Agent, type Model, type SiteLogin, type ReleaseStatus, mybotFetch } from "../api";
 import {
   X, Crown, AlarmClock, Trash2, Folder, Cpu, Search, Image as ImageIcon, Bot,
   Clock, Wrench, Globe, Bell, Brain, Settings2, Loader2, ScrollText,
@@ -217,6 +217,9 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   const [updErr, setUpdErr] = useState<Record<string, string>>({}); // 카드별 오류 메시지 — 실패를 조용히 삼키지 않는다
   const [appVersion, setAppVersion] = useState(0);
   const [updBusy, setUpdBusy] = useState(false);
+  const [rel, setRel] = useState<ReleaseStatus | null>(null); // 서비스 릴리스 — release 브랜치에서 온 배포 대기분
+  const [relBusy, setRelBusy] = useState("");
+  const [relErr, setRelErr] = useState("");
   const [wName, setWName] = useState(""); const [wInst, setWInst] = useState("");
   const [skName, setSkName] = useState(""); const [skPrompt, setSkPrompt] = useState("");
   const [rName, setRName] = useState(""); const [rPrompt, setRPrompt] = useState("");
@@ -283,7 +286,16 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   };
   useEffect(() => { if (section === "audit") loadAudit(); }, [section, auditAgent, auditDays]);
   const loadUpdates = () => api.evolveUpdates().then((d) => { setUpdates(d.updates); setAppVersion(d.appVersion); }).catch(() => {});
-  useEffect(() => { if (section === "updates") loadUpdates(); }, [section]);
+  const loadRelease = () => api.releaseStatus().then(setRel).catch(() => setRel(null));
+  useEffect(() => { if (section === "updates") { loadUpdates(); loadRelease(); } }, [section]);
+  // 적용·되돌리기는 성공하면 서버가 스스로 재시작한다 — 끊겼다 살아나면 새 화면으로 다시 불러온다
+  const relAct = (label: string, fn: () => Promise<unknown>) => {
+    setRelBusy(label); setRelErr("");
+    fn().then(() => {
+      setRelBusy("서비스를 다시 시작하는 중입니다 — 잠시 후 화면이 새로 열립니다");
+      setTimeout(() => location.reload(), 7000);
+    }).catch((e: Error) => { setRelErr(e.message); setRelBusy(""); loadRelease(); });
+  };
   // 업데이트 동작 실행 — 적용은 진행 바를 보여주고, 실패는 서버 오류 메시지를 카드에 표시한다
   const updAct = (id: string, fn: () => Promise<unknown>, withProgress = false) => {
     setUpdBusy(true);
@@ -988,6 +1000,60 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
 
             {section === "updates" && (
               <div>
+                <H>서비스 릴리스</H>
+                <p className="mb-3 text-caption text-stone-500">
+                  개발 인스턴스에서 검증을 마친 작업을 <code className="rounded bg-stone-200 px-1">release</code> 브랜치로 밀면 여기에 나타납니다.
+                  적용하면 테스트를 먼저 돌리고, 통과할 때만 반영한 뒤 서비스를 다시 시작합니다.
+                </p>
+                <div className="mb-6 rounded-xl border border-stone-200 p-3">
+                  {rel === null ? (
+                    <p className="text-caption text-stone-500">릴리스 상태를 불러오지 못했습니다.</p>
+                  ) : (
+                    <>
+                      <div className="flex items-start gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-medium text-stone-800">
+                            {/* 대기분이 없는 이유는 "최신"만이 아니다 — 채널이 없을 수도 있어 사유를 그대로 보여준다 */}
+                            {rel.pending.length ? `새 릴리스 ${rel.pending.length}건 대기 중` : rel.reason || "최신 상태입니다"}
+                          </div>
+                          <div className="mt-0.5 truncate font-mono text-2xs text-stone-500">
+                            현재 {rel.branch}@{rel.current} · {rel.currentSubject}
+                          </div>
+                        </div>
+                        <button onClick={() => relAct("적용", api.applyRelease)} disabled={!rel.canApply || !!relBusy}
+                          className="shrink-0 rounded-lg bg-stone-900 px-3 py-2 text-xs font-medium text-white hover:bg-stone-700 disabled:opacity-40 disabled:hover:bg-stone-900 md:py-1.5">
+                          {relBusy === "적용" ? "적용 중…" : "적용"}
+                        </button>
+                      </div>
+                      {!!rel.pending.length && (
+                        <ul className="mt-2.5 space-y-1 border-t border-stone-100 pt-2.5">
+                          {rel.pending.map((p) => (
+                            <li key={p.sha} className="flex gap-2 text-2xs">
+                              <span className="shrink-0 font-mono text-stone-400">{p.sha}</span>
+                              <span className="min-w-0 flex-1 truncate text-stone-700">{p.subject}</span>
+                              <span className="shrink-0 text-stone-400">{new Date(p.date).toLocaleDateString("ko-KR", { month: "numeric", day: "numeric" })}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {!rel.canApply && rel.reason && rel.pending.length > 0 && (
+                        <p className="mt-2.5 text-caption text-amber-700">{rel.reason}</p>
+                      )}
+                      {relBusy && relBusy !== "적용" && <p className="mt-2.5 text-caption text-stone-600">{relBusy}</p>}
+                      {relErr && <p className="mt-2.5 whitespace-pre-wrap break-words text-caption text-red-700">{relErr}</p>}
+                      {rel.canRevert && (
+                        <div className="mt-2.5 flex items-center gap-2 border-t border-stone-100 pt-2.5">
+                          <span className="flex-1 text-2xs text-stone-500">직전 상태 {rel.prevSha}로 되돌릴 수 있습니다</span>
+                          <button onClick={() => relAct("되돌리기", api.revertRelease)} disabled={!!relBusy}
+                            className="shrink-0 rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs text-stone-700 hover:bg-stone-300 disabled:opacity-40">
+                            {relBusy === "되돌리기" ? "되돌리는 중…" : "되돌리기"}
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+
                 <H>버전 업데이트 <span className="ml-1 text-xs font-normal text-stone-500">현재 v{appVersion}</span></H>
                 <p className="mb-3 text-caption text-stone-500">새 버전이 준비되면 여기에서 직접 적용합니다.</p>
                 <div className="space-y-2">

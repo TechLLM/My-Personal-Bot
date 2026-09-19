@@ -15,6 +15,7 @@ import { notifyRoute, startTelegramBot } from "./notify";
 import { approvalsRoute } from "./approvals";
 import { eventsRoute } from "./events";
 import { evolveRoute, startEvolveLoop } from "./evolve";
+import { releaseRoute } from "./release";
 import { groupsRoute } from "./routes/groups";
 import { startMaintenance } from "./maintenance";
 import { installAccessControl, accessOrigins, readAccessCode } from "./access";
@@ -45,6 +46,7 @@ api.route("/notify", notifyRoute);
 api.route("/approvals", approvalsRoute);
 api.route("/events", eventsRoute);
 api.route("/evolve", evolveRoute);
+api.route("/release", releaseRoute);
 api.route("/groups", groupsRoute);
 seedPersonas();
 // 구형 평문 비밀번호를 AES-256-GCM으로 일괄 암호화 (1회성 마이그레이션)
