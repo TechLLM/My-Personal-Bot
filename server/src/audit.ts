@@ -47,6 +47,20 @@ export function modelProblem(model: string | null): string | null {
   return findProvider(pid) ? null : `등록되지 않은 프로바이더: ${pid}`;
 }
 
+// 프로바이더 크레딧·인증·한도·타임아웃은 스킬 절차의 잘못이 아니다.
+// 이런 실패까지 성공률에 세면 멀쩡한 절차가 꺼진다 — 실제로 browser-skill이 그렇게 비활성됐고,
+// 기록된 스킬 실패 6건이 전부 이 종류였다 (개선지침서 A-5).
+export function isInfraFailure(reason: string | null | undefined): boolean {
+  return /\b(401|402|429|5\d\d)\b|CreditsError|insufficient|quota|rate.?limit|timed out|타임아웃|ECONNRESET|ETIMEDOUT|socket hang up/i
+    .test(String(reason ?? ""));
+}
+
+// 절차 품질을 볼 때는 인프라 실패를 분모에서도 뺀다 — 장애가 잦은 날 성공률이 왜곡되지 않게
+export function skillTally(rows: { ok: number | null; fail_reason: string | null }[]): { n: number; ok: number } {
+  const judged = rows.filter((r) => r.ok !== null && (r.ok === 1 || !isInfraFailure(r.fail_reason)));
+  return { n: judged.length, ok: judged.filter((r) => r.ok === 1).length };
+}
+
 export interface Run { status: string; steps: number | null; created_at: number }
 
 // 실패율을 7일 한 창으로만 보면 이미 고친 문제가 일주일 내내 "위험"으로 남는다.
@@ -140,8 +154,12 @@ export function auditOrg(): Finding[] {
     if (String(s.prompt ?? "").length >= 200 && !String(s.prompt ?? "").includes("[적용 조건]"))
       add("skill.no_condition", "참고", "적용 조건이 없는 스킬", s.name, "[적용 조건]을 적어야 봇이 언제 쓸지 판단합니다.");
   }
-  for (const r of db.prepare("SELECT s.name, COUNT(*) n, COALESCE(SUM(r.ok),0) ok FROM skill_runs r JOIN skills s ON s.id = r.skill_id WHERE r.ok IS NOT NULL GROUP BY s.name HAVING n >= 3").all() as any[])
-    if (r.ok / r.n < 0.5) add("skill.low_success", "주의", "스킬 성공률이 낮습니다", `${r.name}: ${r.ok}/${r.n}`, "실패 사례를 절차에 반영하세요.");
+  // 성공률은 인프라 실패를 뺀 값으로 본다 — 장애로 낮아진 수치를 절차 문제로 보고하지 않는다
+  for (const s of db.prepare("SELECT id, name FROM skills").all() as { id: string; name: string }[]) {
+    const t = skillTally(db.prepare("SELECT ok, fail_reason FROM skill_runs WHERE skill_id = ?").all(s.id) as any[]);
+    if (t.n >= 3 && t.ok / t.n < 0.5)
+      add("skill.low_success", "주의", "스킬 성공률이 낮습니다", `${s.name}: ${t.ok}/${t.n}`, "실패 사례를 절차에 반영하세요.");
+  }
 
   // ── 운영 지표 ──
   const since = Date.now() - 7 * 86_400_000;

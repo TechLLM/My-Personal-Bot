@@ -1,6 +1,6 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { db, now } from "./db";
-import { auditOrg, formatAudit, repeatedParagraph, modelProblem, failRateFinding, type Run } from "./audit";
+import { auditOrg, formatAudit, repeatedParagraph, modelProblem, failRateFinding, isInfraFailure, skillTally, type Run } from "./audit";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
 
@@ -157,4 +157,54 @@ test("7일 실패율이 임계 이하면 아무 소견도 내지 않는다", () 
 
 test("표본이 10건 미만이면 판단하지 않는다", () => {
   expect(failRateFinding(runs(9, 9, 3600_000), NOW)).toBeNull();
+});
+
+// --- 인프라 실패와 절차 실패 구분 (개선지침서 A-5) ---
+// browser-skill이 "성공률 미달"로 자동 비활성됐지만, 실패 3건은 전부 크레딧 부족·타임아웃이었다.
+// 기록된 스킬 실패 6건이 모두 이 종류였고, 절차 잘못으로 실패한 건은 하나도 없었다.
+
+test("프로바이더 크레딧·한도·타임아웃은 인프라 실패로 본다", () => {
+  for (const r of [
+    '에이전트 오류: 오류 401: {"type":"error","error":{"type":"CreditsError"',
+    "에이전트 오류: The operation timed out.",
+    "오류 429: rate limit exceeded",
+    "오류 503: upstream unavailable",
+    "socket hang up",
+  ]) expect(isInfraFailure(r)).toBe(true);
+});
+
+test("절차가 잘못된 실패는 인프라 실패로 보지 않는다", () => {
+  for (const r of ["필수 항목을 찾지 못했습니다", "로그인 화면에서 다음 단계를 못 찾음", "", null])
+    expect(isInfraFailure(r)).toBe(false);
+});
+
+test("성공률 계산에서 인프라 실패는 분모에서도 빠진다", () => {
+  // browser-skill 실제 이력과 같은 모양 — 성공 5, 크레딧 2, 타임아웃 1
+  const rows = [
+    ...Array(5).fill({ ok: 1, fail_reason: null }),
+    { ok: 0, fail_reason: '오류 401: {"type":"error","error":{"type":"CreditsError"' },
+    { ok: 0, fail_reason: '오류 401: {"type":"error","error":{"type":"CreditsError"' },
+    { ok: 0, fail_reason: "에이전트 오류: The operation timed out." },
+  ];
+  expect(skillTally(rows)).toEqual({ n: 5, ok: 5 }); // 8건 중 5건만 절차 판단 대상
+});
+
+test("절차 실패는 그대로 성공률에 반영한다", () => {
+  const rows = [
+    { ok: 1, fail_reason: null },
+    { ok: 0, fail_reason: "필수 항목을 찾지 못했습니다" },
+    { ok: 0, fail_reason: "다음 단계를 못 찾음" },
+  ];
+  expect(skillTally(rows)).toEqual({ n: 3, ok: 1 }); // 33% — 이건 꺼야 할 절차가 맞다
+});
+
+test("인프라 장애만 겪은 스킬은 성공률 경고를 내지 않는다", () => {
+  ins({ is_boss: 1 });
+  db.prepare("INSERT INTO skills (id, name, prompt, created_at, disabled) VALUES ('sk-inf','브라우저절차','절차 본문',0,0)").run();
+  const add = db.prepare("INSERT INTO skill_runs (id, skill_id, run_key, ok, fail_reason, created_at) VALUES (?,?,?,?,?,0)");
+  add.run("r1", "sk-inf", "k1", 1, null);
+  add.run("r2", "sk-inf", "k2", 0, "오류 401: CreditsError");
+  add.run("r3", "sk-inf", "k3", 0, "The operation timed out.");
+  add.run("r4", "sk-inf", "k4", 0, "오류 429: rate limit");
+  expect(ids(auditOrg())).not.toContain("skill.low_success"); // 판단 대상이 1건뿐이라 아예 판정하지 않는다
 });

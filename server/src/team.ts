@@ -5,6 +5,7 @@ import { resolveModel, modelLabel, listAllModelIds, defaultModelId } from "./pro
 import { chatOnce, streamChat, friendlyProviderError, type ChatMessage } from "./providers/openaiCompat";
 import { systemPrompt, activeRuns, recallMemories } from "./routes/chat";
 import { notifyResult } from "./notify";
+import { skillTally } from "./audit";
 import { webSearch } from "./search";
 import { mcpConfigured, mcpTools, mcpCall } from "./mcp";
 import { BROWSER_TOOLS, browserTool, closeAgentPage, closeAgentEgoSpace } from "./browser";
@@ -286,8 +287,11 @@ export function closeSkillRuns(runKey: string, ok: boolean, reason?: string) {
   db.prepare("UPDATE skill_runs SET ok = ?, fail_reason = ?, finished_at = ? WHERE run_key = ? AND ok IS NULL")
     .run(ok ? 1 : 0, ok ? null : (reason ?? "").slice(0, 300) || null, now(), runKey);
   for (const r of rows) {
-    const s = db.prepare("SELECT COUNT(*) n, COALESCE(SUM(ok),0) okN FROM skill_runs WHERE skill_id = ? AND ok IS NOT NULL").get(r.skill_id) as any;
-    if (s.n >= 3 && s.okN / s.n < 0.5)
+    // 크레딧 부족·타임아웃 같은 인프라 실패는 절차의 잘못이 아니므로 세지 않는다.
+    // 세면 실행 횟수가 적은 스킬이 프로바이더 장애 한 번에 꺼진다 (개선지침서 A-5)
+    const runs = db.prepare("SELECT ok, fail_reason FROM skill_runs WHERE skill_id = ? AND ok IS NOT NULL").all(r.skill_id) as any[];
+    const s = skillTally(runs);
+    if (s.n >= 3 && s.ok / s.n < 0.5)
       db.prepare("UPDATE skills SET disabled = 1 WHERE id = ? AND disabled = 0").run(r.skill_id);
   }
 }
