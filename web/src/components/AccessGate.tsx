@@ -17,7 +17,10 @@ export function AccessGate({ children }: { children: ReactNode }) {
       if (signal?.aborted) return;
       if (key) localStorage.setItem("mybot_key", key);
       setPassword(""); setReady(true);
-    } catch (e) { if (!signal?.aborted) setError((e as Error).message); }
+    } catch (e) {
+      // 첫 방문(입력도 저장된 키도 없음)의 401은 오류가 아니라 정상적인 입력 대기 상태다
+      if (!signal?.aborted && (key || localStorage.getItem("mybot_key"))) setError((e as Error).message);
+    }
     finally { if (!signal?.aborted) setChecking(false); }
   }
   useEffect(() => { const c = new AbortController(); void check(undefined, c.signal); return () => c.abort(); }, []);

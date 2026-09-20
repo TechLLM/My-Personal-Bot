@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { applyTheme, getTheme, type Theme } from "../theme";
-import { api, type ProviderCard, type Agent, type Model, type SiteLogin, mybotFetch } from "../api";
+import { api, type ProviderCard, type Agent, type Model, type SiteLogin, type ReleaseStatus, mybotFetch } from "../api";
 import {
   X, Crown, AlarmClock, Trash2, Folder, Cpu, Search, Image as ImageIcon, Bot,
   Clock, Wrench, Globe, Bell, Brain, Settings2, Loader2, ScrollText,
@@ -134,12 +134,63 @@ function ProviderRow({ p, onChanged }: { p: ProviderCard; onChanged: () => void 
 // 입력 컴포넌트는 반드시 모듈 스코프에 둔다 — 컴포넌트 안에서 정의하면 렌더마다 새 타입이 만들어져
 // React가 input을 통째로 리마운트한다. 그러면 한 글자 칠 때마다 포커스가 빠져 다시 클릭해야 했다
 // (2026-09-18 실측: 입력 직후 해당 input이 DOM에서 사라지고 document.activeElement가 body로 갔다)
-function Field({ k, label, ph, s, update }: { k: string; label: string; ph?: string; s: Record<string, string>; update: (patch: Record<string, string>) => void }) {
+function Field({ k, label, ph, s, update, secret }: { k: string; label: string; ph?: string; s: Record<string, string>; update: (patch: Record<string, string>) => void; secret?: boolean }) {
   return (
     <label className="block">
       <span className="text-xs text-stone-600">{label}</span>
-      <input className="mt-1 w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none" value={s[k] ?? ""} placeholder={ph} onChange={(e) => update({ [k]: e.target.value })} />
+      <input type={secret ? "password" : "text"} autoComplete={secret ? "off" : undefined}
+        className="mt-1 w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none" value={s[k] ?? ""} placeholder={ph} onChange={(e) => update({ [k]: e.target.value })} />
     </label>
+  );
+}
+
+// 접속 암호 — 오타가 나면 본인까지 못 들어오고 외부 접속 경로가 통째로 막히므로 두 번 받아 대조한다.
+// 두 값이 일치할 때만 저장 대상에 반영하고, 그전까지는 편집 시작 시점의 값을 유지해 잘못 저장되지 않게 한다.
+function AccessCodeField({ s, update, onWarn }: { s: Record<string, string>; update: (patch: Record<string, string>) => void; onWarn: (msg: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [saved, setSaved] = useState(""); // 편집 시작 시점의 서버 값(마스킹) — 취소·불일치 때 되돌린다
+  const [v1, setV1] = useState("");
+  const [v2, setV2] = useState("");
+  const isSet = !!(s.access_code ?? "");
+
+  const start = () => { setSaved(s.access_code ?? ""); setV1(""); setV2(""); setEditing(true); onWarn("새 접속 암호를 두 번 입력해 주세요"); };
+  const cancel = () => { update({ access_code: saved }); setV1(""); setV2(""); setEditing(false); onWarn(""); };
+  const apply = (a: string, b: string) => {
+    setV1(a); setV2(b);
+    const ok = a.length > 0 && a === b;
+    update({ access_code: ok ? a : saved });
+    onWarn(ok ? "" : !a && !b ? "새 접속 암호를 두 번 입력해 주세요" : a !== b ? "두 접속 암호가 서로 다릅니다" : "확인란에도 같은 암호를 입력해 주세요");
+  };
+
+  const box = "mt-1 w-full rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs outline-none";
+  if (!editing) return (
+    <div>
+      <span className="text-xs text-stone-600">접속 암호 (설정 시 API 전체에 필요)</span>
+      <div className="mt-1 flex items-center gap-2">
+        <span className={`flex-1 text-xs ${isSet ? "text-stone-700" : "font-medium text-red-700"}`}>
+          {isSet ? "설정됨 — 접속에 암호가 필요합니다" : "설정 안 됨 — 인증 없이 접근됩니다"}
+        </span>
+        <button type="button" onClick={start} className="rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs text-stone-700 hover:bg-stone-300">
+          {isSet ? "변경" : "설정"}
+        </button>
+      </div>
+    </div>
+  );
+  return (
+    <div className="space-y-2">
+      <label className="block">
+        <span className="text-xs text-stone-600">새 접속 암호</span>
+        <input type="password" autoComplete="new-password" className={box} value={v1} onChange={(e) => apply(e.target.value, v2)} />
+      </label>
+      <label className="block">
+        <span className="text-xs text-stone-600">새 접속 암호 확인</span>
+        <input type="password" autoComplete="new-password" className={box} value={v2} onChange={(e) => apply(v1, e.target.value)} />
+      </label>
+      <div className="flex items-center gap-2">
+        <span className="flex-1 text-xs text-stone-500">{v1 && v1 === v2 ? "두 입력이 일치합니다 — 저장하면 적용됩니다" : "두 입력이 일치해야 저장됩니다"}</span>
+        <button type="button" onClick={cancel} className="rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs text-stone-700 hover:bg-stone-300">취소</button>
+      </div>
+    </div>
   );
 }
 
@@ -167,6 +218,9 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   const [updErr, setUpdErr] = useState<Record<string, string>>({}); // 카드별 오류 메시지 — 실패를 조용히 삼키지 않는다
   const [appVersion, setAppVersion] = useState(0);
   const [updBusy, setUpdBusy] = useState(false);
+  const [rel, setRel] = useState<ReleaseStatus | null>(null); // 서비스 릴리스 — release 브랜치에서 온 배포 대기분
+  const [relBusy, setRelBusy] = useState("");
+  const [relErr, setRelErr] = useState("");
   const [wName, setWName] = useState(""); const [wInst, setWInst] = useState("");
   const [skName, setSkName] = useState(""); const [skPrompt, setSkPrompt] = useState("");
   const [rName, setRName] = useState(""); const [rPrompt, setRPrompt] = useState("");
@@ -233,7 +287,19 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   };
   useEffect(() => { if (section === "audit") loadAudit(); }, [section, auditAgent, auditDays]);
   const loadUpdates = () => api.evolveUpdates().then((d) => { setUpdates(d.updates); setAppVersion(d.appVersion); }).catch(() => {});
-  useEffect(() => { if (section === "updates") loadUpdates(); }, [section]);
+  const loadRelease = () => api.releaseStatus().then(setRel).catch(() => setRel(null));
+  useEffect(() => { if (section === "updates") { loadUpdates(); loadRelease(); } }, [section]);
+  // 메뉴 배지를 띄우려면 섹션을 열기 전에 한 번은 알아야 한다
+  useEffect(() => { loadUpdates(); loadRelease(); }, []);
+  const updBadge = updates.filter((u: any) => u.status === "pending").length + (rel?.pending.length ?? 0);
+  // 적용·되돌리기는 성공하면 서버가 스스로 재시작한다 — 끊겼다 살아나면 새 화면으로 다시 불러온다
+  const relAct = (label: string, fn: () => Promise<unknown>) => {
+    setRelBusy(label); setRelErr("");
+    fn().then(() => {
+      setRelBusy("서비스를 다시 시작하는 중입니다 — 잠시 후 화면이 새로 열립니다");
+      setTimeout(() => location.reload(), 7000);
+    }).catch((e: Error) => { setRelErr(e.message); setRelBusy(""); loadRelease(); });
+  };
   // 업데이트 동작 실행 — 적용은 진행 바를 보여주고, 실패는 서버 오류 메시지를 카드에 표시한다
   const updAct = (id: string, fn: () => Promise<unknown>, withProgress = false) => {
     setUpdBusy(true);
@@ -267,6 +333,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   }, [recActive]);
 
   // 입력은 로컬 상태만 변경 — "저장" 버튼을 눌러야 서버에 반영
+  const [pwWarn, setPwWarn] = useState(""); // 접속 암호 두 입력이 어긋나 있으면 저장을 잠근다
   const update = (patch: Record<string, string>) => { setS((p) => ({ ...p, ...patch })); setDirty(true); };
   const saveAll = () => {
     mybotFetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(s) })
@@ -298,6 +365,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
               <Icon size={14} className="shrink-0" />
               <span className="truncate">{label}</span>
               {id === "providers" && authed.length > 0 && <span className="ml-auto rounded bg-emerald-50 px-1 text-micro text-emerald-600">{authed.length}</span>}
+              {id === "updates" && updBadge > 0 && <span className="ml-auto grid size-4 place-items-center rounded-full bg-amber-500 text-micro font-bold text-white">{updBadge}</span>}
             </button>
           ))}
           <div className="mt-auto hidden px-2 pb-1 text-2xs text-stone-300 md:block">MyBot 로컬 설정</div>
@@ -612,10 +680,10 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                 </select>
                 <div className="space-y-2.5">
                   <Field s={s} update={update} k="searxng_url" label="SearXNG URL" ph="http://127.0.0.1:8080" />
-                  <Field s={s} update={update} k="tavily_key" label="Tavily API 키" />
-                  <Field s={s} update={update} k="brave_key" label="Brave API 키" />
-                  <Field s={s} update={update} k="exa_key" label="Exa API 키" ph="exa.ai — 무료 크레딧" />
-                  <Field s={s} update={update} k="jina_key" label="Jina API 키" ph="jina.ai — 무료 10M 토큰" />
+                  <Field secret s={s} update={update} k="tavily_key" label="Tavily API 키" />
+                  <Field secret s={s} update={update} k="brave_key" label="Brave API 키" />
+                  <Field secret s={s} update={update} k="exa_key" label="Exa API 키" ph="exa.ai — 무료 크레딧" />
+                  <Field secret s={s} update={update} k="jina_key" label="Jina API 키" ph="jina.ai — 무료 10M 토큰" />
                 </div>
               </div>
             )}
@@ -625,7 +693,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                 <H>이미지 생성</H>
                 <div className="space-y-2.5">
                   <Field s={s} update={update} k="image_endpoint" label="Images API 엔드포인트" ph="http://127.0.0.1:11441/v1 또는 Draw Things http://127.0.0.1:7888" />
-                  <Field s={s} update={update} k="image_key" label="이미지 API 키(선택)" />
+                  <Field secret s={s} update={update} k="image_key" label="이미지 API 키(선택)" />
                   <Field s={s} update={update} k="image_model" label="이미지 모델" ph="dall-e-3 / flux 등" />
                 </div>
               </div>
@@ -872,7 +940,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     <input type="checkbox" checked={s.notify_telegram === "1"} onChange={(e) => update({ notify_telegram: e.target.checked ? "1" : "0" })} />
                     답변을 텔레그램으로도 받기
                   </label>
-                  <Field s={s} update={update} k="telegram_bot_token" label="텔레그램 봇 토큰" ph="@BotFather에서 발급 (123456:ABC…)" />
+                  <Field secret s={s} update={update} k="telegram_bot_token" label="텔레그램 봇 토큰" ph="@BotFather에서 발급 (123456:ABC…)" />
                   <Field s={s} update={update} k="telegram_chat_id" label="텔레그램 채팅 ID" ph="봇에게 말 건 뒤 getUpdates로 확인" />
                   <label className="flex items-center gap-2 text-xs text-stone-600">
                     <input type="checkbox" checked={s.telegram_listen === "1"} onChange={(e) => update({ telegram_listen: e.target.checked ? "1" : "0" })} />
@@ -886,7 +954,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     <Field s={s} update={update} k="smtp_host" label="SMTP 호스트" ph="smtp.gmail.com" />
                     <Field s={s} update={update} k="smtp_port" label="포트" ph="587 (465는 SSL)" />
                     <Field s={s} update={update} k="smtp_user" label="SMTP 계정" />
-                    <Field s={s} update={update} k="smtp_pass" label="SMTP 비밀번호/앱 비밀번호" />
+                    <Field secret s={s} update={update} k="smtp_pass" label="SMTP 비밀번호/앱 비밀번호" />
                     <Field s={s} update={update} k="smtp_from" label="보내는 주소(선택)" />
                     <Field s={s} update={update} k="email_to" label="받는 주소" />
                   </div>
@@ -896,7 +964,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     <Field s={s} update={update} k="imap_host" label="IMAP 호스트" ph="imap.gmail.com / 사내 메일 서버" />
                     <Field s={s} update={update} k="imap_port" label="포트" ph="993 (SSL)" />
                     <Field s={s} update={update} k="imap_user" label="IMAP 계정" ph="name@company.com" />
-                    <Field s={s} update={update} k="imap_pass" label="IMAP 비밀번호/앱 비밀번호" />
+                    <Field secret s={s} update={update} k="imap_pass" label="IMAP 비밀번호/앱 비밀번호" />
                   </div>
                   <label className="flex items-center gap-2 text-xs text-stone-600">
                     <input type="checkbox" checked={s.imap_tls !== "0"} onChange={(e) => update({ imap_tls: e.target.checked ? "1" : "0" })} />
@@ -941,6 +1009,80 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
 
             {section === "updates" && (
               <div>
+                <H>서비스 릴리스</H>
+                <p className="mb-3 text-caption text-stone-500">
+                  개발 인스턴스에서 검증을 마친 작업을 <code className="rounded bg-stone-200 px-1">release</code> 브랜치로 밀면 여기에 나타납니다.
+                  적용하면 테스트를 먼저 돌리고, 통과할 때만 반영한 뒤 서비스를 다시 시작합니다.
+                </p>
+                <div className="mb-6 rounded-xl border border-stone-200 p-3">
+                  {rel === null ? (
+                    <p className="text-caption text-stone-500">릴리스 상태를 불러오지 못했습니다.</p>
+                  ) : (
+                    <>
+                      <div className="flex items-start gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-medium text-stone-800">
+                            {/* 대기분이 없는 이유는 "최신"만이 아니다 — 채널이 없을 수도 있어 사유를 그대로 보여준다 */}
+                            {rel.pending.length ? `새 릴리스 ${rel.pending.length}건 대기 중` : rel.reason || "최신 상태입니다"}
+                          </div>
+                          <div className="mt-0.5 truncate font-mono text-2xs text-stone-500">
+                            현재 {rel.branch}@{rel.current} · {rel.currentSubject}
+                          </div>
+                        </div>
+                        <button onClick={() => relAct("적용", api.applyRelease)} disabled={!rel.canApply || !!relBusy}
+                          className="shrink-0 rounded-lg bg-stone-900 px-3 py-2 text-xs font-medium text-white hover:bg-stone-700 disabled:opacity-40 disabled:hover:bg-stone-900 md:py-1.5">
+                          {relBusy === "적용" ? "적용 중…" : "적용"}
+                        </button>
+                      </div>
+                      {!!rel.pending.length && (
+                        <ul className="mt-2.5 space-y-1 border-t border-stone-100 pt-2.5">
+                          {rel.pending.map((p) => (
+                            <li key={p.sha} className="flex gap-2 text-2xs">
+                              <span className="shrink-0 font-mono text-stone-400">{p.sha}</span>
+                              <span className="min-w-0 flex-1 truncate text-stone-700">{p.subject}</span>
+                              <span className="shrink-0 text-stone-400">{new Date(p.date).toLocaleDateString("ko-KR", { month: "numeric", day: "numeric" })}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {!rel.canApply && rel.reason && rel.pending.length > 0 && (
+                        <p className="mt-2.5 text-caption text-amber-700">{rel.reason}</p>
+                      )}
+                      {relBusy && relBusy !== "적용" && <p className="mt-2.5 text-caption text-stone-600">{relBusy}</p>}
+                      {relErr && <p className="mt-2.5 whitespace-pre-wrap break-words text-caption text-red-700">{relErr}</p>}
+                      {rel.canRevert && (
+                        <div className="mt-2.5 flex items-center gap-2 border-t border-stone-100 pt-2.5">
+                          <span className="flex-1 text-2xs text-stone-500">직전 상태 {rel.prevSha}로 되돌릴 수 있습니다</span>
+                          <button onClick={() => relAct("되돌리기", api.revertRelease)} disabled={!!relBusy}
+                            className="shrink-0 rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs text-stone-700 hover:bg-stone-300 disabled:opacity-40">
+                            {relBusy === "되돌리기" ? "되돌리는 중…" : "되돌리기"}
+                          </button>
+                        </div>
+                      )}
+                      {!!rel.receipts?.length && (
+                        <div className="mt-2.5 border-t border-stone-100 pt-2.5">
+                          <div className="mb-1.5 text-2xs font-medium text-stone-500">적용 기록</div>
+                          <ul className="space-y-1.5">
+                            {rel.receipts.map((r, i) => (
+                              <li key={`${r.ts}-${i}`} className="text-2xs">
+                                <div className="flex gap-2">
+                                  <span className={`shrink-0 font-medium ${r.result === "applied" ? "text-emerald-700" : r.result === "rolled-back" ? "text-amber-700" : "text-red-700"}`}>
+                                    {r.result === "applied" ? "적용됨" : r.result === "rolled-back" ? "되돌림" : "중단됨"}
+                                  </span>
+                                  <span className="min-w-0 flex-1 truncate text-stone-600">{r.subjects[0] ?? `${r.from.slice(0, 7)} → ${r.to.slice(0, 7)}`}</span>
+                                  <span className="shrink-0 text-stone-400">{new Date(r.ts).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                                </div>
+                                {r.result === "applied" && !!r.gates.length && <div className="mt-0.5 text-stone-400">통과: {r.gates.join(" · ")}</div>}
+                                {r.error && <div className="mt-0.5 whitespace-pre-wrap break-words text-stone-500">{r.error}</div>}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+
                 <H>버전 업데이트 <span className="ml-1 text-xs font-normal text-stone-500">현재 v{appVersion}</span></H>
                 <p className="mb-3 text-caption text-stone-500">새 버전이 준비되면 여기에서 직접 적용합니다.</p>
                 <div className="space-y-2">
@@ -1013,7 +1155,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                 </div>
                 <div>
                   <H>보안</H>
-                  <Field s={s} update={update} k="access_code" label="접속 암호 (설정 시 API 전체에 필요)" ph="비워두면 LAN 개방" />
+                  <AccessCodeField s={s} update={update} onWarn={setPwWarn} />
                 </div>
               </div>
             )}
@@ -1021,8 +1163,8 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
 
           {/* 하단 저장 바 */}
           <div className="flex items-center gap-3 border-t border-stone-200 px-4 pb-[max(0.625rem,env(safe-area-inset-bottom))] pt-2.5 md:px-5 md:py-3">
-            <button onClick={saveAll} className="h-10 rounded-lg bg-stone-900 px-5 text-xs font-semibold text-white hover:bg-stone-700 md:h-8 md:px-4">저장</button>
-            {dirty && <span className="text-caption text-amber-600">저장되지 않은 변경 사항 있음</span>}
+            <button onClick={saveAll} disabled={!!pwWarn} className="h-10 rounded-lg bg-stone-900 px-5 text-xs font-semibold text-white hover:bg-stone-700 disabled:opacity-40 disabled:hover:bg-stone-900 md:h-8 md:px-4">저장</button>
+            {pwWarn ? <span className="text-caption text-red-700">{pwWarn}</span> : dirty && <span className="text-caption text-amber-600">저장되지 않은 변경 사항 있음</span>}
             {savedMsg && <span className="text-caption text-emerald-600">{savedMsg}</span>}
             <button onClick={onClose} className="ml-auto h-10 rounded-lg px-3 text-xs text-stone-500 hover:bg-stone-100 hover:text-stone-800 md:h-8">닫기</button>
           </div>

@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import { db, setSetting } from "../db";
 import { resolveModel } from "./index";
-import { chatOnce, streamChat, friendlyProviderError } from "./openaiCompat";
+import { chatOnce, streamChat, friendlyProviderError, isCreditsErr, cooldownFor } from "./openaiCompat";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
 
@@ -109,4 +109,39 @@ test("429가 아닌 실패로 폴백한 모델도 쿨다운돼 다시 두드리�
   } finally {
     globalThis.fetch = saved;
   }
+});
+
+// --- 잔액 소진 처리 (tasks/browser-reliability.md) ---
+// 실측: 스킬 실패 6건 중 4건이 CreditsError였다. 잔액은 결제 전까지 풀리지 않고
+// 그 프로바이더의 모든 모델이 똑같이 거부되므로, 모델 하나만 2분 건너뛰면 같은 실패를 반복한다.
+
+test("잔액 부족 오류를 알아본다", () => {
+  for (const m of [
+    '오류 401: {"type":"error","error":{"type":"CreditsError","message":"Insufficient credits"}}',
+    "insufficient balance",
+    "오류 1113: balance not enough",
+  ]) expect(isCreditsErr(m)).toBe(true);
+});
+
+test("일시적 오류나 플랜 문제는 잔액 문제로 보지 않는다", () => {
+  for (const m of ["오류 429: rate limit", "오류 502: bad gateway", "오류 1311: subscription plan", "The operation timed out."])
+    expect(isCreditsErr(m)).toBe(false);
+});
+
+test("잔액이 마르면 모델이 아니라 프로바이더 전체를 오래 건너뛴다", () => {
+  const cd = cooldownFor("zai", "zai/glm-5.3-flash", new Error("CreditsError: insufficient credits"));
+  expect(cd.key).toBe("zai");          // 같은 프로바이더의 다른 모델도 함께 건너뛴다
+  expect(cd.ms).toBe(3_600_000);
+});
+
+test("보통 실패는 그 모델만 잠시 건너뛴다", () => {
+  const cd = cooldownFor("zai", "zai/glm-5.3-flash", new Error("오류 502: bad gateway"));
+  expect(cd.key).toBe("zai/glm-5.3-flash");
+  expect(cd.ms).toBe(120_000);
+});
+
+test("플랜 미지원은 그 모델만 오래 건너뛴다", () => {
+  const cd = cooldownFor("zai", "zai/flashx", new Error("오류 1311: subscription plan does not include"));
+  expect(cd.key).toBe("zai/flashx");   // 다른 모델은 플랜에 있을 수 있으므로 프로바이더를 통째로 막지 않는다
+  expect(cd.ms).toBe(3_600_000);
 });

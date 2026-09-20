@@ -15,6 +15,7 @@ import { notifyRoute, startTelegramBot } from "./notify";
 import { approvalsRoute } from "./approvals";
 import { eventsRoute } from "./events";
 import { evolveRoute, startEvolveLoop } from "./evolve";
+import { releaseRoute, recoverJournal } from "./release";
 import { groupsRoute } from "./routes/groups";
 import { startMaintenance } from "./maintenance";
 import { installAccessControl, accessOrigins, readAccessCode } from "./access";
@@ -46,6 +47,7 @@ api.route("/notify", notifyRoute);
 api.route("/approvals", approvalsRoute);
 api.route("/events", eventsRoute);
 api.route("/evolve", evolveRoute);
+api.route("/release", releaseRoute);
 api.route("/groups", groupsRoute);
 seedPersonas();
 // 구형 평문 비밀번호를 AES-256-GCM으로 일괄 암호화 (1회성 마이그레이션)
@@ -101,6 +103,7 @@ startMaintenance(); // 보존 정리 — 실행이력·승인·브라우저 캐�
 db.prepare("UPDATE experiments SET verdict = 'crash', reason = '서버 재시작으로 사이클 중단', finished_at = ? WHERE finished_at IS NULL").run(now());
 // 자기개선학습 사이클은 개발 인스턴스(MYBOT_ENV=dev)에서만 돈다 — 서비스는 검증된 패키지를 버전 업데이트로만 수령
 if (process.env.MYBOT_ENV === "dev") startEvolveLoop();
+recoverJournal(); // 끝나지 못한 릴리스 적용이 있었는지 확인하고 영수증에 남긴다
 
 app.route("/api", api);
 

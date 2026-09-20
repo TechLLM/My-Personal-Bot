@@ -47,6 +47,58 @@ export function modelProblem(model: string | null): string | null {
   return findProvider(pid) ? null : `등록되지 않은 프로바이더: ${pid}`;
 }
 
+// 프로바이더 크레딧·인증·한도·타임아웃은 스킬 절차의 잘못이 아니다.
+// 이런 실패까지 성공률에 세면 멀쩡한 절차가 꺼진다 — 실제로 browser-skill이 그렇게 비활성됐고,
+// 기록된 스킬 실패 6건이 전부 이 종류였다 (개선지침서 A-5).
+export function isInfraFailure(reason: string | null | undefined): boolean {
+  return /\b(401|402|429|5\d\d)\b|CreditsError|insufficient|quota|rate.?limit|timed out|타임아웃|ECONNRESET|ETIMEDOUT|socket hang up/i
+    .test(String(reason ?? ""));
+}
+
+// 절차 품질을 볼 때는 인프라 실패를 분모에서도 뺀다 — 장애가 잦은 날 성공률이 왜곡되지 않게
+export function skillTally(rows: { ok: number | null; fail_reason: string | null }[]): { n: number; ok: number } {
+  const judged = rows.filter((r) => r.ok !== null && (r.ok === 1 || !isInfraFailure(r.fail_reason)));
+  return { n: judged.length, ok: judged.filter((r) => r.ok === 1).length };
+}
+
+// 만료에는 두 종류가 있다. 같은 대상에 새 요청이 와서 대체된 것과 사람이 일괄 정리한 것은
+// 정상 동작이며 "승인 대상이 과한지"를 나타내지 않는다. 기록된 만료 51건이 전부 이 종류였다.
+// 방치되어 만료된 것만 세야 규칙이 원래 재려던 것을 잰다 (개선지침서 A-7).
+export function unattendedExpiry(result: string | null | undefined): boolean {
+  return !/대체됨|직접 정리|사용자 요청|수동 정리/.test(String(result ?? ""));
+}
+
+export interface Run { status: string; steps: number | null; created_at: number }
+
+// 실패율을 7일 한 창으로만 보면 이미 고친 문제가 일주일 내내 "위험"으로 남는다.
+// 24시간과 7일을 함께 재고, 최근 하루가 잠잠하면 심각도를 낮춰 지금 조치가 필요한 것만 위험으로 남긴다.
+// (개선지침서 A-1 — 착수 시점 실측: 7일 177/1243=14.2%, 24시간 0/89=0%)
+export function failRateFinding(runs: Run[], now = Date.now()):
+  { severity: Severity; title: string; detail: string; fix: string } | null {
+  const tally = (rows: Run[]) => {
+    const err = rows.filter((r) => r.status === "error").length;
+    return { n: rows.length, err, pct: rows.length ? err / rows.length : 0 };
+  };
+  const week = tally(runs);
+  const day = tally(runs.filter((r) => r.created_at > now - 86_400_000));
+  if (week.n < 10 || week.pct <= 0.1) return null;
+
+  // 최근 하루의 표본이 너무 적으면 "잠잠하다"고 단정하지 않는다 — 섣불리 위험을 낮추지 않는다
+  const settled = day.n >= 5 && day.pct <= 0.1;
+  const trend = day.n < 5 ? "최근 24시간 표본이 적어 추세를 판단하지 않습니다"
+    : day.pct <= week.pct * 0.5 ? "개선 중"
+    : day.pct >= week.pct * 1.5 ? "악화 중" : "비슷한 수준";
+  const pct = (t: { err: number; n: number; pct: number }) => `${t.err}/${t.n} (${Math.round(t.pct * 100)}%)`;
+  return {
+    severity: settled ? "주의" : "위험",
+    title: settled ? "실패가 최근에는 잦아들었습니다 (지난 7일 기준으로는 높음)" : "최근 실패율이 높습니다",
+    detail: `7일 ${pct(week)} · 24시간 ${pct(day)} — ${trend}`,
+    fix: settled
+      ? "지난 7일 수치는 이미 지나간 실패가 끌어올린 것입니다. 원인이 해결됐는지만 확인하세요."
+      : "실패 결과의 사유를 확인하세요 — 프로바이더 인증·한도 문제가 흔합니다.",
+  };
+}
+
 export function auditOrg(): Finding[] {
   const f: Finding[] = [];
   const agents = db.prepare("SELECT * FROM agents").all() as AgentRow[];
@@ -109,21 +161,26 @@ export function auditOrg(): Finding[] {
     if (String(s.prompt ?? "").length >= 200 && !String(s.prompt ?? "").includes("[적용 조건]"))
       add("skill.no_condition", "참고", "적용 조건이 없는 스킬", s.name, "[적용 조건]을 적어야 봇이 언제 쓸지 판단합니다.");
   }
-  for (const r of db.prepare("SELECT s.name, COUNT(*) n, COALESCE(SUM(r.ok),0) ok FROM skill_runs r JOIN skills s ON s.id = r.skill_id WHERE r.ok IS NOT NULL GROUP BY s.name HAVING n >= 3").all() as any[])
-    if (r.ok / r.n < 0.5) add("skill.low_success", "주의", "스킬 성공률이 낮습니다", `${r.name}: ${r.ok}/${r.n}`, "실패 사례를 절차에 반영하세요.");
+  // 성공률은 인프라 실패를 뺀 값으로 본다 — 장애로 낮아진 수치를 절차 문제로 보고하지 않는다
+  for (const s of db.prepare("SELECT id, name FROM skills").all() as { id: string; name: string }[]) {
+    const t = skillTally(db.prepare("SELECT ok, fail_reason FROM skill_runs WHERE skill_id = ?").all(s.id) as any[]);
+    if (t.n >= 3 && t.ok / t.n < 0.5)
+      add("skill.low_success", "주의", "스킬 성공률이 낮습니다", `${s.name}: ${t.ok}/${t.n}`, "실패 사례를 절차에 반영하세요.");
+  }
 
-  // ── 운영 지표(최근 7일) ──
+  // ── 운영 지표 ──
   const since = Date.now() - 7 * 86_400_000;
-  const runs = db.prepare("SELECT status, steps FROM agent_runs WHERE created_at > ?").all(since) as { status: string; steps: number | null }[];
+  const runs = db.prepare("SELECT status, steps, created_at FROM agent_runs WHERE created_at > ?").all(since) as Run[];
   if (runs.length >= 10) {
-    const err = runs.filter((r) => r.status === "error").length;
-    if (err / runs.length > 0.1) add("ops.fail_rate", "위험", "최근 7일 실패율이 높습니다", `${err}/${runs.length} (${Math.round((err / runs.length) * 100)}%)`, "실패 결과의 사유를 확인하세요 — 프로바이더 인증·한도 문제가 흔합니다.");
+    const f = failRateFinding(runs);
+    if (f) add("ops.fail_rate", f.severity, f.title, f.detail, f.fix);
     const capped = runs.filter((r) => (r.steps ?? 0) >= 12).length;
     if (capped / runs.length > 0.2) add("ops.step_cap", "주의", "단계 상한에 걸리는 실행이 많습니다", `${capped}/${runs.length}`, "반복 조회를 줄이거나 tool_rounds·tool_rounds_browser를 조정하세요.");
   }
   const stale = db.prepare("SELECT COUNT(*) c FROM approval_requests WHERE status = 'pending' AND created_at < ?").get(Date.now() - PENDING_STALE_H * 3_600_000) as { c: number };
   if (stale.c > 0) add("ops.stale_approval", "위험", "오래 방치된 승인 대기가 있습니다", `${stale.c}건 (${PENDING_STALE_H}시간 초과)`, "화면에서 승인하거나 거부하세요 — 그동안 해당 업무는 멈춰 있습니다.");
-  const exp = db.prepare("SELECT COUNT(*) c FROM approval_requests WHERE status = 'expired'").get() as { c: number };
+  const expRows = db.prepare("SELECT result FROM approval_requests WHERE status = 'expired'").all() as { result: string | null }[];
+  const exp = { c: expRows.filter((r) => unattendedExpiry(r.result)).length };
   const apr = db.prepare("SELECT COUNT(*) c FROM approval_requests").get() as { c: number };
   if (apr.c >= 20 && exp.c / apr.c > 0.2) add("ops.expired_rate", "주의", "만료된 승인이 많습니다", `${exp.c}/${apr.c}`, "승인 대상이 과한지 검토하세요 — 조회성 도구까지 막고 있을 수 있습니다.");
 

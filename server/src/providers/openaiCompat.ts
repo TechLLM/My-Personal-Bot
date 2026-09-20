@@ -59,14 +59,25 @@ const FAIL_COOLDOWN_MS = 120_000;
 const PERM_COOLDOWN_MS = 3_600_000;
 const isPermanentModelErr = (e: unknown) =>
   /\b1311\b|subscription plan|does not (yet )?include|model.{0,20}(not.{0,10}(supported|available|found)|does not exist)/i.test(String((e as Error)?.message ?? e));
+// 잔액 소진은 시간이 지난다고 풀리지 않고, 모델 하나가 아니라 그 프로바이더 전체가 거부된다.
+// 모델 단위로만 건너뛰면 같은 프로바이더의 다른 모델을 차례로 두드리며 같은 실패를 반복한다 —
+// 실측에서 스킬 실패 원인 1위가 이 오류였다 (2026-09-17 CreditsError 4건).
+export const isCreditsErr = (e: unknown) =>
+  /insufficient|\bbalance\b|CreditsError|\b1113\b/i.test(String((e as Error)?.message ?? e));
 const skipUntil = new Map<string, number>();
 const coolingDown = (key: string) => (skipUntil.get(key) ?? 0) > Date.now();
+// 실패한 모델을 건너뛸 기간·대상을 정한다. 잔액 오류면 엔드포인트 전체를 오래 건너뛴다
+export function cooldownFor(endpointId: string, modelKey: string, e: unknown): { key: string; ms: number } {
+  if (isCreditsErr(e)) return { key: endpointId, ms: PERM_COOLDOWN_MS };
+  return { key: modelKey, ms: isPermanentModelErr(e) ? PERM_COOLDOWN_MS : FAIL_COOLDOWN_MS };
+}
 
 // 폴백 체인에서 실제로 쓸 수 있는 다음 모델 — 해석 불가 항목과, 도구가 필요할 때 도구 미지원(CLI) 모델은 건너뛴다
 function nextUsable(key: string, needsTools: boolean): Resolved | null {
   for (let next = nextInChain(key); next; next = nextInChain(next)) {
     try {
       const r = resolveModel(next);
+      if (coolingDown(r.endpoint.id)) continue; // 잔액이 마른 프로바이더는 모델을 바꿔도 똑같이 거부된다
       if (!needsTools || r.endpoint.caps?.tools !== false) return r;
     } catch {}
   }
@@ -87,7 +98,7 @@ export async function chatOnce(
     const key = `${ep.id}/${mdl}`;
     let next: Resolved | null = null;
     let failure: unknown;
-    if (coolingDown(key) && (next = nextUsable(key, needsTools))) {
+    if ((coolingDown(key) || coolingDown(ep.id)) && (next = nextUsable(key, needsTools))) {
       failure = new Error("최근 실패로 건너뜀 — 대기 없이 다음 모델로");
     } else {
       try {
@@ -97,7 +108,8 @@ export async function chatOnce(
         return r;
       } catch (e) {
         if (opts.signal?.aborted || !shouldFallback(e)) throw e;
-        skipUntil.set(key, Date.now() + (isPermanentModelErr(e) ? PERM_COOLDOWN_MS : FAIL_COOLDOWN_MS));
+        const cd = cooldownFor(ep.id, key, e);
+        skipUntil.set(cd.key, Date.now() + cd.ms);
         next = nextUsable(key, needsTools);
         if (!next) throw e;
         failure = e;
@@ -200,7 +212,7 @@ export async function* streamChat(
     const key = `${ep.id}/${mdl}`;
     let failMsg: string | null = null;
     let next: Resolved | null = null;
-    if (coolingDown(key) && (next = nextUsable(key, false))) {
+    if ((coolingDown(key) || coolingDown(ep.id)) && (next = nextUsable(key, false))) {
       failMsg = "최근 실패로 건너뜀 — 대기 없이 다음 모델로";
     } else {
       let produced = false;
@@ -217,7 +229,8 @@ export async function* streamChat(
         failMsg = String((e as Error).message);
       }
       if (!failMsg) return;
-      skipUntil.set(key, Date.now() + (isPermanentModelErr(new Error(failMsg)) ? PERM_COOLDOWN_MS : FAIL_COOLDOWN_MS));
+      const cd = cooldownFor(ep.id, key, new Error(failMsg));
+      skipUntil.set(cd.key, Date.now() + cd.ms);
       next = nextUsable(key, false);
       if (!next) { yield { type: "error", error: failMsg }; return; }
     }

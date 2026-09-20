@@ -16,9 +16,16 @@ export function bskAvailable(): boolean {
 const ALLOWED = /^(session|navigate|observe|click|fill|press|select|hover|scroll-to|wheel|focus|blur|snapshot|get-html|screenshot|tab|request-help|status|browsers|logs)\b/;
 const SHELL_META = /[;&|`$(){}<>\\]/;
 
+// 봇 작업이 사용자 화면을 가로채지 않게 한다.
+// bsk는 별도 Agent Window에서 돌지만, session start가 기본으로 그 창을 앞으로 가져온다.
+// --no-focus를 붙이면 창이 뜨지 않고 뒤에서 작업한다. 봇이 빠뜨려도 항상 적용되도록 여기서 붙인다.
+export function backgroundize(cmd: string): string {
+  return /^session\s+start\b/.test(cmd) && !/--no-focus\b/.test(cmd) ? `${cmd} --no-focus` : cmd;
+}
+
 export function bskExec(cmd: string, timeoutMs = 90_000): Promise<string> {
   return new Promise((resolve) => {
-    const trimmed = cmd.trim().replace(/^bsk\s+/, ""); // "bsk " 접두사는 벗겨 받는다
+    const trimmed = backgroundize(cmd.trim().replace(/^bsk\s+/, "")); // "bsk " 접두사는 벗겨 받는다
     if (!ALLOWED.test(trimmed)) return resolve(`오류: 허용되지 않는 bsk 명령 — 브라우저 조작·조회·세션 명령만 가능합니다 (입력: ${trimmed.slice(0, 60)})`);
     if (SHELL_META.test(trimmed)) return resolve("오류: 셸 연결자(& ; | ` $ 등)는 사용할 수 없습니다 — bsk 명령 하나만 넣으세요");
     const proc = spawn("sh", ["-c", `${BSK_BIN} ${trimmed}`], { env: { ...process.env, PATH: `${join(process.env.HOME ?? "~", ".local", "bin")}:${process.env.PATH ?? ""}` } });
