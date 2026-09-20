@@ -416,44 +416,80 @@ export async function runCycle(candidate: Candidate, opts: { baseline?: BenchRes
     }
     const benchModel = productionModelFor(candidate, defaultModelId());
     const evalModelId = defaultModelId();
-    // 측정에 필요한 모델만 허용 — 벤치 모델(측정 대상) + 평가 모델
-    const allowed = [...new Set([benchModel, evalModelId])];
-    for (const id of allowed) resolveModel(id); // 미인증·미등록 모델은 여기서 실패
-    // 과제당 양쪽 팔 최대 ~30회 호출 여유 — 브로커 상한이 무한 루프를 끊는다
-    const broker = await startBroker({ models: allowed, maxCalls: tasks.length * 60, maxEstTokens: 300_000 });
     const seed = { agents: liveAgents() };
-    const baselineSamples: BenchSample[] = [];
-    const candidateSamples: BenchSample[] = [];
+    // 측정에 필요한 모델만 허용 — 벤치·평가 모델 + 시드된 봇들의 실제 운영 모델 전부.
+    // 봇이 위임·협업으로 다른 봇의 모델을 호출할 수 있어 시드된 모델은 전부 열어둔다.
+    const allowed = [...new Set([benchModel, evalModelId, ...seed.agents.map((a) => a.model).filter((m): m is string => !!m)])];
+    // 보장되는 호출(벤치·평가)은 여기서 fail-closed로 검증하고, 봇 개별 모델은 호출 시점에 해석한다
+    for (const id of [benchModel, evalModelId]) resolveModel(id);
+    // 과제당 팔 최대 ~30회 호출 여유 — 팔별 상한이 같아야 후보가 더 많은 호출로
+    // 이기는 일이 없다(E4 대칭 예산). 도구는 벤치 과제가 쓰는 web_search만 연다.
+    const broker = await startBroker({
+      models: allowed, tools: ["web_search"],
+      maxCalls: tasks.length * 60, maxCallsPerTag: tasks.length * 30,
+      maxToolCallsPerTag: tasks.length * 5, maxEstTokens: 300_000,
+    });
     const armReceipts: object[] = [];
-    try {
-      for (const task of tasks) {
-        const cmp = await isolation.runIsolatedComparison({
-          sourceRoot: ROOT, mode: "production", candidate, golden: task,
-          broker: { port: broker.port, token: broker.token },
-          model: benchModel, evalModel: evalModelId, seed, deadlineMs: 180_000,
+    const measure = async (task: GoldenTask) => {
+      const cmp = await isolation.runIsolatedComparison({
+        sourceRoot: ROOT, mode: "production", candidate, golden: task,
+        broker: { port: broker.port, token: broker.token },
+        model: benchModel, evalModel: evalModelId, seed, deadlineMs: 180_000,
+      });
+      const out: [BenchSample[], BenchSample[]] = [[], []];
+      for (const [bucket, receipt] of [[out[0], cmp.baseline], [out[1], cmp.candidate]] as const) {
+        if (!receipt) continue;
+        armReceipts.push(boundedArmReceipt(receipt)!);
+        const v = receipt.value as any;
+        bucket.push({
+          taskId: task.id, pass: !!v?.pass, latencyMs: receipt.endedAt - receipt.startedAt,
+          checks: v?.checks ?? [], error: receipt.reasonCode,
         });
-        for (const [bucket, receipt] of [[baselineSamples, cmp.baseline], [candidateSamples, cmp.candidate]] as const) {
-          if (!receipt) continue;
-          armReceipts.push(boundedArmReceipt(receipt)!);
-          const v = receipt.value as any;
-          bucket.push({
-            taskId: task.id, pass: !!v?.pass, latencyMs: receipt.endedAt - receipt.startedAt,
-            checks: v?.checks ?? [], error: receipt.reasonCode,
-          });
+      }
+      return out;
+    };
+    let holdout: { baseline: BenchResult; candidate: BenchResult } | undefined;
+    try {
+      const baselineSamples: BenchSample[] = [];
+      const candidateSamples: BenchSample[] = [];
+      for (const task of tasks) {
+        const [b, c] = await measure(task);
+        baselineSamples.push(...b); candidateSamples.push(...c);
+      }
+      const baseline = toBenchResult(baselineSamples);
+      const measured = toBenchResult(candidateSamples);
+      let verdict = judge(baseline, measured);
+      // E3 — 주 세트에서 keep이 나와도 holdout으로 한 번 더 확인한다. holdout은
+      // 후보 생성·구체화 입력에 들어가지 않으므로 여기서 미달이면 주 세트 과적합을 의심한다.
+      if (verdict.verdict === "keep") {
+        const holdoutTasks = loadGoldenTasks(true).filter((t) => t.holdout && !t.env && !t.approvals && t.prompt);
+        if (holdoutTasks.length) {
+          const hBase: BenchSample[] = []; const hCand: BenchSample[] = [];
+          for (const task of holdoutTasks) {
+            const [b, c] = await measure(task);
+            hBase.push(...b); hCand.push(...c);
+          }
+          const hb = toBenchResult(hBase), hc = toBenchResult(hCand);
+          holdout = { baseline: hb, candidate: hc };
+          const hGate = evaluationGate(hb, hc);
+          if (hGate) verdict = { verdict: "inconclusive", reason: `holdout 측정 불완전 — ${hGate}` };
+          else if (hc.passRate < hb.passRate)
+            verdict = { verdict: "discard", reason: `holdout 통과율 하락 ${(hb.passRate * 100).toFixed(0)}%→${(hc.passRate * 100).toFixed(0)}% — 주 세트 과적합 가능` };
+          else verdict = { ...verdict, reason: `${verdict.reason} · holdout ${(hc.passRate * 100).toFixed(0)}% 확인` };
         }
       }
+      const usage = broker.usage();
+      finish(verdict.verdict, verdict.reason, {
+        baseline: baseline as object | undefined,
+        // 승격은 벤치 원장이 아니라 사용자의 버전 업데이트로만 — promotionEligible은 항상 false
+        result: { candidate: measured, holdout, promotionEligible: false, brokerUsage: usage, arms: armReceipts },
+      });
+      const cost = usage.byTag ?? {};
+      const est = (tag: string) => Math.round((cost[tag]?.estTokens ?? 0) / 100) / 10;
+      return { experimentId: lockId, verdict: verdict.verdict, reason: `${verdict.reason} — 토큰 추정 기준선 ~${est("baseline")}k · 후보 ~${est("candidate")}k` };
     } finally {
       await broker.close();
     }
-    const baseline = toBenchResult(baselineSamples);
-    const measured = toBenchResult(candidateSamples);
-    const verdict = judge(baseline, measured);
-    finish(verdict.verdict, verdict.reason, {
-      baseline: baseline as object | undefined,
-      // 승격은 벤치 원장이 아니라 사용자의 버전 업데이트로만 — promotionEligible은 항상 false
-      result: { candidate: measured, promotionEligible: false, brokerUsage: broker.usage(), arms: armReceipts },
-    });
-    return { experimentId: lockId, verdict: verdict.verdict, reason: verdict.reason };
   } catch (e) {
     finish("crash", (e as Error).message);
     return { experimentId: lockId, verdict: "crash", reason: (e as Error).message };

@@ -8,7 +8,8 @@ import { randomUUID } from "node:crypto";
 export interface BrokerUsage {
   calls: number;
   estTokens: number; // usage 미제공 프로바이더용 추정치(문자/4) — E4에서 실제 usage로 대체 가능
-  byTag: Record<string, { calls: number; estTokens: number; models: string[] }>;
+  toolCalls: number;
+  byTag: Record<string, { calls: number; estTokens: number; models: string[]; toolCalls: number }>;
 }
 
 export interface BrokerHandle {
@@ -42,19 +43,42 @@ function resolveAllowed(allowed: Set<string>, requested: string): string | null 
   return hits.length === 1 ? hits[0] : null;
 }
 
+// 외부 도구 대행 — worker(샌드박스)는 네트워크가 없으므로 허용된 도구만 부모가 실행한다.
+// 테스트에서는 스텁을 주입한다.
+export type BrokerToolHandler = (tool: string, args: Record<string, unknown>) => Promise<unknown>;
+
+const defaultToolHandler: BrokerToolHandler = async (tool, args) => {
+  if (tool === "web_search") {
+    const { webSearch } = await import("../search/index");
+    const query = String(args.query ?? "").slice(0, 500);
+    if (!query.trim()) throw new Error("invalid_args");
+    const limit = Math.min(10, Math.max(1, Number(args.limit) || 6));
+    return await webSearch(query, limit);
+  }
+  throw new Error("unsupported_tool");
+};
+
 export function startBroker(opts: {
   models: string[];                 // 이 사이클에서 허용할 모델 id (풀 id 형식)
+  tools?: string[];                 // /tool 경로에서 허용할 도구 id — 명시하지 않으면 도구 대행은 닫혀 있다
+  toolHandler?: BrokerToolHandler;  // 테스트 주입용 — 기본은 실제 도구 경로
   maxCalls?: number;                // 기본 40 — 벤치 무한 루프 방지
+  maxCallsPerTag?: number;          // 팔별 모델 호출 상한 — baseline과 candidate에 같은 예산
+  maxToolCallsPerTag?: number;      // 팔별 도구 호출 상한 — 기본 20
   maxEstTokens?: number;            // 기본 200_000 — 사이클 토큰 예산 상한
   upstream?: BrokerUpstream;        // 테스트 주입용 — 기본은 실제 프로바이더 경로
 }): Promise<BrokerHandle> {
   const token = randomUUID();
   const allowed = new Set(opts.models);
+  const allowedTools = new Set(opts.tools ?? []);
   const maxCalls = opts.maxCalls ?? 40;
+  const maxCallsPerTag = opts.maxCallsPerTag ?? maxCalls;
+  const maxToolCallsPerTag = opts.maxToolCallsPerTag ?? 20;
   const maxEstTokens = opts.maxEstTokens ?? 200_000;
   const upstream = opts.upstream ?? realUpstream;
-  const usage: BrokerUsage = { calls: 0, estTokens: 0, byTag: {} };
-  const tagUsage = (tag: string) => (usage.byTag[tag] ??= { calls: 0, estTokens: 0, models: [] });
+  const toolHandler = opts.toolHandler ?? defaultToolHandler;
+  const usage: BrokerUsage = { calls: 0, estTokens: 0, toolCalls: 0, byTag: {} };
+  const tagUsage = (tag: string) => (usage.byTag[tag] ??= { calls: 0, estTokens: 0, models: [], toolCalls: 0 });
 
   const server: Server = createServer((req, res) => {
     const reply = (code: number, body: object) => {
@@ -63,8 +87,9 @@ export function startBroker(opts: {
     };
     const isChat = req.method === "POST" && req.url === "/chat";
     const isOpenAI = req.method === "POST" && req.url === "/v1/chat/completions";
+    const isTool = req.method === "POST" && req.url === "/tool";
     const isUsage = req.method === "GET" && req.url === "/usage";
-    if (!isChat && !isOpenAI && !isUsage) return reply(404, { error: "not_found" });
+    if (!isChat && !isOpenAI && !isTool && !isUsage) return reply(404, { error: "not_found" });
     // 토큰 뒤에 ":태그"를 붙이면 호출이 그 태그로 계측된다 — 격리 비교는 팔(arm)별
     // 토큰 태그를 써서 같은 브로커를 공유하면서도 팔별 비용을 분리해 기록한다.
     const auth = req.headers.authorization ?? "";
@@ -79,13 +104,28 @@ export function startBroker(opts: {
     req.on("end", async () => {
       let parsed: any;
       try { parsed = JSON.parse(body); } catch { return reply(400, { error: "invalid_json" }); }
+      const per = tagUsage(tag);
+      if (isTool) {
+        // 도구 대행 — 허용 목록에 없는 도구·상한 초과는 거부한다. 호출은 팔별로 계측된다.
+        if (typeof parsed?.tool !== "string" || !allowedTools.has(parsed.tool)) return reply(403, { error: "tool_not_allowed" });
+        if (per.toolCalls >= maxToolCallsPerTag) return reply(429, { error: "tool_call_limit" });
+        usage.toolCalls++;
+        per.toolCalls++;
+        try {
+          const args = parsed.args && typeof parsed.args === "object" && !Array.isArray(parsed.args) ? parsed.args : {};
+          const result = await toolHandler(parsed.tool, args);
+          return reply(200, { result });
+        } catch (e) {
+          return reply(502, { error: `tool_upstream: ${(e as Error).message.slice(0, 200)}` });
+        }
+      }
       if (typeof parsed?.model !== "string" || !Array.isArray(parsed?.messages)) return reply(400, { error: "invalid_request" });
       const resolvedModel = resolveAllowed(allowed, parsed.model);
       if (!resolvedModel) return reply(403, { error: "model_not_allowed" });
       if (usage.calls >= maxCalls) return reply(429, { error: "call_limit" });
+      if (per.calls >= maxCallsPerTag) return reply(429, { error: "tag_call_limit" });
       if (usage.estTokens >= maxEstTokens) return reply(429, { error: "token_budget" });
       usage.calls++;
-      const per = tagUsage(tag);
       try {
         // /v1은 OpenAI 요청 형식을 받는다 — tools·tool_choice·reasoning_effort를 그대로 전달
         const opts = isOpenAI

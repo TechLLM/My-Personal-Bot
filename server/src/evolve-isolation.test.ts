@@ -772,6 +772,61 @@ export async function probe(ctx) {
     }
   }, 180_000);
 
+  childTest("production mode proxies web_search through the tool broker — denied tools fail the check", async () => {
+    const { startBroker } = await import("./evolve/broker");
+    const repoRoot = resolve(import.meta.dir, "../..");
+    // 스텁 모델은 항상 web_search를 호출하고, 도구 결과가 오면 최종 답을 쓴다.
+    const upstream = async (_m: any, messages: any[]) => {
+      const hasTool = messages.some((m: any) => m?.role === "tool");
+      if (!hasTool) return { content: "", toolCalls: [{ name: "web_search", arguments: JSON.stringify({ query: "기술 뉴스" }) }] };
+      return { content: "검색 완료 — 결과를 정리했습니다" };
+    };
+    const base = {
+      candidate: { surface: "agent.role", target: "bench-bot", newValue: "개선된 역할", summary: "DB 표면 후보" },
+      mode: "production" as const,
+      seed: { agents: [{ id: "bench-bot", name: "Bench Bot", role_prompt: "역할", model: "zai/glm-5.3-flash" }] },
+      golden: { id: "GT-WEB", prompt: "웹 검색해줘", agent: "Bench Bot", checks: [{ type: "tool_used", tool: "web_search" }, { type: "content_regex", pattern: "검색 완료" }] },
+      model: "zai/glm-5.3-flash",
+      deadlineMs: 120_000,
+    };
+    // 허용된 도구 — 샌드박스 안에서 브로커 /tool 경유로 실제 검색 경로가 돈다
+    const broker = await startBroker({
+      models: ["zai/glm-5.3-flash"], tools: ["web_search"],
+      toolHandler: async (tool, args) => {
+        expect(tool).toBe("web_search");
+        return { provider: "stub", results: [{ title: "뉴스", url: "https://example.com", snippet: `결과:${args.query}` }] };
+      },
+      upstream,
+    });
+    try {
+      const result = await runIsolatedComparison({ ...base, sourceRoot: repoRoot, broker: { port: broker.port, token: broker.token } });
+      expect(result.status).toBe("complete");
+      for (const arm of [result.baseline!, result.candidate!]) {
+        expect((arm.value as any).pass).toBe(true);
+        expect(arm.model.executed).toBe(true);
+      }
+      expect(broker.usage().byTag.baseline?.toolCalls).toBe(1);
+      expect(broker.usage().byTag.candidate?.toolCalls).toBe(1);
+    } finally {
+      await broker.close();
+    }
+    // 도구 허용목록이 없으면 web_search는 403으로 거부되고 체크가 실패한다 — 거짓 통과 없음
+    const closed = await startBroker({ models: ["zai/glm-5.3-flash"], upstream });
+    try {
+      const result = await runIsolatedComparison({ ...base, sourceRoot: repoRoot, broker: { port: closed.port, token: closed.token } });
+      expect(result.status).toBe("complete");
+      for (const arm of [result.baseline!, result.candidate!]) {
+        const v = arm.value as any;
+        const denied = v.checks.find((c: any) => c.detail === "web_search");
+        expect(denied.pass).toBe(false);
+        expect(v.pass).toBe(false);
+      }
+      expect(closed.usage().byTag.baseline?.toolCalls ?? 0).toBe(0); // 거부된 호출은 계측에도 남지 않는다
+    } finally {
+      await closed.close();
+    }
+  }, 240_000);
+
   childTest("fails closed when a probe calls ctx.chat without a broker", async () => {
     const fixture = makeFixture(`
 export async function probe(ctx) {

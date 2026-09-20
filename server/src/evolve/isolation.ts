@@ -132,7 +132,7 @@ function sandboxPolicy(armRoot: string, runtime: string, extraRead: string[] = [
 
 interface ChildResult { pid: number; exitCode: number | null; signal: string | null; stdout: Buffer; stderr: Buffer; reasonCode?: string }
 
-function executeSandboxed(args: string[], cwd: string, policy: string, deadlineMs: number, maxOutput: number, input = "", nodeEnv: "production" | "test" = "production"): Promise<ChildResult> {
+function executeSandboxed(args: string[], cwd: string, policy: string, deadlineMs: number, maxOutput: number, input = "", nodeEnv: "production" | "test" = "production", extraEnv: Record<string, string> = {}): Promise<ChildResult> {
   return new Promise((done) => {
     const child = spawn("/usr/bin/sandbox-exec", ["-p", policy, realpathSync(process.execPath), ...args], {
       cwd,
@@ -141,6 +141,7 @@ function executeSandboxed(args: string[], cwd: string, policy: string, deadlineM
       env: {
         HOME: join(cwd, "tmp"), TMPDIR: join(cwd, "tmp"), NODE_ENV: nodeEnv, MYBOT_ENV: "e2",
         PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+        ...extraEnv,
       },
     });
     const chunks: Buffer[] = [];
@@ -295,7 +296,10 @@ export async function runIsolatedComparison(options: IsolationOptions): Promise<
         evalModel: production ? options.evalModel : undefined,
       };
       const startedAt = Date.now();
-      const child = await executeSandboxed([join(root, workerRel)], root, policy, deadline, outputLimit, canonicalJson(request));
+      // 파이프라인 깊은 곳(검색 등)은 요청 객체에 닿지 못하므로 브로커 주소·팔 태그 토큰을
+      // env로 넘긴다 — search.ts의 e2 분기가 이걸 읽어 브로커의 /tool을 호출한다.
+      const child = await executeSandboxed([join(root, workerRel)], root, policy, deadline, outputLimit, canonicalJson(request), "production",
+        options.broker ? { E2_BROKER_URL: `http://127.0.0.1:${options.broker.port}`, E2_BROKER_TOKEN: `${options.broker.token}:${arm}` } : {});
       const endedAt = Date.now();
       const stderrTail = child.stderr.length ? child.stderr.toString("utf8").slice(-2048) : undefined;
       const receipt: ArmReceipt = {

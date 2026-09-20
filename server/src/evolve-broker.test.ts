@@ -67,4 +67,55 @@ describe("evolve credential broker", () => {
       expect(b.usage().calls).toBe(1);
     } finally { await b.close(); }
   });
+
+  const tool = (url: string, body: object, token: string) =>
+    fetch(`${url}/tool`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+
+  test("/tool — 허용된 도구는 핸들러를 실행하고 팔별로 계측된다", async () => {
+    const b = await startBroker({
+      models: ["m/1"], tools: ["web_search"], upstream: stub,
+      toolHandler: async (t, args) => ({ provider: "stub", results: [`${t}:${args.query}`] }),
+    });
+    try {
+      const res = await tool(b.url, { tool: "web_search", args: { query: "뉴스" } }, `${b.token}:baseline`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).result.results[0]).toBe("web_search:뉴스");
+      expect(b.usage().byTag.baseline?.toolCalls).toBe(1);
+      expect(b.usage().calls).toBe(0); // 도구 호출은 모델 호출 수에 섞이지 않는다
+    } finally { await b.close(); }
+  });
+
+  test("/tool — 허용 목록 밖 도구는 403, 호출은 계측되지 않는다", async () => {
+    const b = await startBroker({ models: ["m/1"], upstream: stub }); // tools 미지정 = 전면 닫힘
+    try {
+      const res = await tool(b.url, { tool: "web_search", args: { query: "x" } }, b.token);
+      expect(res.status).toBe(403);
+      expect(b.usage().toolCalls).toBe(0);
+    } finally { await b.close(); }
+  });
+
+  test("/tool — 팔별 상한을 넘으면 429", async () => {
+    const b = await startBroker({
+      models: ["m/1"], tools: ["web_search"], maxToolCallsPerTag: 1, upstream: stub,
+      toolHandler: async () => ({ ok: true }),
+    });
+    try {
+      expect((await tool(b.url, { tool: "web_search", args: {} }, `${b.token}:candidate`)).status).toBe(200);
+      expect((await tool(b.url, { tool: "web_search", args: {} }, `${b.token}:candidate`)).status).toBe(429);
+      expect((await tool(b.url, { tool: "web_search", args: {} }, `${b.token}:baseline`)).status).toBe(200); // 다른 팔 예산은 별도
+    } finally { await b.close(); }
+  });
+
+  test("팔별 모델 호출 상한 — 후보가 기준선보다 많이 쓰는 걸 막는다", async () => {
+    const b = await startBroker({ models: ["m/1"], maxCallsPerTag: 1, upstream: stub });
+    try {
+      expect((await post(b.url, { model: "m/1", messages: [] }, `${b.token}:baseline`)).status).toBe(200);
+      expect((await post(b.url, { model: "m/1", messages: [] }, `${b.token}:baseline`)).status).toBe(429);
+      expect((await post(b.url, { model: "m/1", messages: [] }, `${b.token}:candidate`)).status).toBe(200);
+    } finally { await b.close(); }
+  });
 });
