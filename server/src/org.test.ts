@@ -1,4 +1,4 @@
-import { test, expect, beforeAll } from "bun:test";
+import { test, expect, beforeAll, afterAll } from "bun:test";
 import { db, now } from "./db";
 import { callBuiltin, runAgentDetached, stopAllRuns, getAgent, roundLimitFor, budgetWarnAt } from "./team";
 import { gateApproval, approvalDecision } from "./approvals";
@@ -6,15 +6,22 @@ import { systemPrompt } from "./routes/chat";
 
 // 봇 간 위임·메시지 연쇄 방지 테스트 — 2026-09-18 보고-회신 폭주(자정 이후 실행 64건·승인 대기 50건) 재발 방지
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
-// 외부 호출 차단 — 가드가 뚫려 실제 봇 실행으로 넘어가도 네트워크 없이 즉시 실패(400)하게
-globalThis.fetch = (async () => new Response('{"error":"test"}', { status: 400 })) as unknown as typeof fetch;
+// 외부 호출 차단 — 가드가 뚫려 실제 봇 실행으로 넘어가도 네트워크 없이 즉시 실패(400)하게.
+// 단 모듈 최상위에서 영구 교체하면 이 파일이 먼저 실행될 때 뒤따르는 다른 파일의 실제
+// fetch까지 400 mock으로 오염된다 (순서 의존으로 evolve-broker·격리 테스트가 깨졌다).
+// beforeAll/afterAll로 이 파일의 테스트 구간에만 한정한다.
+const realFetch = globalThis.fetch;
 
 const ids = { lead: "t-lead", a: "t-bot-a", b: "t-bot-b" };
 beforeAll(() => {
+  globalThis.fetch = (async () => new Response('{"error":"test"}', { status: 400 })) as unknown as typeof fetch;
   const ins = db.prepare("INSERT INTO agents (id, name, role_prompt, model, is_lead, created_at) VALUES (?, ?, '', 'zai/glm-5.3-flash', ?, 0)");
   ins.run(ids.lead, "테스트팀장", 1);
   ins.run(ids.a, "테스트봇A", 0);
   ins.run(ids.b, "테스트봇B", 0);
+});
+afterAll(() => {
+  globalThis.fetch = realFetch;
 });
 
 test("봇별 시간당 실행 상한(15회)이 실제로 위임을 막는다", async () => {
