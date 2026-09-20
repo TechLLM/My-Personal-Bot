@@ -224,9 +224,13 @@ async function evalGoldenChecks(checks: any[], task: string, out: { content: str
       case "eval_min": {
         const { evaluateResult } = await import(pathToFileURL(join(root, "server", "src", "evaluate.ts")).href);
         const { evaluationCheck } = await import(pathToFileURL(join(root, "server", "src", "evaluation-evidence.ts")).href);
-        const verdict = await evaluateResult({} as any, bareModel(evalModel), task, out.content, {
-          callModel: async (_ep: any, _m: string, msgs: any[]) => ({ content: await chat(bareModel(evalModel), msgs, {}) }),
-        });
+        const callModel = async (_ep: any, _m: string, msgs: any[]) => ({ content: await chat(bareModel(evalModel), msgs, {}) });
+        // toolLog를 넘겨야 평가자가 "도구를 안 쓰고 지어냈다"고 오판하지 않는다
+        let verdict = await evaluateResult({} as any, bareModel(evalModel), task, out.content, { callModel, toolLog: out.toolLog });
+        // 평가자의 형식 오류·프로바이더 오류는 일시적 — 한 번만 재시도한다(aborted 제외).
+        // 재시도해도 불능이면 그대로 inconclusive — 없는 평가를 지어내지 않는다.
+        if (verdict.status === "inconclusive" && verdict.reasonCode !== "aborted")
+          verdict = await evaluateResult({} as any, bareModel(evalModel), task, out.content, { callModel });
         results.push(evaluationCheck(verdict, c.score ?? 70));
         break;
       }

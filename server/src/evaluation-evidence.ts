@@ -6,11 +6,12 @@ export interface EvaluationCheck {
 }
 
 export function evaluationCheck(value: unknown, threshold = 70): EvaluationCheck {
-  const v = value as { status?: unknown; score?: unknown } | null;
+  const v = value as { status?: unknown; score?: unknown; issues?: unknown } | null;
   if (v?.status !== "scored" || typeof v.score !== "number" || !Number.isFinite(v.score)
       || v.score < 0 || v.score > 100 || !Number.isFinite(threshold) || threshold < 0 || threshold > 100)
     return { pass: false, detail: "평가 근거 미확인 — 채택 보류", evaluationStatus: "inconclusive" };
-  return { pass: v.score >= threshold, detail: `평가 ${v.score}점 (기준 ${threshold})`, evaluationStatus: "scored" };
+  const issues = Array.isArray(v.issues) ? (v.issues as unknown[]).filter((i) => typeof i === "string").slice(0, 2) : [];
+  return { pass: v.score >= threshold, detail: `평가 ${v.score}점 (기준 ${threshold})${issues.length ? ` — ${issues.join("; ").slice(0, 160)}` : ""}`, evaluationStatus: "scored" };
 }
 
 interface EvidenceSample { checks: { evaluationStatus?: string }[] }
