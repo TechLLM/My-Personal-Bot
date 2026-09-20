@@ -10,7 +10,7 @@ import { db, uid, now } from "./db";
 // - 프로필 디렉터리 영속 → 사용자가 한 번 로그인하면 봇이 세션 재사용
 // - 봇별 탭(page) 격리 = ego의 "Space"에 해당
 
-const PROFILE_DIR = join(import.meta.dir, "..", "data", "browser-profile");
+const PROFILE_DIR = process.env.MYBOT_BROWSER_PROFILE || join(import.meta.dir, "..", "data", "browser-profile");
 mkdirSync(PROFILE_DIR, { recursive: true });
 
 // 자동화 탐지 신호 제거 스크립트
@@ -285,9 +285,16 @@ async function collectFrame(frame: Frame, start: number, room: number): Promise<
       if (!name) name = norm((el as HTMLElement).innerText);
       if (!name) name = norm(el.getAttribute("placeholder") || el.getAttribute("name") || el.getAttribute("value"));
       if (!name && tag === "a") { try { name = norm(decodeURIComponent(String(any.href || "").split("/").filter(Boolean).pop() || "")); } catch {} }
+      // 이름 없는 비폼 요소(onclick div 등)는 모델이 지목해도 의미를 알 수 없는 잡음 —
+      // 상한 안의 자리만 차지하므로 버린다 (Aside식 스냅샷 정제)
+      if (!name && !/^(input|select|textarea)$/.test(tag) && el.getAttribute("contenteditable") !== "true") continue;
       const bits: string[] = [];
       if (any.disabled) bits.push("비활성");
       if (any.checked) bits.push("체크됨");
+      if (el === document.activeElement) bits.push("포커스");
+      const expanded = el.getAttribute("aria-expanded");
+      if (expanded === "true") bits.push("펼침"); else if (expanded === "false") bits.push("접힘");
+      if (el.getAttribute("aria-selected") === "true" || el.getAttribute("aria-current")) bits.push("선택됨");
       const val = typeof any.value === "string" ? norm(any.value) : "";
       if (val && (tag === "input" || tag === "textarea" || tag === "select")) bits.push(`값="${val}"`);
       const inView = r.top < vpH && r.bottom > 0 && r.left < vpW && r.right > 0;
@@ -365,6 +372,8 @@ async function snapshotOnce(page: Page, opts: { maxRefs?: number; textChars?: nu
   // 그룹웨어처럼 본문이 iframe 안에 있으면 메인 텍스트가 사실상 비어 있다 — 가장 큰 iframe 본문을 덧붙인다
   let text = mainText;
   if (frameText && mainText.length < 400) text = `${mainText}\n\n[iframe 본문]\n${frameText}`.trim();
+  // 본문 연속 중복 줄 제거 — 목록·메뉴 반복이 그대로 토큰을 먹는다
+  text = text.split("\n").filter((l, i, a) => i === 0 || l !== a[i - 1] || !l.trim()).join("\n");
   const offscreen = lines.filter((l) => l.startsWith("· ")).length;
   const head = [
     `URL: ${url}`,
@@ -377,8 +386,16 @@ async function snapshotOnce(page: Page, opts: { maxRefs?: number; textChars?: nu
     : "";
   const shown = lines.length - lines.filter((l) => l.startsWith("  ── iframe")).length;
   const capped = n - 1 >= maxRefs; // 상한에 걸려 더 못 담은 요소가 있다는 뜻
+  // 연속 동일 요소(같은 역할·이름·상태)는 "@5,6,7"로 압축 — 각 번호는 그대로 지목 가능하다
+  const grouped: string[] = [];
+  for (const l of lines) {
+    const m = l.match(/^(· ?)@(\d+) (.*)$/);
+    const pm = grouped.length ? grouped[grouped.length - 1].match(/^(· ?)@([\d,]+) (.*)$/) : null;
+    if (m && pm && pm[1] === m[1] && pm[3] === m[3]) grouped[grouped.length - 1] = `${pm[1]}@${pm[2]},${m[2]} ${m[3]}`;
+    else grouped.push(l);
+  }
   const refs = lines.length
-    ? `\n\n[조작 가능 요소 ${shown}개] — browser_click/browser_type에 "@번호"로 지목하세요${offscreen ? ` (· 표시 ${offscreen}개는 화면 밖 — browser_scroll 후 다시 읽으세요)` : ""}${capped ? ` (표시 상한 ${maxRefs}개 도달 — 목록에 없는 요소는 browser_scroll로 화면을 옮기거나 browser_eval로 찾으세요)` : ""}\n${lines.join("\n")}`
+    ? `\n\n[조작 가능 요소 ${shown}개] — browser_click/browser_type에 "@번호"로 지목하세요${offscreen ? ` (· 표시 ${offscreen}개는 화면 밖 — browser_scroll 후 다시 읽으세요)` : ""}${capped ? ` (표시 상한 ${maxRefs}개 도달 — 목록에 없는 요소는 browser_scroll로 화면을 옮기거나 browser_eval로 찾으세요)` : ""}\n${grouped.join("\n")}`
     : `\n\n[조작 가능 요소] 없음 — 아직 로딩 중이거나(browser_wait) 접근이 막힌 iframe일 수 있습니다`;
   const refCount = shown;
   return { text: `${head}${body}${refs}`, incomplete: refCount === 0 || pendingFrame || loading, refCount, textLen: text.length };
