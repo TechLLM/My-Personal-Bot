@@ -274,6 +274,8 @@ export async function applyRelease(gates?: Gate[]): Promise<{ ok: true; version:
     return fail("준비", tail(wt.out));
   }
   const reject = (stage: string, detail: string): Fail => {
+    // 스테이징 거부는 종결 상태다 — inflight 마커를 지우지 않으면 이후 적용이 영구 차단된다
+    clearJournal();
     writeReceipt({ ts: Date.now(), from: before, to: target, subjects, gates: [], result: "rejected", error: `${stage}: ${tail(detail, 800)}` });
     return fail(stage, `${tail(detail)}\n\n서비스 코드는 바뀌지 않았습니다. 일시적인 환경 문제일 수 있으니 다시 시도할 수 있습니다.`);
   };
