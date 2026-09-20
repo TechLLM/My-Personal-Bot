@@ -41,9 +41,10 @@ if (!bf.ok) die(`release 전진 실패 — ${bf.out}`);
 // 서비스가 보게 될 대기 묶음 = master 기준 차이
 const subjects = git("log", "--format=%s", "master..release").out.split("\n").filter(Boolean);
 const files = git("diff", "--name-only", "master...release").out.split("\n").filter(Boolean);
-const oldest = git("log", "--format=%cI", "master..release").out.split("\n").filter(Boolean).at(-1);
+const dates = git("log", "--format=%cI", "master..release").out.split("\n").filter(Boolean);
+const oldest = dates.at(-1), newest = dates[0];
 const tier = classifyTier(subjects, files);
-const gate = evaluateRelease({ hasChannel: true, pending: subjects.length, clean: true, ff: true, tier, oldestAgeMs: oldest ? Date.now() - Date.parse(oldest) : 0 });
+const gate = evaluateRelease({ hasChannel: true, pending: subjects.length, clean: true, ff: true, tier, oldestAgeMs: oldest ? Date.now() - Date.parse(oldest) : 0, newestAgeMs: newest ? Date.now() - Date.parse(newest) : 0 });
 
 console.log(`\nrelease 브랜치를 ${git("rev-parse", "--short", "HEAD").out}로 전진했습니다.`);
 console.log(`등급: ${{ patch: "긴급패치", minor: "마이너", major: "메이저" }[tier]} · 대기 ${subjects.length}건 · 파일 ${files.length}개`);

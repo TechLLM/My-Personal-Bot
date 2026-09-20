@@ -190,8 +190,11 @@ test("핵심 표면이나 대규모 변경은 메이저다", () => {
   expect(classifyTier(["의존성 갱신"], ["package.json"])).toBe("major");
   expect(classifyTier(["자기개선 격리"], ["evolve/surfaces.json"])).toBe("major");
   expect(classifyTier(["UI 다수 개선"], Array.from({ length: 15 }, (_, i) => `web/src/c${i}.tsx`))).toBe("major");
-  // 메이저도 임계 없이 나간다 — 마일스톤이 완성됐다는 자체가 기준 충족
-  expect(evaluateRelease({ ...ok, pending: 1, tier: "major", oldestAgeMs: 0 }).canApply).toBe(true);
+  // 메이저는 건수 대신 정착 시간으로 간다 — 마지막 변경 후 12시간이 지나야 적용 가능
+  const fresh = evaluateRelease({ ...ok, pending: 1, tier: "major", oldestAgeMs: 0, newestAgeMs: 3600_000 });
+  expect(fresh.canApply).toBe(false);
+  expect(fresh.reason).toContain("정착");
+  expect(evaluateRelease({ ...ok, pending: 1, tier: "major", oldestAgeMs: 0, newestAgeMs: 13 * 3600_000 }).canApply).toBe(true);
 });
 
 test("일상 개선 묶음은 마이너 — 3건 미만이고 72시간도 안 지났으면 보류한다", () => {

@@ -28,6 +28,10 @@ const MAJOR_MIN_FILES = 15;
 // 그보다 빨리 나가야 하는 수정은 커밋 제목을 "긴급"으로 시작해 긴급패치 등급을 쓴다.
 const MINOR_MIN_COMMITS = 3;
 const MINOR_MIN_AGE_MS = 72 * 3600_000;
+// 메이저(핵심 표면·대규모 변경)는 건수가 아니라 정착 시간으로 간다 — release 채널에
+// 마지막 커밋이 올라온 뒤 12시간을 지나야 적용 가능하다. 추가 커밋이 오면 타이머가
+// 리셋되므로 한 세션의 연속 작업은 자연스럽게 한 번의 적용으로 묶인다.
+const MAJOR_SETTLE_MS = 12 * 3600_000;
 
 // 대기 커밋 묶음의 등급 — 긴급 접두사 > 핵심 표면·대규모 변경 > 일반 묶음
 export function classifyTier(subjects: string[], files: string[]): ReleaseTier {
@@ -80,7 +84,7 @@ const git = (...args: string[]) => run(["git", ...args]);
 const tail = (s: string, n = 1200) => (s.length > n ? "…" + s.slice(-n) : s);
 
 // 적용 가능 여부 판정 — git 조회 결과만 받는 순수 함수로 두어 규칙을 테스트로 고정한다
-export function evaluateRelease(x: { hasChannel: boolean; pending: number; clean: boolean; ff: boolean; tier?: ReleaseTier; oldestAgeMs?: number }): { canApply: boolean; reason: string } {
+export function evaluateRelease(x: { hasChannel: boolean; pending: number; clean: boolean; ff: boolean; tier?: ReleaseTier; oldestAgeMs?: number; newestAgeMs?: number }): { canApply: boolean; reason: string } {
   if (!x.hasChannel) return { canApply: false, reason: `${CHANNEL} 브랜치가 아직 없습니다 — 개발 인스턴스에서 먼저 밀어 주세요` };
   if (!x.pending) return { canApply: false, reason: "최신 상태입니다" };
   if (!x.clean) return { canApply: false, reason: "서비스 폴더에 커밋되지 않은 변경이 있어 적용할 수 없습니다" };
@@ -89,6 +93,9 @@ export function evaluateRelease(x: { hasChannel: boolean; pending: number; clean
   // 마이너는 커밋 단위로 나가지 않는다 — 임계 미만이면 보류하고 사유를 보여준다
   if (x.tier === "minor" && x.pending < MINOR_MIN_COMMITS && (x.oldestAgeMs ?? 0) < MINOR_MIN_AGE_MS)
     return { canApply: false, reason: `개선이 더 쌓이면 적용됩니다 — 마이너 업데이트는 ${MINOR_MIN_COMMITS}건 이상이거나 첫 커밋이 72시간을 넘겨야 나갑니다 (현재 ${x.pending}건)` };
+  // 메이저는 마지막 변경 뒤 정착 시간을 둔다 — 호출자가 최신 커밋 시각을 모르면 정착된 것으로 본다
+  if (x.tier === "major" && (x.newestAgeMs ?? Infinity) < MAJOR_SETTLE_MS)
+    return { canApply: false, reason: `메이저 업데이트는 마지막 변경 후 ${Math.round(MAJOR_SETTLE_MS / 3600_000)}시간의 정착이 필요합니다 — ${Math.ceil((MAJOR_SETTLE_MS - (x.newestAgeMs ?? 0)) / 3600_000)}시간 후 적용할 수 있습니다` };
   return { canApply: true, reason: "" };
 }
 
@@ -107,6 +114,7 @@ export function releaseStatus() {
     : [];
   const tier = pending.length ? classifyTier(pending.map((p) => p.subject), files) : null;
   const oldest = pending.length ? Date.parse(pending[pending.length - 1].date) : 0;
+  const newest = pending.length ? Date.parse(pending[0].date) : 0; // git log는 최신 커밋이 먼저 온다
   const history = loadHistory();
   const cur = currentRelease();
   return {
@@ -119,7 +127,7 @@ export function releaseStatus() {
     version: cur?.version ?? null,
     nextVersion: tier ? nextVersion(cur?.version ?? null, tier) : null,
     history: history.slice(-10).reverse(), // 최신 버전이 먼저 — 윈백 대상 목록
-    ...evaluateRelease({ hasChannel, pending: pending.length, clean, ff, tier: tier ?? undefined, oldestAgeMs: oldest ? Date.now() - oldest : 0 }),
+    ...evaluateRelease({ hasChannel, pending: pending.length, clean, ff, tier: tier ?? undefined, oldestAgeMs: oldest ? Date.now() - oldest : 0, newestAgeMs: newest ? Date.now() - newest : 0 }),
     canRevert: !!cur || !!getSetting("release_prev_sha"),
     prevSha: (cur?.prevSha ?? getSetting("release_prev_sha") ?? "").slice(0, 7),
     appliedAt: cur?.appliedAt ?? (Number(getSetting("release_applied_at")) || 0),
