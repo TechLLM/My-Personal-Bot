@@ -1009,26 +1009,31 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
 
             {section === "updates" && (
               <div>
-                <H>서비스 릴리스</H>
+                <H>서비스 버전 <span className="ml-1 text-xs font-normal text-stone-500">{rel?.version ? `현재 v${rel.version}` : ""}</span></H>
                 <p className="mb-3 text-caption text-stone-500">
-                  개발 인스턴스에서 검증을 마친 작업을 <code className="rounded bg-stone-200 px-1">release</code> 브랜치로 밀면 여기에 나타납니다.
+                  검증을 마친 개선 묶음이 등급별로 쌓입니다 — 긴급패치는 즉시, 메이저는 마일스톤 단위로 나가고, 마이너는 3건 이상 모이거나 첫 개선이 72시간을 넘기면 나갑니다.
                   적용하면 테스트를 먼저 돌리고, 통과할 때만 반영한 뒤 서비스를 다시 시작합니다.
                 </p>
                 <div className="mb-6 rounded-xl border border-stone-200 p-3">
                   {rel === null ? (
-                    <p className="text-caption text-stone-500">릴리스 상태를 불러오지 못했습니다.</p>
+                    <p className="text-caption text-stone-500">버전 상태를 불러오지 못했습니다.</p>
                   ) : (
                     <>
                       <div className="flex items-start gap-2">
                         <div className="min-w-0 flex-1">
                           <div className="text-xs font-medium text-stone-800">
                             {/* 대기분이 없는 이유는 "최신"만이 아니다 — 채널이 없을 수도 있어 사유를 그대로 보여준다 */}
-                            {rel.pending.length ? `새 릴리스 ${rel.pending.length}건 대기 중` : rel.reason || "최신 상태입니다"}
+                            {rel.pending.length ? `v${rel.nextVersion} ${rel.pendingTierLabel} 대기 중 — ${rel.pending.length}건` : rel.reason || "최신 상태입니다"}
                           </div>
                           <div className="mt-0.5 truncate font-mono text-2xs text-stone-500">
-                            현재 {rel.branch}@{rel.current} · {rel.currentSubject}
+                            {rel.version ? `v${rel.version}` : rel.current} · {rel.currentSubject}
                           </div>
                         </div>
+                        {!!rel.pendingTier && (
+                          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${rel.pendingTier === "patch" ? "bg-red-100 text-red-700" : rel.pendingTier === "major" ? "bg-indigo-100 text-indigo-700" : "bg-stone-100 text-stone-600"}`}>
+                            {rel.pendingTierLabel}
+                          </span>
+                        )}
                         <button onClick={() => relAct("적용", api.applyRelease)} disabled={!rel.canApply || !!relBusy}
                           className="shrink-0 rounded-lg bg-stone-900 px-3 py-2 text-xs font-medium text-white hover:bg-stone-700 disabled:opacity-40 disabled:hover:bg-stone-900 md:py-1.5">
                           {relBusy === "적용" ? "적용 중…" : "적용"}
@@ -1038,7 +1043,6 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                         <ul className="mt-2.5 space-y-1 border-t border-stone-100 pt-2.5">
                           {rel.pending.map((p) => (
                             <li key={p.sha} className="flex gap-2 text-2xs">
-                              <span className="shrink-0 font-mono text-stone-400">{p.sha}</span>
                               <span className="min-w-0 flex-1 truncate text-stone-700">{p.subject}</span>
                               <span className="shrink-0 text-stone-400">{new Date(p.date).toLocaleDateString("ko-KR", { month: "numeric", day: "numeric" })}</span>
                             </li>
@@ -1052,11 +1056,34 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                       {relErr && <p className="mt-2.5 whitespace-pre-wrap break-words text-caption text-red-700">{relErr}</p>}
                       {rel.canRevert && (
                         <div className="mt-2.5 flex items-center gap-2 border-t border-stone-100 pt-2.5">
-                          <span className="flex-1 text-2xs text-stone-500">직전 상태 {rel.prevSha}로 되돌릴 수 있습니다</span>
-                          <button onClick={() => relAct("되돌리기", api.revertRelease)} disabled={!!relBusy}
+                          <span className="flex-1 text-2xs text-stone-500">문제가 있으면 직전 버전으로 되돌릴 수 있습니다</span>
+                          <button onClick={() => relAct("되돌리기", () => api.winbackRelease())} disabled={!!relBusy}
                             className="shrink-0 rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs text-stone-700 hover:bg-stone-300 disabled:opacity-40">
                             {relBusy === "되돌리기" ? "되돌리는 중…" : "되돌리기"}
                           </button>
+                        </div>
+                      )}
+                      {!!rel.history?.length && (
+                        <div className="mt-2.5 border-t border-stone-100 pt-2.5">
+                          <div className="mb-1.5 text-2xs font-medium text-stone-500">버전 기록 — 문제 발생 시 원하는 버전으로 윈백할 수 있습니다</div>
+                          <ul className="space-y-1.5">
+                            {rel.history.map((h) => (
+                              <li key={h.version} className="flex items-center gap-2 text-2xs">
+                                <span className={`shrink-0 font-mono font-semibold ${h.status === "reverted" ? "text-stone-400 line-through" : "text-stone-700"}`}>v{h.version}</span>
+                                <span className={`shrink-0 rounded px-1 py-px text-[9px] font-medium ${h.tier === "patch" ? "bg-red-50 text-red-600" : h.tier === "major" ? "bg-indigo-50 text-indigo-600" : "bg-stone-100 text-stone-500"}`}>
+                                  {{ patch: "긴급", minor: "마이너", major: "메이저" }[h.tier]}
+                                </span>
+                                <span className="min-w-0 flex-1 truncate text-stone-600">{h.subjects[0]}{h.subjects.length > 1 ? ` 외 ${h.subjects.length - 1}건` : ""}</span>
+                                <span className="shrink-0 text-stone-400">{new Date(h.appliedAt).toLocaleDateString("ko-KR", { month: "numeric", day: "numeric" })}</span>
+                                {h.status === "applied" && rel.version !== h.version && (
+                                  <button onClick={() => relAct(`v${h.version} 윈백`, () => api.winbackRelease(h.sha))} disabled={!!relBusy}
+                                    className="shrink-0 rounded bg-stone-100 px-1.5 py-0.5 text-[10px] text-stone-600 hover:bg-stone-200 disabled:opacity-40">
+                                    윈백
+                                  </button>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
                         </div>
                       )}
                       {!!rel.receipts?.length && (

@@ -179,13 +179,25 @@ export const api = {
   rejectUpdate: (id: string) => mybotFetch(`/api/evolve/updates/${id}/reject`, { method: "POST" }).then(j),
   // 서비스 릴리스 — 개발 인스턴스가 release 브랜치로 민 커밋을 관리자가 직접 반영
   releaseStatus: () => mybotFetch("/api/release").then(j) as Promise<ReleaseStatus>,
-  applyRelease: () => mybotFetch("/api/release/apply", { method: "POST" }).then(j) as Promise<{ version: number; sha: string; restarting: boolean }>,
+  applyRelease: () => mybotFetch("/api/release/apply", { method: "POST" }).then(j) as Promise<{ version: number; sha: string; release: string; tier: ReleaseTier; restarting: boolean }>,
   revertRelease: () => mybotFetch("/api/release/revert", { method: "POST" }).then(j) as Promise<{ sha: string; restarting: boolean }>,
+  winbackRelease: (sha?: string) => mybotFetch("/api/release/winback", { method: "POST", body: JSON.stringify(sha ? { sha } : {}) }).then(j) as Promise<{ sha: string; release: string; restarting: boolean }>,
 };
+
+export type ReleaseTier = "patch" | "minor" | "major";
+
+export interface ReleaseRecord {
+  version: string; tier: ReleaseTier; sha: string; prevSha: string;
+  appliedAt: number; subjects: string[]; status: "applied" | "reverted";
+}
 
 export interface ReleaseStatus {
   branch: string; current: string; currentSubject: string; clean: boolean;
   pending: { sha: string; subject: string; date: string }[];
+  files: string[];
+  pendingTier: ReleaseTier | null; pendingTierLabel: string | null;
+  version: string | null; nextVersion: string | null;
+  history: ReleaseRecord[];
   canApply: boolean; reason: string;
   canRevert: boolean; prevSha: string; appliedAt: number; appVersion: number;
   receipts: ReleaseReceipt[];
@@ -193,7 +205,8 @@ export interface ReleaseStatus {
 
 export interface ReleaseReceipt {
   ts: number; from: string; to: string; subjects: string[]; gates: string[];
-  result: "applied" | "rolled-back" | "interrupted"; error?: string;
+  result: "applied" | "rolled-back" | "interrupted" | "winback"; error?: string;
+  version?: string; tier?: ReleaseTier;
 }
 
 export interface EvolveUpdate {

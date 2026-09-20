@@ -6,6 +6,7 @@ import { db } from "./db";
 import {
   evaluateRelease, runGates, defaultGates, bootCheck, run, BUN,
   writeReceipt, readReceipts, interruptedReceipt, type Gate,
+  classifyTier, nextVersion, pickWinbackTarget, type ReleaseRecord,
 } from "./release";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
@@ -148,4 +149,56 @@ test("여러 조건이 동시에 어긋나면 가장 먼저 막아야 할 사유
   expect(evaluateRelease({ hasChannel: false, pending: 0, clean: false, ff: false }).reason).toContain("아직 없습니다");
   // 브랜치는 있으나 더티하고 갈라진 경우 — 먼저 해결해야 하는 쪽은 작업 폴더다
   expect(evaluateRelease({ hasChannel: true, pending: 1, clean: false, ff: false }).reason).toContain("커밋되지 않은 변경");
+});
+
+// --- 버전 등급 분류·배치 임계·윈백 (3등급 릴리스 정책) ---
+
+test("커밋 제목에 긴급이 붙으면 긴급패치다 — 한 건이어도 즉시 나간다", () => {
+  expect(classifyTier(["긴급: 인증 오류 수정"], ["server/src/routes/chat.ts"])).toBe("patch");
+  expect(classifyTier(["hotfix: 결제 폴백 무한루프"], ["server/src/team.ts"])).toBe("patch");
+  const r = evaluateRelease({ ...ok, pending: 1, tier: "patch", oldestAgeMs: 0 });
+  expect(r.canApply).toBe(true); // 임계를 기다리지 않는다
+});
+
+test("핵심 표면이나 대규모 변경은 메이저다", () => {
+  // 인증·승인·릴리스·자기개선·DB·의존성은 한 줄만 건드려도 메이저
+  expect(classifyTier(["승인 흐름 보강"], ["server/src/approvals.ts"])).toBe("major");
+  expect(classifyTier(["의존성 갱신"], ["package.json"])).toBe("major");
+  expect(classifyTier(["자기개선 격리"], ["evolve/surfaces.json"])).toBe("major");
+  expect(classifyTier(["UI 다수 개선"], Array.from({ length: 15 }, (_, i) => `web/src/c${i}.tsx`))).toBe("major");
+  // 메이저도 임계 없이 나간다 — 마일스톤이 완성됐다는 자체가 기준 충족
+  expect(evaluateRelease({ ...ok, pending: 1, tier: "major", oldestAgeMs: 0 }).canApply).toBe(true);
+});
+
+test("일상 개선 묶음은 마이너 — 3건 미만이고 72시간도 안 지났으면 보류한다", () => {
+  expect(classifyTier(["표현 다듬기"], ["web/src/components/Composer.tsx"])).toBe("minor");
+  const hold = evaluateRelease({ ...ok, pending: 2, tier: "minor", oldestAgeMs: 3600_000 });
+  expect(hold.canApply).toBe(false);
+  expect(hold.reason).toContain("쌓이면");
+  // 3건 이상이면 나간다
+  expect(evaluateRelease({ ...ok, pending: 3, tier: "minor", oldestAgeMs: 3600_000 }).canApply).toBe(true);
+  // 건수가 적어도 첫 커밋이 72시간을 넘기면 나간다 — 개선을 영원히 붙들지 않는다
+  expect(evaluateRelease({ ...ok, pending: 1, tier: "minor", oldestAgeMs: 73 * 3600_000 }).canApply).toBe(true);
+});
+
+test("버전 번호는 등급대로 오른다", () => {
+  expect(nextVersion("1.2.3", "patch")).toBe("1.2.4");
+  expect(nextVersion("1.2.3", "minor")).toBe("1.3.0");
+  expect(nextVersion("1.2.3", "major")).toBe("2.0.0");
+  expect(nextVersion(null, "minor")).toBe("0.1.0");
+});
+
+test("윈백 대상은 버전 원장에 기록된 지점만 된다", () => {
+  const h: ReleaseRecord[] = [
+    { version: "1.0.0", tier: "major", sha: "aaa", prevSha: "000", appliedAt: 1, subjects: ["처음"], status: "applied" },
+    { version: "1.1.0", tier: "minor", sha: "bbb", prevSha: "aaa", appliedAt: 2, subjects: ["개선"], status: "applied" },
+  ];
+  // 지정 없으면 직전 버전의 prevSha = 마지막 적용을 되돌리는 지점
+  expect(pickWinbackTarget(h, "bbb")).toEqual({ sha: "aaa", label: "1.0.0" });
+  // 기록된 어느 버전으로도 갈 수 있다
+  expect(pickWinbackTarget(h, "bbb", "000")).toEqual({ sha: "000", label: "000" });
+  // 기록에 없는 지점·현재 위치·빈 원장은 거부
+  expect(pickWinbackTarget(h, "bbb", "zzz")).toEqual(expect.objectContaining({ ok: false }));
+  expect(pickWinbackTarget(h, "bbb", "bbb")).toEqual(expect.objectContaining({ ok: false }));
+  expect(pickWinbackTarget([], "bbb")).toEqual(expect.objectContaining({ ok: false }));
 });
