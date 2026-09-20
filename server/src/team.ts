@@ -1107,14 +1107,17 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
             && Date.now() < deadline - 30_000) {
             trackEmit({ type: "agent_phase", agentId: state.id, phase: "verify", label: "결과 검증" });
             const v = await evaluateResult(evalTarget.endpoint, evalTarget.model, state.task, res.content ?? "", { toolLog: state.toolLog, signal });
-            if (!v.pass) {
+            // inconclusive(평가기 자체 장애·파싱 실패)는 '미달'이 아니라 '미측정'이다 — 재작업시켜도
+            // 같은 평가기가 다시 실패해 호출만 낭비된다. 실제로 채점된(scored) 미달만 재작업한다.
+            if (!v.pass && v.status === "scored") {
               evalCount++;
               trackEmit({ type: "agent_step", agentId: state.id, tool: `품질 평가 ${v.score}점 — 보완 재작업` });
               messages.push({ role: "assistant", content: res.content || "" });
               messages.push({ role: "user", content: `[시스템] 품질 평가 ${v.score}점(기준 70)으로 미달 — 다음 지적사항을 실제로 보완해 결과물을 다시 작성하세요: ${v.issues.join(" / ") || "지시 이행도 부족"}. 필요하면 도구를 더 사용해도 됩니다.` });
               continue;
             }
-            trackEmit({ type: "agent_phase", agentId: state.id, phase: "verify_done", label: `검증 통과 (${v.score}점)` });
+            if (v.status === "inconclusive") trackEmit({ type: "agent_step", agentId: state.id, tool: "품질 평가 불능 — 미검증으로 진행" });
+            else trackEmit({ type: "agent_phase", agentId: state.id, phase: "verify_done", label: `검증 통과 (${v.score}점)` });
           }
           state.status = "done";
           state.result = res.content?.trim() ? res.content : "(빈 응답 — 결과 없음)"; // 빈 결과가 보고서·세션으로 흐르지 않게
