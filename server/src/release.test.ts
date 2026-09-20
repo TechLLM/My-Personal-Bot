@@ -2,11 +2,11 @@ import { test, expect } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { db } from "./db";
+import { db, setSetting } from "./db";
 import {
   evaluateRelease, runGates, defaultGates, bootCheck, run, BUN,
   writeReceipt, readReceipts, interruptedReceipt, type Gate,
-  classifyTier, nextVersion, pickWinbackTarget, type ReleaseRecord,
+  classifyTier, nextVersion, pickWinbackTarget, applyRelease, type ReleaseRecord,
 } from "./release";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
@@ -105,6 +105,30 @@ test("기동 시험은 웹 빌드까지 끝난 뒤 마지막에 돌린다", () =
   // 순서가 바뀌면 빌드 전 코드로 띄우게 되어 실제 배포본을 검증하지 못한다
   const names = defaultGates().map((g) => g.name);
   expect(names).toEqual(["테스트", "타입검사", "웹 빌드", "기동 시험"]);
+});
+
+// 2026-09-20 사고: merge로 서비스 트리를 바꾼 뒤 돌린 스위트가 외장 디스크 I/O 경합으로
+// 샌드박스 계열 테스트를 떨궈 멀쩡한 업데이트가 롤백됐다. 이제 검증은 대상 커밋을
+// 임시 worktree(빠른 로컬 디스크)에서 끝내고, 통과한 트리만 merge한다.
+
+test("검증 게이트는 지정한 루트 안에서 실행된다 — 스테이징 worktree가 쓰는 형태", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mybot-gates-"));
+  try {
+    mkdirSync(join(dir, "server"));
+    // 이 루트에서 도는 게 맞다면 실패해야 한다 — 저장소 테스트를 돌렸으면 통과했을 것
+    writeFileSync(join(dir, "server", "x.test.ts"), 'import { test, expect } from "bun:test"; test("f", () => expect(1).toBe(2));');
+    const r = await defaultGates(dir)[0].run();
+    expect(r.ok).toBe(false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}, 30000);
+
+test("이전 적용이 끝나지 않았으면 새 적용을 겹쳐 돌리지 않는다", async () => {
+  setSetting("release_inflight", JSON.stringify({ from: "a", to: "b", subjects: [], ts: Date.now() }));
+  try {
+    const r = await applyRelease([]);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("끝나지 않았습니다");
+  } finally { setSetting("release_inflight", ""); }
 });
 
 // --- 영수증·저널 (개선지침서 R1·R3) ---

@@ -1,5 +1,6 @@
 import { Hono } from "hono";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { getSetting, setSetting } from "./db";
 
@@ -139,7 +140,7 @@ export interface Receipt {
   to: string;                // 적용 대상 커밋
   subjects: string[];        // 적용하려는 커밋 제목
   gates: string[];           // 통과한 검사
-  result: "applied" | "rolled-back" | "interrupted" | "winback";
+  result: "applied" | "rolled-back" | "interrupted" | "winback" | "rejected";
   version?: string;          // 부여된 버전 (예: 1.2.0)
   tier?: ReleaseTier;
   error?: string;
@@ -228,20 +229,33 @@ export async function bootCheck(cwd = join(ROOT, "server")): Promise<{ ok: boole
   } finally { proc.kill(); }
 }
 
-const cmdGate = (name: string, cmd: string[], cwd: string, env?: Record<string, string>): Gate =>
-  ({ name, run: async () => run(cmd, { cwd: join(ROOT, cwd), env }) });
+const cmdGate = (name: string, cmd: string[], dir: string, env?: Record<string, string>): Gate =>
+  ({ name, run: async () => run(cmd, { cwd: dir, env }) });
 
 // 기동 시험은 반드시 마지막이다 — 웹 빌드까지 끝난 상태로 띄워야 실제 배포본과 같다
-export const defaultGates = (): Gate[] => [
-  cmdGate("테스트", [BUN, "test"], "server", { NODE_ENV: "test" }),
-  cmdGate("타입검사", [BUN, "x", "tsc", "--noEmit"], "server"),
-  cmdGate("웹 빌드", [BUN, "run", "build"], "web"),
-  { name: "기동 시험", run: bootCheck },
+export const defaultGates = (root = ROOT): Gate[] => [
+  cmdGate("테스트", [BUN, "test"], join(root, "server"), { NODE_ENV: "test" }),
+  cmdGate("타입검사", [BUN, "x", "tsc", "--noEmit"], join(root, "server")),
+  cmdGate("웹 빌드", [BUN, "run", "build"], join(root, "web")),
+  { name: "기동 시험", run: () => bootCheck(join(root, "server")) },
 ];
 
-// 검증은 반영 뒤에 돌린다 — 새 코드로 통과해야 의미가 있기 때문이다.
-// 하나라도 실패하면 받기 전 커밋으로 되돌려 서비스를 원래 상태로 남긴다.
+// 반영 뒤에는 배포 산출물과 실기동만 다시 확인한다 — 무거운 검증은 스테이징에서 끝났다
+const deployGates = (): Gate[] => [
+  cmdGate("웹 빌드", [BUN, "run", "build"], join(ROOT, "web")),
+  { name: "기동 시험", run: () => bootCheck(join(ROOT, "server")) },
+];
+
+const installDeps = (dir: string) => run([BUN, "install"], { cwd: dir });
+
+// 검증은 반영 "전에", 대상 커밋의 트리를 임시 worktree에서 돌린다.
+// 서비스 트리를 merge로 바꾼 뒤 무거운 스위트를 돌리면 실행 중인 서비스와 외장 디스크의
+// I/O 경합 속에서 샌드박스·서브프로세스 계열 테스트가 일시적으로 실패해, 멀쩡한
+// 업데이트가 롤백되고 트리가 두 번 뒤집히는 사고가 있었다(2026-09-20).
+// 스테이징은 빠른 로컬 디스크(tmpdir)에서 돌고, 실패해도 서비스 코드는 한 줄도 안 바뀐다.
 export async function applyRelease(gates?: Gate[]): Promise<{ ok: true; version: number; sha: string; release: string; tier: ReleaseTier } | Fail> {
+  // 진행 중인 적용이 남아 있으면 겹쳐 돌리지 않는다 — 저널은 다음 기동 때 회수된다
+  if (getSetting("release_inflight")) return fail("점검", "이전 적용이 아직 끝나지 않았습니다 — 잠시 후 다시 시도하세요");
   const st = releaseStatus();
   if (!st.canApply) return fail("점검", st.reason);
 
@@ -250,6 +264,35 @@ export async function applyRelease(gates?: Gate[]): Promise<{ ok: true; version:
   const subjects = st.pending.map((p) => p.subject);
   beginJournal({ from: before, to: target, subjects }); // 손대기 전에 의도를 먼저 남긴다
 
+  // 1단계: 스테이징 검증 — 대상 커밋 그대로의 트리에서 의존성 설치부터 전체 검사를 돌린다.
+  const stageDir = mkdtempSync(join(tmpdir(), "mybot-stage-"));
+  git("worktree", "prune"); // 이전에 죽은 적용이 남긴 관리 항목을 미리 치운다
+  const wt = git("worktree", "add", "--detach", stageDir, target);
+  if (!wt.ok) {
+    rmSync(stageDir, { recursive: true, force: true });
+    clearJournal();
+    return fail("준비", tail(wt.out));
+  }
+  const reject = (stage: string, detail: string): Fail => {
+    writeReceipt({ ts: Date.now(), from: before, to: target, subjects, gates: [], result: "rejected", error: `${stage}: ${tail(detail, 800)}` });
+    return fail(stage, `${tail(detail)}\n\n서비스 코드는 바뀌지 않았습니다. 일시적인 환경 문제일 수 있으니 다시 시도할 수 있습니다.`);
+  };
+  const list = gates ?? defaultGates(stageDir);
+  try {
+    for (const dir of [stageDir, join(stageDir, "web")]) {
+      const inst = installDeps(dir);
+      if (!inst.ok) return reject("의존성 설치", inst.out);
+    }
+    const result = await runGates(list);
+    if (!result.ok) return reject(result.stage, result.out);
+  } catch (e) {
+    return reject("검증", `예기치 못한 오류 — ${(e as Error).message}`);
+  } finally {
+    git("worktree", "remove", "--force", stageDir);
+    rmSync(stageDir, { recursive: true, force: true });
+  }
+
+  // 2단계: 반영 — 검증을 통과한 바로 그 트리를 받는다.
   const merged = git("merge", "--ff-only", CHANNEL);
   if (!merged.ok) {
     clearJournal();
@@ -260,16 +303,24 @@ export async function applyRelease(gates?: Gate[]): Promise<{ ok: true; version:
   // 예외가 그냥 올라가면 반영만 된 채 재시작도 롤백도 없이 남는다(실제로 겪은 사고다).
   const rollback = (stage: string, detail: string): Fail => {
     git("reset", "--hard", before);
+    installDeps(ROOT);
+    installDeps(join(ROOT, "web"));
     run([BUN, "run", "build"], { cwd: join(ROOT, "web") }); // 되돌린 소스로 화면도 원상복구
     clearJournal();
-    writeReceipt({ ts: Date.now(), from: before, to: target, subjects, gates: [], result: "rolled-back", error: `${stage}: ${tail(detail, 400)}` });
+    writeReceipt({ ts: Date.now(), from: before, to: target, subjects, gates: [], result: "rolled-back", error: `${stage}: ${tail(detail, 800)}` });
     return fail(stage, `${tail(detail)}\n\n받기 전 상태(${before.slice(0, 7)})로 되돌렸습니다.`);
   };
 
-  const list = gates ?? defaultGates();
   try {
-    const result = await runGates(list);
-    if (!result.ok) return rollback(result.stage, result.out);
+    // 의존성 동기화 — 릴리스가 패키지를 바꿨으면 테스트·기동 전에 맞춰야 한다
+    for (const dir of [ROOT, join(ROOT, "web")]) {
+      const inst = installDeps(dir);
+      if (!inst.ok) return rollback("의존성 설치", inst.out);
+    }
+    for (const g of deployGates()) {
+      const r = await g.run();
+      if (!r.ok) return rollback(g.name, r.out);
+    }
   } catch (e) {
     return rollback("검증", `예기치 못한 오류 — ${(e as Error).message}`);
   }
@@ -316,6 +367,8 @@ export function winbackRelease(targetSha?: string): { ok: true; sha: string; rel
 
   const r = git("reset", "--hard", t.sha);
   if (!r.ok) return fail("되돌리기", tail(r.out));
+  installDeps(ROOT);
+  installDeps(join(ROOT, "web"));
   const build = run([BUN, "run", "build"], { cwd: join(ROOT, "web") });
   if (!build.ok) return fail("웹 빌드", `코드는 되돌렸지만 화면 빌드에 실패했습니다 — ${tail(build.out)}`);
 
@@ -345,6 +398,8 @@ export function revertRelease(): { ok: true; sha: string; release?: string } | F
 
   const r = git("reset", "--hard", prev);
   if (!r.ok) return fail("되돌리기", tail(r.out));
+  installDeps(ROOT);
+  installDeps(join(ROOT, "web"));
   const build = run([BUN, "run", "build"], { cwd: join(ROOT, "web") });
   if (!build.ok) return fail("웹 빌드", `코드는 되돌렸지만 화면 빌드에 실패했습니다 — ${tail(build.out)}`);
 

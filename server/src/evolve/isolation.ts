@@ -238,9 +238,11 @@ export async function runIsolatedComparison(options: IsolationOptions): Promise<
   if (process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec"))
     return { status: "inconclusive", promotionEligible: false, reasonCode: "sandbox_unavailable" };
 
-  // production은 실모델 호출이 들어가 기본 3분·최대 10분까지, fixture는 기존 5초 상한
+  // production은 실모델 호출이 들어가 기본 3분·최대 10분까지, fixture는 30초 상한.
+  // 기한은 정지 감지용이라 판정과 무관하다 — 5초는 외장 디스크 I/O 경합에서
+  // 느려진 정상 자식까지 잘라, 검증된 업데이트의 적용을 실패시킨 적이 있다(2026-09-20).
   const production = options.mode === "production";
-  const deadline = bounded(options.deadlineMs, production ? 180_000 : 5_000, 100, production ? 600_000 : 60_000);
+  const deadline = bounded(options.deadlineMs, production ? 180_000 : 30_000, 100, production ? 600_000 : 60_000);
   const outputLimit = bounded(options.maxOutputBytes, 64 * 1024, 1_024, 1024 * 1024);
   let comparisonRoot: string | undefined;
   try {

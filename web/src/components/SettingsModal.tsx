@@ -1093,8 +1093,8 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                             {rel.receipts.map((r, i) => (
                               <li key={`${r.ts}-${i}`} className="text-2xs">
                                 <div className="flex gap-2">
-                                  <span className={`shrink-0 font-medium ${r.result === "applied" ? "text-emerald-700" : r.result === "rolled-back" ? "text-amber-700" : "text-red-700"}`}>
-                                    {r.result === "applied" ? "적용됨" : r.result === "rolled-back" ? "되돌림" : "중단됨"}
+                                  <span className={`shrink-0 font-medium ${r.result === "applied" ? "text-emerald-700" : r.result === "rolled-back" || r.result === "winback" ? "text-amber-700" : "text-red-700"}`}>
+                                    {r.result === "applied" ? "적용됨" : r.result === "rolled-back" ? "되돌림" : r.result === "winback" ? "윈백" : r.result === "rejected" ? "검증 실패" : "중단됨"}
                                   </span>
                                   <span className="min-w-0 flex-1 truncate text-stone-600">{r.subjects[0] ?? `${r.from.slice(0, 7)} → ${r.to.slice(0, 7)}`}</span>
                                   <span className="shrink-0 text-stone-400">{new Date(r.ts).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>

@@ -195,7 +195,7 @@ describe("runIsolatedComparison E2-A OS boundary", () => {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("starts both arms from identical DB and workspace seeds", async () => {
     const baseline = `
@@ -231,7 +231,7 @@ export async function probe(ctx) {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("denies external reads/writes, source writes, loopback network, and subprocess execution", async () => {
     const fixture = makeFixture();
@@ -275,7 +275,7 @@ export async function probe() {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("rejects absolute candidate paths before either arm executes", async () => {
     const fixture = makeFixture(`import { writeFileSync } from "node:fs"; export async function probe(){ writeFileSync(${JSON.stringify(join(fixturePathPlaceholder(), "never"))}, "x"); return 1 }`);
@@ -291,7 +291,7 @@ export async function probe() {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("rejects traversal, backslash traversal, and NUL candidate paths", async () => {
     for (const invalid of ["../escape.ts", "server\\src\\..\\..\\escape.ts", "server/src/probe.ts\0tail"]) {
@@ -306,7 +306,7 @@ export async function probe() {
         cleanupFixture(fixture);
       }
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("rejects an unregistered candidate surface independently of path validation", async () => {
     const fixture = makeFixture();
@@ -327,7 +327,7 @@ export async function probe() {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("rejects source file and directory symlinks that escape the source root", async () => {
     for (const kind of ["file", "directory"] as const) {
@@ -348,7 +348,7 @@ export async function probe() {
         cleanupFixture(fixture);
       }
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("rejects an untrusted symlinked dependency root before spawning either arm", async () => {
     const fixture = makeFixture();
@@ -370,7 +370,7 @@ export async function probe() {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("copies the trusted installed dependency root into each read-only arm", async () => {
     const fixture = makeFixture();
@@ -412,7 +412,7 @@ export async function probe(ctx) {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 15_000);
+  }, 60_000);
 
   childTest("rejects a symlinked evolve metadata ancestor before either arm executes", async () => {
     const fixture = makeFixture();
@@ -433,7 +433,7 @@ export async function probe(ctx) {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("rejects protected database, entrypoint, tests, and evolve targets", async () => {
     const targets = [
@@ -453,7 +453,7 @@ export async function probe(ctx) {
         cleanupFixture(fixture);
       }
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("fails closed when the candidate throws", async () => {
     const fixture = makeFixture();
@@ -467,7 +467,7 @@ export async function probe(ctx) {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("fails closed when the candidate exits nonzero", async () => {
     const fixture = makeFixture();
@@ -482,7 +482,7 @@ export async function probe(ctx) {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("records the underlying signal when the candidate terminates itself", async () => {
     const fixture = makeFixture();
@@ -497,7 +497,7 @@ export async function probe(ctx) {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("fails closed on untrusted stdout protocol junk", async () => {
     const fixture = makeFixture();
@@ -511,7 +511,7 @@ export async function probe(ctx) {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("rejects forged protocol-shaped stdout even when its version matches", async () => {
     const fixture = makeFixture();
@@ -535,7 +535,7 @@ export async function probe(ctx) {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("applies agent role candidates only to the seeded isolated database", async () => {
     const probe = `
@@ -580,7 +580,7 @@ export async function probe(ctx) {
       cleanupFixture(fixture);
       cleanupFixture(missingFixture);
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("caps excessive child output and fails closed", async () => {
     const fixture = makeFixture();
@@ -596,7 +596,7 @@ export async function probe(ctx) {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("terminates an infinite candidate promise within the bounded deadline", async () => {
     const fixture = makeFixture();
@@ -613,7 +613,7 @@ export async function probe(ctx) {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("accepts a valid typed candidate before rejecting an invalid typed candidate", async () => {
     const fixture = makeFixture();
@@ -656,7 +656,7 @@ export async function probe(ctx) {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("runs a passing fixed Bun preflight before failing closed on a failing one", async () => {
     const fixture = makeFixture(baselineProbe, {
@@ -680,7 +680,7 @@ export async function probe(ctx) {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 
   childTest("routes model calls through the credential broker on its loopback port only", async () => {
     const { startBroker } = await import("./evolve/broker");
@@ -719,7 +719,7 @@ export async function probe(ctx) {
       await broker.close();
       dummy.close();
     }
-  }, 15_000);
+  }, 60_000);
 
   childTest("production mode runs a golden task through the real pipeline via broker", async () => {
     const { startBroker } = await import("./evolve/broker");
@@ -841,7 +841,7 @@ export async function probe(ctx) {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 });
 
 test("production mode refuses to run without broker, golden task, and model", async () => {
@@ -859,7 +859,7 @@ test("production mode refuses to run without broker, golden task, and model", as
   } finally {
     cleanupFixture(fixture);
   }
-}, 10_000);
+}, 60_000);
 
 test("fixture mode is refused outside NODE_ENV=test and restores the caller environment", async () => {
   const fixture = makeFixture();
@@ -874,7 +874,7 @@ test("fixture mode is refused outside NODE_ENV=test and restores the caller envi
     cleanupFixture(fixture);
   }
   expect(process.env.NODE_ENV).toBe(previous);
-}, 10_000);
+}, 60_000);
 
 if (!isDarwin) {
   test("returns a structured fail-closed result on unsupported operating systems", async () => {
@@ -887,7 +887,7 @@ if (!isDarwin) {
     } finally {
       cleanupFixture(fixture);
     }
-  }, 10_000);
+  }, 60_000);
 }
 
 function fixturePathPlaceholder() {

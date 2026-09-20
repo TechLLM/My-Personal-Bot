@@ -205,7 +205,7 @@ export interface ReleaseStatus {
 
 export interface ReleaseReceipt {
   ts: number; from: string; to: string; subjects: string[]; gates: string[];
-  result: "applied" | "rolled-back" | "interrupted" | "winback"; error?: string;
+  result: "applied" | "rolled-back" | "interrupted" | "winback" | "rejected"; error?: string;
   version?: string; tier?: ReleaseTier;
 }
 
