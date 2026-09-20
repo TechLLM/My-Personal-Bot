@@ -598,7 +598,7 @@ export async function runTournament(candidatesIn: Candidate[]): Promise<Tourname
       }
       const cost = usage.byTag ?? {};
       const est = (tag: string) => Math.round((cost[tag]?.estTokens ?? 0) / 100) / 10;
-      const multi = alive.length > 1 ? `방식 ${alive.length}개 중 #${winner} 채택 — ` : "";
+      const multi = alive.length > 1 ? `방식 ${alive.length}개 중 #${winner} 승자 — ` : "";
       return done(verdict.verdict, `${multi}${verdict.reason}${ship} — 토큰 추정 기준선 ~${est(`baseline-${winner}`)}k · 후보 ~${est(`candidate-${winner}`)}k`, verdict.verdict === "keep" ? winner : -1);
     } finally {
       await broker.close();
