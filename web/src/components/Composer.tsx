@@ -1,3 +1,4 @@
+import { AuthenticatedImage } from "./AuthenticatedImage";
 import { useEffect, useRef, useState } from "react";
 import { ModelPicker } from "./ModelPicker";
 import { mybotFetch, type Model } from "../api";
@@ -111,7 +112,7 @@ export function Composer({
           {attachments.map((a, i) => (
             <div key={i} className="relative">
               {a.mime.startsWith("image/") ? (
-                <img src={a.url} className="h-14 w-14 rounded-xl border border-stone-200 object-cover" />
+                <AuthenticatedImage src={a.url} className="h-14 w-14 rounded-xl border border-stone-200 object-cover" />
               ) : (
                 <span className="flex h-14 max-w-40 items-center truncate rounded-xl border border-stone-200 bg-stone-100 px-2.5 text-2xs text-stone-600">{a.name}</span>
               )}

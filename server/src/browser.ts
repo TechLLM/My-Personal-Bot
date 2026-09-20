@@ -658,52 +658,104 @@ export const sitesRoute = new Hono()
   .get("/", (c) => c.json({ sites: db.prepare("SELECT id, name, url, username, success_check, created_at FROM site_logins ORDER BY created_at").all() }))
   // 봇이 요청한 계정 입력 (팝업 대기 목록)
   .get("/requests", (c) => c.json({ requests: db.prepare("SELECT id, name, url, reason, created_at FROM credential_requests WHERE status = 'pending' ORDER BY created_at").all() }))
-  .post("/requests/:id/dismiss", (c) => {
-    db.prepare("UPDATE credential_requests SET status = 'dismissed' WHERE id = ?").run(c.req.param("id"));
+  .post("/requests/:id/dismiss", async (c) => {
+    const req = db.prepare("SELECT * FROM credential_requests WHERE id = ? AND status = 'pending'").get(c.req.param("id")) as any;
+    if (!req) return c.json({ error: "요청 없음 또는 이미 처리됨" }, 404);
+    const result = `계정 입력 거부: ${req.name}`.slice(0, 4000);
+    // 모듈 로드 중에는 pending blocker를 유지한다.
+    const delivery = req.root_job_id ? await import("./command-delivery") : null;
+    const claimed = db.transaction(() => {
+      const processing = db.prepare("UPDATE credential_requests SET status = 'processing' WHERE id = ? AND status = 'pending'").run(req.id);
+      if (!processing.changes) return false;
+      if (req.root_job_id) delivery!.recordCommandResult(req.root_job_id, `credential:${req.id}`, result, req.agent_id);
+      db.prepare("UPDATE credential_requests SET status = 'dismissed' WHERE id = ? AND status = 'processing'").run(req.id);
+      return true;
+    })();
+    if (!claimed) return c.json({ error: "이미 처리됨" }, 409);
+    if (req.root_job_id) await delivery!.finalizeCommandIfReady(req.root_job_id);
     return c.json({ ok: true });
   })
   .post("/", async (c) => {
     const b = await c.req.json();
     if (!b.name || !b.url || !b.username || !b.password) return c.json({ error: "name/url/username/password 필요" }, 400);
-    const { uid, now } = await import("./db");
-    const { encryptSecret } = await import("./crypto");
-    // 같은 이름의 계정이 있으면 갱신 — 재입력 시 중복 행이 쌓이지 않음
     const siteName = String(b.name).slice(0, 50);
-    const existing = db.prepare("SELECT id FROM site_logins WHERE name = ?").get(siteName) as any;
-    const id = existing?.id ?? uid();
-    // success_check: 사이트별 로그인 성공 기준 — CSS 선택자(요소 존재) 또는 "url:정규식" (C20)
     const successCheck = typeof b.success_check === "string" && b.success_check.trim() ? b.success_check.trim().slice(0, 300) : null;
-    if (existing)
-      db.prepare("UPDATE site_logins SET url = ?, username = ?, password = ?, success_check = COALESCE(?, success_check) WHERE id = ?")
-        .run(String(b.url), String(b.username), encryptSecret(String(b.password)), successCheck, id);
-    else
-      db.prepare("INSERT INTO site_logins (id, name, url, username, password, success_check, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .run(id, siteName, String(b.url), String(b.username), encryptSecret(String(b.password)), successCheck, now());
-    // 봇 요청으로 온 입력이면 요청을 완료 처리하고 요청한 봇의 작업을 자동 재개
-    // status='pending' 조건으로 원자 전이 — 이미 처리된 요청의 중복 제출이 재개를 다시 발화하지 않게
+    let pendingReq: any = null;
     if (b.request_id) {
-      const flipped = db.prepare("UPDATE credential_requests SET status = 'done' WHERE id = ? AND status = 'pending'").run(String(b.request_id));
-      const req = flipped.changes > 0 ? db.prepare("SELECT * FROM credential_requests WHERE id = ?").get(String(b.request_id)) as any : null;
-      if (req?.agent_id) {
-        const { getAgent, runAgentDetached } = await import("./team");
-        const agent = getAgent(req.agent_id);
-        if (agent) {
-          runAgentDetached(agent, {
-            label: `[계정 입력됨] ${req.name} — 작업 자동 재개`,
-            task: `사용자가 "${req.name}" 계정을 보안 팝업에 입력했습니다. 계정은 암호화되어 저장됐고 browser_login(site: "${req.name}")으로 로그인할 수 있습니다. 이어서 원래 업무를 진행하고 결과를 보고하세요.\n\n원래 작업: ${req.resume || req.reason || "(없음)"}`,
-            sessionTitle: `[계정 입력 완료 — 작업 자동 재개] ${req.name}`,
-            sessionTask: req.resume || req.name,
-            notifyTitle: `계정 입력됨 — ${agent.name} 작업 재개`,
-          });
-        }
-      }
+      pendingReq = db.prepare("SELECT * FROM credential_requests WHERE id = ? AND status = 'pending'").get(String(b.request_id)) as any;
+      if (!pendingReq || pendingReq.name !== siteName || !credentialRequestUrlMatches(pendingReq.url, String(b.url)))
+        return c.json({ error: "계정 요청 대상이 변경됐습니다. 새 요청에서 다시 입력해 주세요." }, 409);
     }
+
+    // 요청 검증이 끝나기 전에는 암호화조차 하지 않고 기존 계정을 절대 변경하지 않는다.
+    const { encryptSecret } = await import("./crypto");
+    const team = pendingReq?.agent_id ? await import("./team") : null;
+    const delivery = pendingReq?.root_job_id ? await import("./command-delivery") : null;
+    const encrypted = encryptSecret(String(b.password));
+    let id = "";
+    let outcome = "";
+    try {
+      db.transaction(() => {
+        if (pendingReq) {
+          const claimed = db.prepare("UPDATE credential_requests SET status = 'processing' WHERE id = ? AND status = 'pending'").run(pendingReq.id);
+          if (!claimed.changes) throw new Error("이미 처리됨");
+        }
+        const existing = db.prepare("SELECT id FROM site_logins WHERE name = ?").get(siteName) as any;
+        id = existing?.id ?? uid();
+        if (existing)
+          db.prepare("UPDATE site_logins SET url = ?, username = ?, password = ?, success_check = COALESCE(?, success_check) WHERE id = ?")
+            .run(String(b.url), String(b.username), encrypted, successCheck, id);
+        else
+          db.prepare("INSERT INTO site_logins (id, name, url, username, password, success_check, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .run(id, siteName, String(b.url), String(b.username), encrypted, successCheck, now());
+
+        if (pendingReq) {
+          const agent = team?.getAgent(pendingReq.agent_id);
+          outcome = agent
+            ? `계정 입력 완료: ${pendingReq.name}`
+            : `계정 입력 완료: ${pendingReq.name}\n업무 자동 재개 불가: 요청한 봇이 삭제되었거나 존재하지 않습니다.`;
+          if (pendingReq.root_job_id)
+            delivery!.recordCommandResult(pendingReq.root_job_id, `credential:${pendingReq.id}`, outcome, pendingReq.agent_id);
+          if (agent && team) team.runAgentDetached(agent, {
+            label: `[계정 입력됨] ${pendingReq.name} — 작업 자동 재개`,
+            task: `사용자가 "${pendingReq.name}" 계정을 보안 팝업에 입력했습니다. 계정은 암호화되어 저장됐고 browser_login(site: "${pendingReq.name}")으로 로그인할 수 있습니다. 이어서 원래 업무를 진행하고 결과를 보고하세요.\n\n원래 작업: ${pendingReq.resume || pendingReq.reason || "(없음)"}`,
+            sessionTitle: `[계정 입력 완료 — 작업 자동 재개] ${pendingReq.name}`,
+            sessionTask: pendingReq.resume || pendingReq.name,
+            notifyTitle: `계정 입력됨 — ${agent.name} 작업 재개`,
+            rootJobId: pendingReq.root_job_id,
+          });
+          db.prepare("UPDATE credential_requests SET status = 'done' WHERE id = ? AND status = 'processing'").run(pendingReq.id);
+        }
+      })();
+    } catch (e) {
+      if ((e as Error).message === "이미 처리됨") return c.json({ error: "이미 처리됨" }, 409);
+      throw e;
+    }
+    if (pendingReq?.root_job_id) await delivery!.finalizeCommandIfReady(pendingReq.root_job_id);
     return c.json({ site: db.prepare("SELECT id, name, url, username, created_at FROM site_logins WHERE id = ?").get(id) });
   })
   .delete("/:id", (c) => {
     db.prepare("DELETE FROM site_logins WHERE id = ?").run(c.req.param("id"));
     return c.json({ ok: true });
   });
+
+function credentialRequestUrlMatches(intended: unknown, submitted: string): boolean {
+  if (!intended) return true;
+  try {
+    const normalize = (raw: string) => {
+      const u = new URL(raw);
+      u.hash = "";
+      const path = u.pathname.replace(/\/+$/, "") || "/";
+      return { origin: u.origin.toLowerCase(), full: `${u.origin.toLowerCase()}${path}${u.search}` };
+    };
+    const expected = normalize(String(intended));
+    const actual = normalize(submitted);
+    // 요청이 origin만 지정했다면 같은 origin의 로그인 경로를 허용하고, 구체 URL이면 그대로 맞춘다.
+    return expected.origin === actual.origin && (expected.full === `${expected.origin}/` || expected.full === actual.full);
+  } catch {
+    return false;
+  }
+}
 
 export function browserRunning(): boolean {
   return ctx !== null;

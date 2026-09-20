@@ -42,6 +42,7 @@ export interface ToolCtx {
   signal?: AbortSignal;
   depth?: number;
   chain?: string[];                  // 이 실행을 일으킨 상위 봇 id — 되돌아가는 위임·메시지 차단용
+  rootJobId?: string;                // 최초 사용자 명령의 전달 단위
   emit?: (ev: any) => void;          // 하위 위임의 진행 이벤트 통로
   onStart?: (name: string) => void;  // 인자 파싱 성공 직후 (게이트 전)
   onGate?: (name: string) => void;   // 승인 큐로 반환됐을 때
@@ -61,14 +62,14 @@ export async function execToolCall(tc: ToolCall, ctx: ToolCtx): Promise<{ out: s
   ctx.onStart?.(tc.name);
   // 승인 경계 — 위험 액션은 실행하지 않고 사용자 승인 큐에 올림
   const { gateApproval } = await import("./approvals");
-  const gate = gateApproval(tc.name, args, ctx.agentId, ctx.context, ctx.chain);
+  const gate = gateApproval(tc.name, args, ctx.agentId, ctx.context, ctx.chain, ctx.rootJobId);
   if (gate) { ctx.onGate?.(tc.name); return finish(gate, true); }
   ctx.onDispatch?.(tc.name);
   try {
     const { callBuiltin, withToolTimeout, BUILTIN_TOOLS, MANAGE_TOOLS } = await import("./team");
     const isBuiltin = new Set([...BUILTIN_TOOLS, ...MANAGE_TOOLS].map((t) => t.function.name)).has(tc.name);
     const inner = isBuiltin
-      ? callBuiltin(tc.name, args, ctx.agentId, ctx.signal, ctx.depth ?? 0, ctx.emit, ctx.browserKey, ctx.fileRoot, ctx.chain)
+      ? callBuiltin(tc.name, args, ctx.agentId, ctx.signal, ctx.depth ?? 0, ctx.emit, ctx.browserKey, ctx.fileRoot, ctx.chain, ctx.rootJobId)
       : isBrowserish(tc.name)
         ? (await import("./browser")).browserTool(ctx.browserKey, tc.name, args)
         : tc.name.startsWith("computer_")

@@ -3,11 +3,39 @@
 // 평가 호출은 비용이므로 shouldEvaluate로 저렴한 선별을 먼저 적용한다.
 import type { Endpoint } from "./providers";
 
-export interface EvalVerdict { pass: boolean; score: number; issues: string[] }
+export interface EvalVerdict {
+  pass: boolean;
+  score: number;
+  issues: string[];
+  status: "scored" | "inconclusive";
+  reasonCode?: "provider_error" | "invalid_response" | "aborted";
+}
 
 const PASS_SCORE = 70;
 const MAX_ROUNDS = 2; // 평가-재작업 루프 상한 — 무한 반복 방지
 export const EVAL_MAX_ROUNDS = MAX_ROUNDS;
+
+function inconclusive(reasonCode: NonNullable<EvalVerdict["reasonCode"]>): EvalVerdict {
+  // score 0은 실패 시 자리표시자이며, 실제 채점 결과가 아니다.
+  return { pass: false, score: 0, issues: ["평가를 완료하지 못했습니다."], status: "inconclusive", reasonCode };
+}
+
+export function parseEvaluationResponse(content: string): EvalVerdict {
+  try {
+    const text = content.trim();
+    const fence = /^```json[\t ]*\r?\n([\s\S]*?)\r?\n```$/.exec(text);
+    const value = JSON.parse(fence ? fence[1] : text);
+    if (
+      value === null || typeof value !== "object" || Array.isArray(value) ||
+      typeof value.score !== "number" || !Number.isFinite(value.score) ||
+      value.score < 0 || value.score > 100 ||
+      !Array.isArray(value.issues) || !value.issues.every((issue: unknown) => typeof issue === "string")
+    ) return inconclusive("invalid_response");
+    return { pass: value.score >= PASS_SCORE, score: value.score, issues: value.issues.slice(0, 3), status: "scored" };
+  } catch {
+    return inconclusive("invalid_response");
+  }
+}
 
 // 저렴한 선별 규칙 — 평가 모델 호출이 필요한 결과인지 휴리스틱으로 먼저 거른다.
 // 짧은 정답·도구 없는 단순 질의·도구 미지원 모델은 평가 자체가 무의미하다.
@@ -25,12 +53,29 @@ export async function evaluateResult(
   model: string,
   task: string,
   result: string,
-  opts: { toolLog?: { tool: string; ok: boolean }[]; signal?: AbortSignal } = {},
+  opts: {
+    toolLog?: { tool: string; ok: boolean }[];
+    signal?: AbortSignal;
+    callModel?: (endpoint: Endpoint, model: string, messages: any[], opts: any) => Promise<{ content: string }>;
+  } = {},
 ): Promise<EvalVerdict> {
+  if (opts.signal?.aborted) return inconclusive("aborted");
+  const signal = opts.signal
+    ? AbortSignal.any([opts.signal, AbortSignal.timeout(60_000)])
+    : AbortSignal.timeout(60_000);
+  let onAbort: () => void = () => {};
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(new Error("Evaluation aborted"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+  // 주입 함수가 동기적으로 취소 후 throw해도 취소 rejection을 방치하지 않는다.
+  void aborted.catch(() => {});
   try {
-    const { chatOnce } = await import("./providers/openaiCompat");
+    const callModel = opts.callModel ?? (await Promise.race([import("./providers/openaiCompat"), aborted])).chatOnce;
+    if (signal.aborted) return inconclusive("aborted");
     const toolsUsed = (opts.toolLog ?? []).map((t) => t.tool).join(", ") || "없음";
-    const res = await chatOnce(endpoint, model, [
+    const res = await Promise.race([callModel(endpoint, model, [
       {
         role: "user",
         content: `당신은 결과물 품질 평가자입니다. 아래 [지시]와 [결과물]을 대조해 루브릭으로 채점하세요.
@@ -53,14 +98,12 @@ ${result.slice(0, 4000)}
 JSON만 출력하세요: {"score":0-100,"issues":["부족한 점 최대 3개, 구체적으로"]}
 80점 이상이면 issues는 빈 배열. 도구를 못 쓰는 작업이었다면 2번은 지식 기준으로 평가.`,
       },
-    ], { signal: opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(60_000)]) : AbortSignal.timeout(60_000), reasoningEffort: "low" });
-    const m = (res.content ?? "").match(/\{[\s\S]*"score"[\s\S]*\}/);
-    if (!m) return { pass: true, score: 100, issues: [] }; // 파싱 실패 시 통과 — 평가기 장애가 작업을 막지 않게
-    const j = JSON.parse(m[0]);
-    const score = Math.max(0, Math.min(100, Number(j.score) || 0));
-    const issues = (Array.isArray(j.issues) ? j.issues : []).map(String).filter(Boolean).slice(0, 3);
-    return { pass: score >= PASS_SCORE, score, issues };
+    ], { signal, reasoningEffort: "low" }), aborted]);
+    if (signal.aborted) return inconclusive("aborted");
+    return parseEvaluationResponse(res?.content);
   } catch {
-    return { pass: true, score: 100, issues: [] }; // 평가 호출 실패도 통과 — 검증 경로가 작업 자체를 깨면 안 됨
+    return inconclusive(signal.aborted ? "aborted" : "provider_error");
+  } finally {
+    signal.removeEventListener("abort", onAbort);
   }
 }

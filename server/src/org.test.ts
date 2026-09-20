@@ -91,12 +91,13 @@ test("전체 중지는 진행 중인 봇 실행을 끊고 대기 중인 봇 메�
   }
 });
 
-test("위임 결과는 세션 기록용 보고서 정리(LLM)를 기다리지 않고 바로 돌아온다", async () => {
+test("위임 결과는 포맷터 없이 정규화된 실행 원문을 바로 반환한다", async () => {
   const blocked = globalThis.fetch;
   let releaseFormatter!: () => void;
   const formatterGate = new Promise<void>((r) => { releaseFormatter = r; });
   let formatterCalled = false;
   const answer = "## 결과\n" + "요약 내용입니다. ".repeat(30); // 200자 이상 — 보고서 정리 LLM 호출 대상
+  const messagesBefore = (db.prepare("SELECT COUNT(*) c FROM messages").get() as { c: number }).c;
   globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
     if (String(init?.body ?? "").includes("업무 보고서 포맷터")) {
       formatterCalled = true;
@@ -113,9 +114,11 @@ test("위임 결과는 세션 기록용 보고서 정리(LLM)를 기다리지 �
     ]);
     expect(out).toContain("테스트봇B 실행 결과 — 완료");
     expect(Date.now() - started).toBeLessThan(5000);
-    // 보고서 정리 호출 자체는 백그라운드에서 실제로 일어나야 한다 (정리 생략이 아니라 순서만 뒤로)
-    for (let i = 0; i < 50 && !formatterCalled; i++) await Bun.sleep(20);
-    expect(formatterCalled).toBe(true);
+    // 실제 실행 결과를 그대로 보존하며 합성 포맷터 대화나 세션 메시지를 추가하지 않는다.
+    expect(formatterCalled).toBe(false);
+    expect((db.prepare("SELECT COUNT(*) c FROM messages").get() as { c: number }).c).toBe(messagesBefore);
+    const run = db.prepare("SELECT result FROM agent_runs WHERE agent_id = ? ORDER BY created_at DESC LIMIT 1").get(ids.b) as { result: string };
+    expect(run.result).toBe(answer.trim());
   } finally {
     releaseFormatter();
     globalThis.fetch = blocked;

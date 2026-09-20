@@ -173,6 +173,42 @@ CREATE TABLE IF NOT EXISTS agent_messages (
   created_at INTEGER NOT NULL,
   done_at INTEGER
 );
+-- 사용자 명령 단위 전달 원장. 중간 실행과 외부 채널 전달을 root job 아래 묶는다.
+CREATE TABLE IF NOT EXISTS command_jobs (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  conversation_id TEXT,
+  assistant_message_id TEXT,
+  request TEXT NOT NULL DEFAULT '',
+  owner_agent_id TEXT,
+  execution_done INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'running',
+  full_result TEXT,
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS command_deliveries (
+  root_job_id TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  target TEXT,
+  status TEXT NOT NULL,
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(root_job_id, channel)
+);
+CREATE TABLE IF NOT EXISTS command_job_results (
+  root_job_id TEXT NOT NULL,
+  result_key TEXT NOT NULL,
+  agent_id TEXT,
+  content TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(root_job_id, result_key)
+);
+CREATE TABLE IF NOT EXISTS telegram_updates (
+  update_id INTEGER PRIMARY KEY,
+  created_at INTEGER NOT NULL
+);
 -- 그룹채팅 — 여러 봇이 하나의 대화에 참여 (@멘션으로 특정 봇 지정 가능)
 CREATE TABLE IF NOT EXISTS groups (
   id TEXT PRIMARY KEY,
@@ -287,6 +323,23 @@ db.exec("DELETE FROM conversations WHERE mode = 'bot' AND agent_id IS NOT NULL A
 try { db.exec("ALTER TABLE agent_messages ADD COLUMN chain TEXT"); } catch {} // 보낸 쪽 위임·메시지 사슬(JSON 봇 id 배열) — 순환 메시지 차단용
 try { db.exec("ALTER TABLE credential_requests ADD COLUMN agent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE credential_requests ADD COLUMN resume TEXT"); } catch {}
+try { db.exec("ALTER TABLE messages ADD COLUMN full_content TEXT"); } catch {}
+try { db.exec("ALTER TABLE messages ADD COLUMN root_job_id TEXT"); } catch {}
+try { db.exec("ALTER TABLE agent_runs ADD COLUMN root_job_id TEXT"); } catch {}
+try { db.exec("ALTER TABLE approval_requests ADD COLUMN root_job_id TEXT"); } catch {}
+try { db.exec("ALTER TABLE agent_messages ADD COLUMN root_job_id TEXT"); } catch {}
+try { db.exec("ALTER TABLE messages ADD COLUMN command_status TEXT"); } catch {}
+try { db.exec("ALTER TABLE command_jobs ADD COLUMN dedupe_key TEXT"); } catch {}
+try { db.exec("ALTER TABLE command_jobs ADD COLUMN needs_final_aggregation INTEGER NOT NULL DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE command_jobs ADD COLUMN target_snapshot TEXT"); } catch {}
+try { db.exec("ALTER TABLE command_jobs ADD COLUMN credential_fingerprint TEXT"); } catch {}
+try { db.exec("ALTER TABLE command_jobs ADD COLUMN root_result_key TEXT"); } catch {}
+try { db.exec("ALTER TABLE command_jobs ADD COLUMN email_target_snapshot TEXT"); } catch {}
+try { db.exec("ALTER TABLE command_jobs ADD COLUMN email_credential_fingerprint TEXT"); } catch {}
+try { db.exec("ALTER TABLE command_deliveries ADD COLUMN external_message_id TEXT"); } catch {}
+try { db.exec("ALTER TABLE command_deliveries ADD COLUMN target_fingerprint TEXT"); } catch {}
+try { db.exec("ALTER TABLE credential_requests ADD COLUMN root_job_id TEXT"); } catch {}
+try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_command_jobs_dedupe ON command_jobs(source, dedupe_key) WHERE dedupe_key IS NOT NULL"); } catch {}
 // 자기개선 실험 원장 — 모든 사이클의 후보·측정·판정·적용 여부를 남긴다 (tasks/self-improvement-contract.md)
 try { db.exec(`CREATE TABLE IF NOT EXISTS experiments (
   id TEXT PRIMARY KEY,

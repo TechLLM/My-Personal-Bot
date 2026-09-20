@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, streamChat, runTeam, mybotFetch, type Agent, type Conversation, type Message, type Model, type TeamPlanTask, type SiteRequest, type Group, type ApprovalRequest, type HandoffRequest } from "./api";
+import { AuthenticatedEventStream, api, streamChat, runTeam, mybotFetch, type Agent, type Conversation, type Message, type Model, type TeamPlanTask, type SiteRequest, type Group, type ApprovalRequest, type HandoffRequest } from "./api";
 import { Sidebar } from "./components/Sidebar";
 import { Composer, type Mode, type Persona } from "./components/Composer";
 import { MessageItem } from "./components/MessageItem";
@@ -50,6 +50,10 @@ export default function App() {
   const abortRef = useRef<AbortController | null>(null);
   const convIdRef = useRef<string | null>(null); // 현재 보고 있는 대화 — 오래된 스트림 클로저에서도 읽을 수 있게
   convIdRef.current = convId;
+  const streamingRef = useRef(false);
+  streamingRef.current = streaming;
+  const conversationPollSeqRef = useRef(0);
+  const conversationLoadSeqRef = useRef(0);
   const streamConvRef = useRef<string | null>(null); // 진행 중 스트림의 소속 대화 — 다른 세션으로 이동해도 이벤트가 새지 않게
   const scrollRef = useRef<HTMLDivElement>(null);
   const nearBottomRef = useRef(true); // 사용자가 하단 근처를 보고 있을 때만 자동 스크롤 — 위쪽 읽기 중엔 위치 고정
@@ -155,26 +159,44 @@ export default function App() {
   // 회신 기록이 run 종료보다 늦을 수 있어(normalizeReport LLM 호출) 유휴 중엔 항상 4초 주기로 읽되,
   // 변화가 없으면 같은 배열을 반환해 스크롤 점프를 막는다.
   useEffect(() => {
-    if (streaming || !convId) return;
+    if (streaming || !convId) {
+      conversationPollSeqRef.current++;
+      return;
+    }
+    const requestedId = convId;
+    const seq = ++conversationPollSeqRef.current;
     api.conversation(convId).then((d) => {
+      if (seq !== conversationPollSeqRef.current || convIdRef.current !== requestedId || streamingRef.current) return;
       setMessages((prev) => {
-        const last = prev[prev.length - 1], lastD = d.messages[d.messages.length - 1];
-        if (prev.length === d.messages.length && last?.id === lastD?.id && last?.content === lastD?.content) return prev;
+        const persisted = prev.filter((m) => !m.id.startsWith("err"));
+        const unchanged = persisted.length === d.messages.length && persisted.every((m, i) => {
+          const incoming = d.messages[i];
+          return m.id === incoming?.id
+            && m.content === incoming.content
+            && (m.full_content ?? null) === (incoming.full_content ?? null)
+            && (m.command_status ?? null) === (incoming.command_status ?? null);
+        });
+        if (unchanged) return prev;
         const ids = new Set(d.messages.map((m) => m.id));
         return [...d.messages, ...prev.filter((m) => m.id.startsWith("err") && !ids.has(m.id))];
       });
     }).catch(() => {});
+    return () => { conversationPollSeqRef.current++; };
   }, [runningInfo, convId, streaming]);
 
   const loadConversation = useCallback((id: string) => {
+    const seq = ++conversationLoadSeqRef.current;
+    convIdRef.current = id;
     setConvId(id);
     setPendingAgent(null);
     setLiveViewKey(null); setViewKey(null); // 다른 대화의 컴퓨터 뷰가 남지 않게
     refreshConversations(); // 목록이 오래돼 현재 대화가 없으면 담당 봇 칩이 안 뜸 — 열 때마다 갱신
     api.conversation(id).then((d) => {
+      if (seq !== conversationLoadSeqRef.current || convIdRef.current !== id) return;
       setMessages(d.messages);
       if (d.conversation.model) setModel(d.conversation.model);
     }).catch(() => {
+      if (seq !== conversationLoadSeqRef.current || convIdRef.current !== id) return;
       setMessages([{ // 로드 실패가 조용히 지나가지 않게 명시 — 서버 재시작 중 열기 등
         id: "err" + Date.now(), conversation_id: id, parent_id: null, role: "assistant",
         content: "⚠️ 대화를 불러오지 못했습니다 — 서버 연결을 확인한 뒤 다시 시도해 주세요.", reasoning: null, model: null, search_meta: null, attachments: null,
@@ -184,6 +206,9 @@ export default function App() {
   }, [refreshConversations]);
 
   const newConversation = useCallback(() => {
+    conversationLoadSeqRef.current++;
+    conversationPollSeqRef.current++;
+    convIdRef.current = null;
     setConvId(null);
     setPendingAgent(null);
     setMessages([]);
@@ -195,8 +220,7 @@ export default function App() {
   // 서버 푸시(SSE)로 봇 목록 실시간 갱신 — 봇이 다른 봇을 생성·삭제·수정하면
   // 서버가 'agents' 이벤트를 쏘고, 열린 탭이 즉시 목록을 다시 가져온다 (새로고침 불필요)
   useEffect(() => {
-    const key = localStorage.getItem("mybot_key");
-    const es = new EventSource("/api/events" + (key ? `?key=${encodeURIComponent(key)}` : ""));
+    const es = new AuthenticatedEventStream("/api/events");
     es.addEventListener("evolve", () => {
       api.evolveUpdates().then((d) => setPendingUpdates(d.updates.filter((u) => u.status === "pending").length)).catch(() => {});
     });
@@ -571,11 +595,18 @@ export default function App() {
                   <WorkingStatus events={searchEvents} agent={activeAgent} />
                 </div>
               )}
-              {searchEvents.length > 0 && (
-                <SearchTrace events={searchEvents} done={!streaming} />
-              )}
-              {teamEvents.length > 0 && (
-                <TeamTrace events={teamEvents} done={!streaming} onView={(key) => setViewKey(key)} />
+              {(searchEvents.length > 0 || teamEvents.length > 0) && (
+                <details className="rounded-xl border border-stone-200/60 bg-white/30 px-4 py-2.5">
+                  <summary className="cursor-pointer text-sm font-medium text-stone-600">작업 상세 보기</summary>
+                  <div className="mt-3 space-y-3">
+                    {searchEvents.length > 0 && (
+                      <SearchTrace events={searchEvents} done={!streaming} />
+                    )}
+                    {teamEvents.length > 0 && (
+                      <TeamTrace events={teamEvents} done={!streaming} onView={(key) => setViewKey(key)} />
+                    )}
+                  </div>
+                </details>
               )}
             </div>
           </div>

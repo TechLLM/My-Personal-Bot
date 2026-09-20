@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync,
 import { parseLeaked, execToolBatch, isBrowserish } from "./toolloop";
 import { emitUI } from "./events";
 import type { Intent } from "./intent";
+import { createCommandJob, completeCommand, finalizeCommandIfReady, recordCommandResult } from "./command-delivery";
 
 // 에이전트 공용 작업 디렉터리 — 파일 도구는 여기로 샌드박스
 export const WORK_DIR = join(import.meta.dir, "..", "data", "workspace");
@@ -112,6 +113,7 @@ export interface TeamAgentState {
   verifyIntent?: boolean; // false면 지시-실측 검증 생략 — 봇 간 메시지(보고·알림)는 지시가 아니라서 의도 파싱이 오독됨
   fileRoot?: string;      // C19 — 프로젝트 파일 네임스페이스 (없으면 공유 WORK_DIR)
   chain?: string[];       // 이 실행을 일으킨 상위 봇 id — 이 봇들에게 되돌아가는 지시·메시지는 순환이라 차단
+  rootJobId?: string;
 }
 
 type Emit = (ev: object) => void;
@@ -308,7 +310,9 @@ function orgSnapshot(): string {
 // 순환 차단 안내 — 위임·메시지 사슬의 상위 봇에게 되돌아가는 호출 (보고-회신 핑퐁의 구조적 원인)
 const cycleNotice = (target: Agent) => `순환 차단: ${target.name}은(는) 이 작업을 지시한 상위 봇입니다 — 결과는 최종 답변으로 작성하면 자동으로 전달됩니다. 보고·확인을 위해 상위 봇에게 지시나 메시지를 보내지 마세요.`;
 
-export async function callBuiltin(name: string, args: Record<string, unknown>, agentId?: string | null, signal?: AbortSignal, depth = 0, emit?: (ev: any) => void, runKey?: string, fileRoot?: string, chain: string[] = []): Promise<string> {
+export async function callBuiltin(name: string, args: Record<string, unknown>, agentId?: string | null, signal?: AbortSignal, depth = 0, emit?: (ev: any) => void, runKey?: string, fileRoot?: string, chain: string[] = [], explicitRootJobId?: string): Promise<string> {
+  const { currentRootJobId } = await import("./command-delivery");
+  const rootJobId = explicitRootJobId ?? currentRootJobId();
   const ROOT = fileRoot ?? WORK_DIR; // C19 — 프로젝트 대화면 파일 도구가 그 네임스페이스를 쓴다
   // --- 봇 협업·관리 도구 ---
   if (name === "agent_list") {
@@ -422,14 +426,20 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
       if (recentRuns >= 15) return `${target.name}: 최근 1시간 동안 ${recentRuns}회 실행됨 — 봇 간 보고 루프 방지를 위해 추가 위임이 차단됐습니다. 지금까지의 결과를 취합해 보고하세요.`;
       const inst = perInstruction(args.instructions, i);
       if (!inst.trim()) return "오류: 지시 내용이 비어 있습니다 — instruction 필드에 구체적인 업무를 적어주세요";
+      // 실행 이력을 만들기 전에 중단 여부와 모델 기본값을 확정한다. 이미 중단된 위임이나
+      // 기본 모델 초기화 실패가 'running' 이력만 남겨 루트 명령을 영구 대기시키면 안 된다.
+      const childSignal = delegateTimeout(signal);
+      if (!childSignal) return `[${target.name}] 위임이 취소되어 실행하지 않았습니다 — 완료되지 않은 작업입니다.`;
+      const selectedModel = target.model ?? defaultModel();
       const runId = uid();
-      db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, NULL, ?, 'running', ?)").run(runId, target.id, `[${caller?.name ?? "사용자"} 지시] ${inst.slice(0, 200)}`, now());
+      db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, root_job_id, created_at) VALUES (?, ?, NULL, ?, 'running', ?, ?)").run(runId, target.id, `[${caller?.name ?? "사용자"} 지시] ${inst.slice(0, 200)}`, rootJobId, now());
       const state: TeamAgentState = {
         id: target.id, runId, name: target.name, avatar: target.avatar ?? "🤖",
         role: target.role_prompt, task: `${caller?.name ?? "사용자"} 봇이 지시한 업무입니다. 수행하고 결과를 보고하세요.\n\n${inst}`,
-        model: target.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: depth + 1,
+        model: selectedModel, status: "running", steps: 0, toolLog: [], depth: depth + 1,
         fileRoot: fileRoot ?? workspaceRoot(target.workspace_id), // C19 — 호출 측 프로젝트 네임스페이스 상속, 아니면 봇 배정 프로젝트
         chain: agentId ? [...chain, agentId] : chain,
+        rootJobId: rootJobId ?? undefined,
       };
       // 화면에 하위 봇 작업이 실시간으로 보이도록 이벤트 전파 (봇 카드 + 작업 애니메이션)
       emit?.({ type: "agent_join", agent: { id: target.id, name: target.name, avatar: target.avatar, role: target.role_prompt, task: inst.slice(0, 200), model: target.model, model_label: modelLabel(target.model ?? defaultModel()), runId } });
@@ -439,22 +449,13 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
       // C6 — 하위 상한은 min(위임 상한, 상위 잔여 - 60초): 상위 데드라인을 하위가 넘지 않게 상속한다.
       // 실행+기록을 하나의 잡으로 묶어, 호출 측이 중단돼도 하위 작업이 백그라운드에서
       // 완료까지 진행되고 실행 이력·세션 기록이 빠지지 않게 한다.
-      const childSignal = delegateTimeout(signal);
-      if (!childSignal) return `[시스템] 상위 작업의 잔여 시간이 1분 미만입니다 — 위임하지 말고 지금까지 확보한 결과로 부분 보고하세요.`;
       const job = (async () => {
         await runAgent(state, target, emit ?? (() => {}), childSignal);
         emit?.({ type: "agent_done", agentId: target.id, status: state.status, result: (state.result ?? "").slice(0, 4000) });
-        db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
-          .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
+        persistAgentRunTerminal(state);
         // 대상 봇의 메인 세션에 실행 내역을 기록 — 정규화된 보고서 형식으로 저장해 봇 화면이 정돈되게 표시됨.
         // 보고서 정리는 LLM 호출이라 호출자에게 결과를 돌려준 뒤 백그라운드로 — 위임 단계마다 붙던 대기를 없앤다
-        void (async () => {
-          const { appendToAgentSession } = await import("./routes/chat");
-          const { normalizeReport } = await import("./report");
-          const runMeta = JSON.stringify({ type: "tools", events: state.toolLog.map((l) => ({ type: "read", title: l.tool, url: "" })) });
-          const report = await normalizeReport(target.name, inst, state.result?.trim() || "(결과 없음)", state.toolLog.map((l) => l.tool));
-          appendToAgentSession(agentSessionConvId(target.id), `[${caller?.name ?? "사용자"} 지시] ${inst}`, report, target.model, runMeta);
-        })().catch((e) => console.error(`[mybot] 봇 세션 기록 실패 (${target.name}):`, (e as Error).message));
+        if (state.rootJobId) await finalizeCommandIfReady(state.rootJobId);
         return `[${target.name} 실행 결과 — ${state.status === "done" ? "완료" : "실패"}]\n${state.result?.trim() || "(결과 없음)"}`;
       })();
       // 호출 측 signal이 먼저 끊기면(타임아웃·연결 종료) 대기만 해제 — 하위 잡은 계속 진행된다.
@@ -498,8 +499,8 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     }
     const msgId = uid();
     // 사슬은 메시지에 저장 — 재시작 뒤 재배달돼도 받는 봇·회신 재실행이 같은 순환 차단을 이어받는다
-    db.prepare("INSERT INTO agent_messages (id, from_agent_id, to_agent_id, content, status, chain, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)")
-      .run(msgId, agentId ?? null, target.id, content.slice(0, 2000), JSON.stringify(agentId ? [...chain, agentId] : chain), now());
+    db.prepare("INSERT INTO agent_messages (id, from_agent_id, to_agent_id, content, status, chain, root_job_id, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)")
+      .run(msgId, agentId ?? null, target.id, content.slice(0, 2000), JSON.stringify(agentId ? [...chain, agentId] : chain), rootJobId, now());
     const { dispatchAgentMessage } = await import("./approvals");
     dispatchAgentMessage(msgId); // 백그라운드 디스패치 — 결과를 기다리지 않음
     return `메시지 전달됨: ${target.name}이 백그라운드로 처리를 시작했습니다 — 완료되면 회신이 이 세션에 기록됩니다. 다른 작업을 이어서 진행하세요.`;
@@ -556,10 +557,11 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     // 이미 저장된 계정이면 팝업 없이 재사용 — 한 번 입력하면 계속 기억됨
     const saved = db.prepare("SELECT name FROM site_logins WHERE name LIKE ? ESCAPE '\\'").get(`%${nm.replace(/[\\%_]/g, (c) => `\\${c}`)}%`) as any;
     if (saved) return `"${saved.name}" 계정이 이미 저장되어 있습니다 — 팝업 없이 바로 browser_login(site: "${saved.name}")을 호출하세요. 사용자에게 다시 묻지 마세요.`;
-    const dup = db.prepare("SELECT id FROM credential_requests WHERE status = 'pending' AND name = ?").get(nm);
+    const credentialRoot = rootJobId ?? null;
+    const dup = db.prepare("SELECT id FROM credential_requests WHERE status = 'pending' AND name = ? AND root_job_id IS ?").get(nm, credentialRoot);
     if (!dup) {
-      db.prepare("INSERT INTO credential_requests (id, name, url, reason, status, agent_id, resume, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)")
-        .run(uid(), nm.slice(0, 50), String(args.url ?? ""), String(args.reason ?? "").slice(0, 200), agentId ?? null, String(args.task ?? "").slice(0, 500), now());
+      db.prepare("INSERT INTO credential_requests (id, name, url, reason, status, agent_id, resume, root_job_id, created_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)")
+        .run(uid(), nm.slice(0, 50), String(args.url ?? ""), String(args.reason ?? "").slice(0, 200), agentId ?? null, String(args.task ?? "").slice(0, 500), credentialRoot, now());
     }
     return `사용자 화면에 "${nm}" 계정 입력 팝업을 띄웠습니다. 입력된 계정은 암호화되어 저장되고, 사용자가 입력을 완료하면 작업이 자동으로 재개됩니다. 이번 응답은 "화면의 팝업에 계정을 입력해 달라"고만 안내하고 마치세요 — 절대 채팅으로 비밀번호를 직접 받지 마세요.`;
   }
@@ -845,6 +847,26 @@ export function delegateTimeout(parent?: AbortSignal): AbortSignal | null {
   return ctl.signal;
 }
 
+function agentFailureResult(e: unknown, signal?: AbortSignal): string {
+  const reason = signal?.reason as any;
+  if (signal?.aborted && reason?.name === "AbortError")
+    return "사용자 중지로 작업이 취소되었습니다 — 완료되지 않았습니다.";
+  if (signal?.aborted && reason?.name === "TimeoutError")
+    return "시간 제한으로 작업이 중단되었습니다 — 완료되지 않았습니다.";
+  const message = e instanceof Error ? e.message : String(e ?? "알 수 없는 오류");
+  return `에이전트 오류: ${friendlyProviderError(message).slice(0, 1000)}`;
+}
+
+// 결과 행을 먼저 남기고 running blocker를 해제하는 과정을 한 트랜잭션으로 묶는다.
+// 형제 실행이 동시에 끝나도 마지막 blocker를 해제한 쪽이 모든 결과를 본 뒤 루트를 확정한다.
+function persistAgentRunTerminal(state: TeamAgentState) {
+  db.transaction(() => {
+    recordCommandResult(state.rootJobId, `run:${state.runId}`, state.result?.trim() || "(결과 없음)", state.id);
+    db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
+      .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), state.runId);
+  })();
+}
+
 export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, signal?: AbortSignal): Promise<void> {
   const prev = runTails.get(state.id);
   const stop = new AbortController();
@@ -853,10 +875,22 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
   const p = (async () => {
     // 이전 run이 끝날 때까지 대기 — 상한을 두어 위임 사슬이 얽혀도 영구 교착은 안 생김
     if (prev) await Promise.race([prev.catch(() => {}), new Promise((r) => setTimeout(r, 90_000))]);
-    await runAgentInner(state, agent, emit, runSignal);
+    const { withRootJob } = await import("./command-delivery");
+    if (state.rootJobId) await withRootJob(state.rootJobId, () => runAgentInner(state, agent, emit, runSignal));
+    else await runAgentInner(state, agent, emit, runSignal);
   })();
   runTails.set(state.id, p);
-  try { await p; } finally {
+  try {
+    await p;
+  } catch (e) {
+    // resolveModel 등 runAgentInner의 본문 try 진입 전 초기화 실패도 호출자에게 안전한
+    // terminal 상태로 돌려준다. 호출자는 이 상태를 평소와 동일하게 DB에 기록한다.
+    state.status = "error";
+    state.result = agentFailureResult(e, runSignal);
+  } finally {
+    // runAgentInner의 자체 finally 전에 실패한 경우에도 전역 실행 표시를 반드시 정리한다.
+    runningAgents.delete(state.id);
+    agentActivity.delete(state.id);
     runStops.delete(stop);
     if (runTails.get(state.id) === p) runTails.delete(state.id);
   }
@@ -904,7 +938,12 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
   // 최근 4회 교환을 주입해 연속 작업(재지시·이어하기)의 문맥을 잇는다.
   let sessionCtx = "";
   try {
-    const recent = db.prepare("SELECT role, content FROM messages WHERE conversation_id = ? AND active = 1 ORDER BY created_at DESC LIMIT 8").all(agentSessionConvId(agent.id)) as { role: string; content: string }[];
+    const runRow = db.prepare("SELECT conversation_id FROM agent_runs WHERE id = ? AND agent_id = ?").get(state.runId, agent.id) as { conversation_id: string | null } | undefined;
+    const contextConvId = runRow?.conversation_id ?? agentSessionConvId(agent.id);
+    const recent = db.prepare(`SELECT m.role, m.content FROM messages m
+      JOIN conversations c ON c.id = m.conversation_id
+      WHERE m.conversation_id = ? AND c.agent_id = ? AND m.active = 1
+      ORDER BY m.created_at DESC LIMIT 8`).all(contextConvId, agent.id) as { role: string; content: string }[];
     if (recent.length) {
       const lines = recent.reverse().map((m) => `${m.role === "user" ? "[지시]" : "[결과]"} ${m.content.replace(/\s+/g, " ").slice(0, 300)}`);
       sessionCtx = `\n\n[최근 작업 기록 — 이 봇의 직전 세션입니다. 이번 지시의 연속 작업이면 맥락으로 활용하고, 무관한 내용은 무시하세요]\n${lines.join("\n")}`.slice(0, 3500);
@@ -1083,7 +1122,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
       // 위임 호출이 여러 개면 병렬로 실행하고 나머지는 순차 유지 (페이지·경로 공유 충돌 방지).
       const tcs = res.toolCalls;
       const outs = await execToolBatch(tcs, {
-        agentId: agent.id, context: state.task, browserKey: state.runId, signal, depth: state.depth, chain: state.chain, emit: trackEmit, fileRoot: state.fileRoot,
+        agentId: agent.id, context: state.task, browserKey: state.runId, signal, depth: state.depth, chain: state.chain, emit: trackEmit, fileRoot: state.fileRoot, rootJobId: state.rootJobId,
         onStart: (n) => { calledTools.add(n); trackEmit({ type: "agent_step", agentId: state.id, runId: state.runId, tool: n }); },
         onGate: (n) => gatedTools.add(n),
         onEnd: (n, out, ok, ms) => {
@@ -1108,7 +1147,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
   } catch (e) {
     state.status = "error";
     // 프로바이더 원문(JSON 덩어리)만 남으면 실패 이유를 알 수 없다 — 원인·조치가 보이는 안내로 바꿔 보고한다
-    state.result = `에이전트 오류: ${friendlyProviderError((e as Error).message)}`;
+    state.result = agentFailureResult(e, signal);
     // 시간 초과로 중단된 경우 — 이미 확보한 도구 결과가 있으면 짧은 추가 시간으로 부분 보고서를 만든다.
     // (사용자 중지 AbortError는 제외 — signal.reason이 TimeoutError일 때만. 결과 전송 실패보다 부분 보고가 낫다)
     // 사용자 중지(AbortError)로 끊긴 실행은 부분 보고를 만들지 않는다 — 만들면 "완료"가 돼 회신 재실행이 다시 번진다
@@ -1243,6 +1282,7 @@ export async function runTeamTasks(
   tasks: PlanTask[],
   emit: Emit,
   signal?: AbortSignal,
+  rootJobId?: string,
 ): Promise<TeamAgentState[]> {
   const { existing, busyIds } = rosterInfo();
   const convRow = db.prepare("SELECT agent_id, workspace_id FROM conversations WHERE id = ?").get(convId) as any;
@@ -1251,15 +1291,18 @@ export async function runTeamTasks(
   const states: TeamAgentState[] = tasks.map((t) => {
     const reuse = t.agent ? existing.find((a) => a.name === t.agent && !busyIds.has(a.id) && !a.is_boss) : undefined;
     const agent = reuse ?? createAgent(t, convOwner); // 팀 생성 봇의 상위 = 이 대화를 소유한 봇
+    // 기본 모델 확인이 실패하면 아직 run 이력을 만들지 않는다.
+    const selectedModel = agent.model ?? defaultModel();
     const runId = uid();
-    db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, ?, ?, 'running', ?)")
-      .run(runId, agent.id, convId, t.task, now());
+    db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, root_job_id, created_at) VALUES (?, ?, ?, ?, 'running', ?, ?)")
+      .run(runId, agent.id, convId, t.task, rootJobId ?? null, now());
     return {
       id: agent.id, runId,
       name: agent.name, avatar: agent.avatar ?? "🤖",
       role: agent.role_prompt, task: t.task,
-      model: agent.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: 0,
+      model: selectedModel, status: "running", steps: 0, toolLog: [], depth: 0,
       fileRoot: convFileRoot ?? workspaceRoot(agent.workspace_id),
+      rootJobId,
     };
   });
   emit({ type: "team_plan", agents: states.map((s) => ({ id: s.id, name: s.name, avatar: s.avatar, role: s.role, task: s.task, model: s.model, model_label: modelLabel(s.model) })) });
@@ -1270,8 +1313,8 @@ export async function runTeamTasks(
     const childSig = delegateTimeout(signal);
     if (!childSig) { s.status = "error"; s.result = "상위 작업이 이미 중단돼 실행하지 않았습니다"; }
     else await runAgent(s, agent, emit, childSig);
-    db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
-      .run(s.status, s.result ?? null, s.steps, JSON.stringify(s.toolLog), now(), s.runId);
+    persistAgentRunTerminal(s);
+    if (rootJobId) await finalizeCommandIfReady(rootJobId);
     emit({ type: "agent_done", agentId: s.id, status: s.status, result: (s.result ?? "").slice(0, 4000) });
   }));
 
@@ -1294,38 +1337,57 @@ export interface DetachedRunOpts {
   runId?: string;                      // 기존 run 이어달리기 (resumeAgentRun)
   fileRoot?: string;                   // C19 — 프로젝트 파일 네임스페이스 (없으면 봇 배정 프로젝트 → 그래도 없으면 WORK_DIR)
   chain?: string[];                    // 이 실행을 일으킨 상위 봇 id (봇 메시지·회신) — 되돌아가는 지시·메시지 차단
+  rootJobId?: string | null;
   onDone?: (state: TeamAgentState) => void | Promise<void>; // agent_messages 갱신 같은 후처리
 }
 
 export function runAgentDetached(agent: Agent, o: DetachedRunOpts): { runId: string; done: Promise<TeamAgentState> } {
   const runId = o.runId ?? uid();
+  // 기본 모델 부팅 실패 시 running 이력이나 독립 루트 명령을 먼저 만들지 않는다.
+  const selectedModel = o.model ?? agent.model ?? defaultModel();
+  const storedRoot = o.runId
+    ? (db.prepare("SELECT root_job_id FROM agent_runs WHERE id = ?").get(runId) as { root_job_id: string | null } | undefined)?.root_job_id
+    : null;
+  let inheritedRoot = o.rootJobId ?? storedRoot ?? null;
+  let ownsRoot = false;
+  // 명시적 독립 알림 실행만 자체 전달 단위를 만든다. 이미 루트에 속한 하위 실행은
+  // 부모 명령의 최종 집계에만 참여하며 별도 알림을 발송하지 않는다.
+  if (!inheritedRoot && o.notifyTitle) {
+    inheritedRoot = createCommandJob({
+      source: "notification",
+      request: `${o.notifyTitle}: ${o.sessionTask ?? o.label}`,
+      ownerAgentId: agent.id,
+      dedupeKey: `run:${runId}`,
+    });
+    ownsRoot = true;
+  }
   if (o.runId) db.prepare("UPDATE agent_runs SET status = 'running' WHERE id = ?").run(runId);
-  else db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, routine_id, created_at) VALUES (?, ?, NULL, ?, 'running', ?, ?)")
-    .run(runId, agent.id, o.label.slice(0, 300), o.routineId ?? null, now());
+  else db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, routine_id, root_job_id, created_at) VALUES (?, ?, NULL, ?, 'running', ?, ?, ?)")
+    .run(runId, agent.id, o.label.slice(0, 300), o.routineId ?? null, inheritedRoot, now());
   const state: TeamAgentState = {
     id: agent.id, runId, name: agent.name, avatar: agent.avatar ?? "🤖", role: agent.role_prompt,
-    task: o.task, model: o.model ?? agent.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: 0,
+    task: o.task, model: selectedModel, status: "running", steps: 0, toolLog: [], depth: 0,
     verifyIntent: o.verifyIntent,
     fileRoot: o.fileRoot ?? workspaceRoot(agent.workspace_id),
     chain: o.chain,
+    rootJobId: inheritedRoot ?? undefined,
   };
   const done = (async () => {
     try { await runAgent(state, agent, () => {}, delegateTimeout()!); }
-    catch (e) { state.status = "error"; state.result = (e as Error).message; }
-    db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
-      .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
-    // 세션 기록용 보고서 정리(LLM 호출)는 백그라운드로 — 회신 처리·루틴 결과 반환이 정리를 기다리지 않게
-    void (async () => {
-      const { appendToAgentSession } = await import("./routes/chat");
-      const { normalizeReport } = await import("./report");
-      const meta = JSON.stringify({ type: "tools", events: state.toolLog.map((l) => ({ type: "read", title: l.tool, url: "" })) });
-      const report = await normalizeReport(agent.name, o.sessionTask ?? o.label, state.result?.trim() || "(결과 없음)", state.toolLog.map((l) => l.tool));
-      appendToAgentSession(agentSessionConvId(agent.id), o.sessionTitle ?? o.label, report, agent.model, meta);
-      if (o.replyTo)
-        appendToAgentSession(agentSessionConvId(o.replyTo.id), `[${agent.name} 회신 도착] ${(o.sessionTask ?? o.label).slice(0, 100)}`, report, o.replyTo.model, meta);
-    })().catch((e) => console.error(`[mybot] 봇 세션 기록 실패 (${agent.name}):`, (e as Error).message));
-    await o.onDone?.(state);
-    if (o.notifyTitle) { const { notifyResult } = await import("./notify"); notifyResult({ title: state.status === "done" ? o.notifyTitle : `${o.notifyTitle} — 실패`, agents: [agent.name], request: o.sessionTask ?? o.label, content: state.result ?? "(결과 없음)", dedupeKey: `run:${runId}` }); }
+    catch (e) { state.status = "error"; state.result = agentFailureResult(e); }
+    // 후처리가 새 하위 실행을 등록하기 전에 현재 run을 done으로 바꾸면 루트가 잠깐
+    // blocker 0개로 관측된다. 콜백 등록이 끝날 때까지 DB 상태는 running으로 유지한다.
+    try {
+      await o.onDone?.(state);
+    } catch (e) {
+      state.status = "error";
+      const callbackFailure = `후처리 오류: ${friendlyProviderError(e instanceof Error ? e.message : String(e)).slice(0, 500)}`;
+      state.result = state.result?.trim() ? `${state.result}\n\n${callbackFailure}` : callbackFailure;
+    }
+    persistAgentRunTerminal(state);
+    if (state.rootJobId) await finalizeCommandIfReady(state.rootJobId);
+    if (ownsRoot && inheritedRoot)
+      await completeCommand(inheritedRoot, state.result?.trim() || "(결과 없음)", `run:${runId}`);
     return state;
   })();
   done.catch((e) => console.error(`[mybot] 분리 실행 실패 (${o.label.slice(0, 60)}):`, (e as Error).message));
@@ -1344,6 +1406,7 @@ export async function resumeAgentRun(run: any): Promise<void> {
     task: `${run.task}\n\n[자동 재개 ${n}회차 — 서버 재시작으로 이전 실행이 중단됐습니다. 중단 전 사용한 도구: ${prevTools || "없음"}. 이미 확보한 결과를 반복 조회하지 말고 이어서 완료하세요.]`,
     sessionTitle: `[재개된 작업 ${n}회차] ${run.task}`,
     sessionTask: run.task,
+    rootJobId: run.root_job_id,
   }).done;
 }
 
@@ -1356,7 +1419,21 @@ export const teamRoute = new Hono()
     const tasks = (body.tasks ?? []) as PlanTask[];
     const conv = db.prepare("SELECT * FROM conversations WHERE id = ?").get(convId) as any;
     const msg = db.prepare("SELECT * FROM messages WHERE id = ?").get(msgId) as any;
-    if (!conv || !msg || !Array.isArray(tasks) || !tasks.length) return c.json({ error: "conversationId/messageId/tasks 필요" }, 400);
+    let planMeta: any = null;
+    try { planMeta = msg?.search_meta ? JSON.parse(msg.search_meta) : null; } catch {}
+    if (!conv || !msg || msg.conversation_id !== convId || msg.role !== "assistant"
+      || msg.command_status !== "awaiting_confirmation" || planMeta?.type !== "team" || planMeta?.status !== "pending"
+      || !Array.isArray(tasks) || !tasks.length)
+      return c.json({ error: "대화에 속한 승인 대기 팀 계획이 필요합니다" }, 400);
+    const rootJobId = msg.root_job_id as string | null;
+    if (!rootJobId) return c.json({ error: "이미 실행했거나 만료된 팀 계획입니다" }, 409);
+    const claimed = db.prepare("UPDATE command_jobs SET status = 'running' WHERE id = ? AND status = 'awaiting_confirmation'").run(rootJobId);
+    if (!claimed.changes) return c.json({ error: "이미 실행했거나 만료된 팀 계획입니다" }, 409);
+    const messageClaimed = db.prepare("UPDATE messages SET command_status = 'running' WHERE id = ? AND command_status = 'awaiting_confirmation'").run(msgId);
+    if (!messageClaimed.changes) {
+      db.prepare("UPDATE command_jobs SET status = 'awaiting_confirmation' WHERE id = ? AND status = 'running'").run(rootJobId);
+      return c.json({ error: "이미 실행했거나 만료된 팀 계획입니다" }, 409);
+    }
     // 실행은 요청 연결과 분리 — 화면 이탈로 작업이 죽지 않고 /stop으로만 중단된다
     const runCtl = new AbortController();
     const signal = AbortSignal.any([runCtl.signal, AbortSignal.timeout((Number(getSetting("run_total_cap_sec")) || 900) * 1000)]); // 무응답 hang 방지 총 상한
@@ -1371,7 +1448,7 @@ export const teamRoute = new Hono()
           try { controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)); } catch {}
         };
         try {
-          const states = await runTeamTasks(convId, tasks, (ev) => send("team", ev), signal);
+          const states = await runTeamTasks(convId, tasks, (ev) => send("team", ev), signal, rootJobId);
 
           // 대장이 봇 결과들을 취합해 최종 답변 작성
           const history: ChatMessage[] = [
@@ -1398,7 +1475,7 @@ export const teamRoute = new Hono()
           let usage: any = null;
           let usedModel = realModel;
           for await (const ev of streamChat(endpoint, realModel, history, { signal })) {
-            if (ev.type === "content" && ev.text) { content += ev.text; send("delta", { id: msgId, text: ev.text }); }
+            if (ev.type === "content" && ev.text) content += ev.text;
             else if (ev.type === "usage") { usage = ev.usage; if (ev.model) usedModel = ev.model; }
             else if (ev.type === "error") send("error", { message: ev.error });
             else if (ev.type === "done" && ev.model) usedModel = ev.model;
@@ -1408,19 +1485,18 @@ export const teamRoute = new Hono()
             type: "team", status: "done",
             agents: states.map((a) => ({ name: a.name, avatar: a.avatar, role: a.role, task: a.task, model: a.model, model_label: modelLabel(a.model), status: a.status, result: (a.result ?? "").slice(0, 4000) })),
           };
-          db.prepare("UPDATE messages SET content = ?, model = ?, search_meta = ?, tokens_in = ?, tokens_out = ? WHERE id = ?")
-            .run(content, usedModel, JSON.stringify(meta), usage?.prompt_tokens ?? null, usage?.completion_tokens ?? null, msgId);
+          db.prepare("UPDATE messages SET model = ?, search_meta = ?, tokens_in = ?, tokens_out = ? WHERE id = ?")
+            .run(usedModel, JSON.stringify(meta), usage?.prompt_tokens ?? null, usage?.completion_tokens ?? null, msgId);
+          const { completeCommand } = await import("./command-delivery");
+          await completeCommand(rootJobId, content, `msg:${msgId}`);
+          const finalMessage = db.prepare("SELECT * FROM messages WHERE id = ?").get(msgId) as any;
+          send("delta", { id: msgId, text: finalMessage.content });
           const sibs = db.prepare("SELECT * FROM messages WHERE parent_id IS ?").all(msg.parent_id) as any[];
           const idx = sibs.findIndex((s) => s.id === msgId);
           send("done", { message: { ...(db.prepare("SELECT * FROM messages WHERE id = ?").get(msgId) as any), sibling_count: sibs.length, sibling_index: idx } });
-          if (content) notifyResult({
-            title: conv.title,
-            agents: states.map((a) => a.name),
-            request: userRequest,
-            content,
-            dedupeKey: `msg:${msgId}`,
-          });
         } catch (e: any) {
+          const failure = `팀 계획 실행 실패: ${String(e?.message ?? e).slice(0, 500)}`;
+          await completeCommand(rootJobId, failure, `error:${msgId}`).catch(() => {});
           if (e?.name !== "AbortError") send("error", { message: String(e?.message ?? e) });
         } finally {
           activeRuns.delete(convId);

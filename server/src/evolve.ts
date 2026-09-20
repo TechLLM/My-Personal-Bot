@@ -3,15 +3,20 @@
 import { Hono } from "hono";
 import { db, uid, now, getSetting, setSetting } from "./db";
 import { emitUI } from "./events";
-import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, readdirSync, statSync, existsSync, lstatSync, realpathSync } from "node:fs";
+import { join, resolve, relative, isAbsolute } from "node:path";
+import type { EvalVerdict } from "./evaluate";
+import { evaluationCheck, evaluationGate, evaluationStatus } from "./evaluation-evidence";
+import * as isolation from "./evolve/isolation";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const EVOLVE_DIR = join(ROOT, "evolve");
 // 두 환경 분리 — 개발 인스턴스에서만 후보 생성·계측·판정을 실행하고,
 // 서비스 인스턴스는 검증된 개선 패키지를 받아 사용자의 버전 업데이트로만 적용한다.
 export const IS_DEV = process.env.MYBOT_ENV === "dev";
-const SERVICE_URL = process.env.MYBOT_SERVICE_URL ?? "http://127.0.0.1:5274";
+const isDevRuntime = () => process.env.MYBOT_ENV === "dev";
+const ISOLATED_PRODUCTION_UNAVAILABLE = "isolated-production-unavailable — E2-B 실제 골든 브리지가 준비되지 않았습니다";
+const LEGACY_BENCH_UNAVAILABLE = "legacy-bench-unavailable — 격리되지 않은 골든 실행은 비활성화되었습니다";
 
 // ---------- 등록부·골든 과제 로더 ----------
 
@@ -70,7 +75,7 @@ export interface RunOutcome {
   content2?: string;                     // G5 같은 2턴 과제의 첫 응답
 }
 
-export interface CheckResult { pass: boolean; detail: string }
+export interface CheckResult { pass: boolean; detail: string; evaluationStatus?: "scored" | "inconclusive" }
 
 // 응답 텍스트에서 숫자를 추출해 실측 DB 카운트와 대조
 function checkDbCount(content: string, query: string): CheckResult {
@@ -101,7 +106,7 @@ function checkLifecycle(name: string, sinceMs: number): CheckResult {
   return { pass, detail: `생성 흔적 ${created ? "있음" : "없음"}, 최종 존재 ${exists ? "함(미삭제)" : "없음(삭제됨)"}` };
 }
 
-export async function checkTask(task: GoldenTask, out: RunOutcome, sinceMs: number, evaluateFn: (task: string, result: string) => Promise<number>): Promise<{ pass: boolean; checks: CheckResult[] }> {
+export async function checkTask(task: GoldenTask, out: RunOutcome, sinceMs: number, evaluateFn: (task: string, result: string) => Promise<EvalVerdict>): Promise<{ pass: boolean; checks: CheckResult[] }> {
   const results: CheckResult[] = [];
   for (const c of task.checks) {
     switch (c.type) {
@@ -121,8 +126,10 @@ export async function checkTask(task: GoldenTask, out: RunOutcome, sinceMs: numb
         results.push(checkFileExists(c.glob!, c.fresh_minutes ?? 10));
         break;
       case "eval_min": {
-        const score = await evaluateFn(task.prompt, out.content);
-        results.push({ pass: score >= (c.score ?? 70), detail: `평가 ${score}점 (기준 ${c.score ?? 70})` });
+        let evaluation: unknown;
+        try { evaluation = await evaluateFn(task.prompt, out.content); }
+        catch { evaluation = null; } // 원문 제공자 오류를 저장하거나 정상 0점으로 숨기지 않는다.
+        results.push(evaluationCheck(evaluation, c.score ?? 70));
         break;
       }
       case "lifecycle":
@@ -168,53 +175,16 @@ export function cycleLockHeld(): boolean {
 
 // 벤치 중 생긴 승인 요청 자동 처리 (approvals:"auto" 과제 전용 — 실행 창 내 요청만)
 export function autoResolveApprovals(_agentId: string, sinceMs: number) {
-  // 골든 과제는 직렬 실행 — 창 안의 pending 승인은 전부 이 과제의 인과 사슬이다.
-  // agent_id로 좁히면 조직 규칙(생성·삭제는 Eggbot 전담)으로 다른 봇이 올린 승인이 영구 방치된다.
-  const rows = db.prepare("SELECT * FROM approval_requests WHERE status = 'pending' AND created_at > ?").all(sinceMs) as any[];
-  for (const req of rows) {
-    db.prepare("UPDATE approval_requests SET status = 'approved', resolved_at = ? WHERE id = ?").run(now(), req.id);
-    import("./approvals").then((m) => m.executeApproved(req)).catch(() => {});
-  }
+  void sinceMs;
+  throw new Error(LEGACY_BENCH_UNAVAILABLE);
 }
 
 // ---------- 골든 과제 실행 — 실제 봇 파이프라인(runAgentDetached)으로 수행 ----------
 
 export async function runGoldenTask(task: GoldenTask, timeoutMs = 240_000): Promise<RunOutcome> {
-  const { runAgentDetached, getAgent, ensureBossAgent, findAgentByName } = await import("./team");
-  const agent = (task.agent ? findAgentByName(task.agent) : null) ?? ensureBossAgent();
-  const started = now();
-  const state = await runOnce(agent.id, task.prompt, `[골든 ${task.id}]`, timeoutMs);
-  const out: RunOutcome = {
-    content: state.result ?? "", toolLog: state.toolLog ?? [], latencyMs: now() - started,
-    tokensIn: 0, tokensOut: 0, runId: state.runId,
-  };
-  // 2턴 과제 — 첫 응답을 보존하고 후속 프롬프트의 응답이 최종 content가 된다
-  if (task.then) {
-    out.content2 = out.content;
-    const s2 = await runOnce(agent.id, task.then, `[골든 ${task.id}-2]`, timeoutMs);
-    out.content = s2.result ?? "";
-    out.toolLog = [...out.toolLog, ...(s2.toolLog ?? [])];
-    out.latencyMs = now() - started;
-  }
-  return out;
-}
-
-async function runOnce(agentId: string, task: string, label: string, timeoutMs: number) {
-  const { runAgentDetached, getAgent } = await import("./team");
-  const agent = getAgent(agentId)!;
-  // 골든 과제는 개발 샌드박스에서 직렬 실행 — 승인 게이트 도구(shell_run 등)를 쓰는 과제도
-  // 사람 없이 계측돼야 하므로 승인기를 항상 돌린다
-  const since = now();
-  const { done } = runAgentDetached(agent, { label, task, verifyIntent: false });
-  const approver = setInterval(() => autoResolveApprovals(agentId, since), 3_000);
-  try {
-    return await Promise.race([
-      done,
-      new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`골든 과제 시간 초과(${Math.round(timeoutMs / 1000)}초)`)), timeoutMs)),
-    ]);
-  } finally {
-    if (approver) clearInterval(approver);
-  }
+  void task;
+  void timeoutMs;
+  throw new Error(LEGACY_BENCH_UNAVAILABLE);
 }
 
 // ---------- 벤치 — 골든 세트를 직렬로 n회 돌려 통과율·지연을 측정 ----------
@@ -223,41 +193,12 @@ export interface BenchSample { taskId: string; pass: boolean; latencyMs: number;
 export interface BenchResult {
   passRate: number; avgLatencyMs: number; samples: BenchSample[];
   byTask: Record<string, { n: number; pass: number }>;
+  evaluationStatus?: "complete" | "inconclusive"; // 없으면 이전 계측이므로 재측정 필요
 }
 
 export async function runBench(opts: { samples?: number; includeHoldout?: boolean; onlyTasks?: string[] } = {}): Promise<BenchResult> {
-  const { evaluateResult } = await import("./evaluate");
-  const { resolveModel, defaultModelId } = await import("./providers");
-  const { endpoint, model } = resolveModel(defaultModelId());
-  const evaluateFn = async (t: string, r: string) => (await evaluateResult(endpoint, model, t, r)).score;
-
-  const samples = opts.samples ?? loadSurfaces().limits.benchSamples;
-  let tasks = loadGoldenTasks(opts.includeHoldout);
-  if (opts.onlyTasks?.length) tasks = tasks.filter((t) => opts.onlyTasks!.includes(t.id));
-  const out: BenchResult = { passRate: 0, avgLatencyMs: 0, samples: [], byTask: {} };
-
-  for (const task of tasks) {
-    out.byTask[task.id] = { n: 0, pass: 0 };
-    for (let i = 0; i < samples; i++) {
-      const since = now();
-      try {
-        const run = await runGoldenTask(task);
-        const verdict = await checkTask(task, run, since, evaluateFn);
-        out.samples.push({ taskId: task.id, pass: verdict.pass, latencyMs: run.latencyMs, checks: verdict.checks });
-        out.byTask[task.id].n++;
-        if (verdict.pass) out.byTask[task.id].pass++;
-      } catch (e) {
-        // env 의존 과제(G10)는 환경 실패를 표본에서 제외 — 나머지는 실패 표본으로 기록
-        if (task.env) continue;
-        out.samples.push({ taskId: task.id, pass: false, latencyMs: 0, checks: [], error: (e as Error).message });
-        out.byTask[task.id].n++;
-      }
-    }
-  }
-  const n = out.samples.length;
-  out.passRate = n ? out.samples.filter((s) => s.pass).length / n : 0;
-  out.avgLatencyMs = n ? Math.round(out.samples.reduce((a, s) => a + s.latencyMs, 0) / n) : 0;
-  return out;
+  void opts;
+  return { passRate: 0, avgLatencyMs: 0, samples: [], byTask: {}, evaluationStatus: "inconclusive" };
 }
 
 // ---------- S3: 후보 → preflight → 계측 → 판정 → 되돌림 ----------
@@ -276,83 +217,98 @@ interface AppliedRevert { revert: () => void; describe: string }
 
 // 표면에 후보를 적용하고 되돌림 함수를 반환 — DB는 이전 값, 파일은 원본 바이트를 보존
 export function applyCandidate(c: Candidate): AppliedRevert {
-  const surfaces = loadSurfaces();
-  const surf = surfaces.surfaces.find((s) => s.id === c.surface);
-  if (!surf) throw new Error(`미등록 표면: ${c.surface}`);
-
-  if (surf.kind === "db") {
-    const col = c.column ?? surf.column;
-    if (!col || col === "*") throw new Error("db 표면은 column 지정 필요");
-    if (!/^[a-z_]+$/.test(col)) throw new Error(`컬럼명 불가: ${col}`);
-    const table = surf.table!;
-    const row = db.prepare(`SELECT rowid, ${col} FROM ${table} WHERE name = ? OR id = ?`).get(c.target, c.target) as any;
-    if (!row) throw new Error(`대상 없음: ${table}.${c.target}`);
-    const oldVal = row[col];
-    db.prepare(`UPDATE ${table} SET ${col} = ? WHERE rowid = ?`).run(c.newValue ?? "", row.rowid);
-    return { revert: () => db.prepare(`UPDATE ${table} SET ${col} = ? WHERE rowid = ?`).run(oldVal, row.rowid), describe: `${table}.${col}(${c.target})` };
-  }
-
-  // code 표면
-  const path = c.filePath ?? c.target;
-  const abs = join(ROOT, path);
-  if (!existsSync(abs)) throw new Error(`파일 없음: ${path}`);
-  if (isProtectedPath(path)) throw new Error(`보호 경로는 수정 불가: ${path}`);
-  const original = readFileSync(abs, "utf8");
-  const { writeFileSync } = require("node:fs") as typeof import("node:fs");
-  writeFileSync(abs, c.newContent ?? "");
-  return { revert: () => writeFileSync(abs, original), describe: `code:${path}` };
+  void c;
+  throw new Error("live-candidate-application-disabled — 격리 비교 외 후보 적용은 허용되지 않습니다");
 }
 
-// preflight — 계측 전 통과해야 할 결정적 검사. 실패 사유 배열 반환 (빈 배열 = 통과)
-export async function preflightCandidate(c: Candidate): Promise<string[]> {
+const DB_COLUMNS: Record<string, readonly string[]> = {
+  "skill.prompt": ["prompt"],
+  "agent.role": ["role_prompt"],
+  "agent.model": ["model"],
+  "agent.tools": ["tools"],
+  "routine.config": ["schedule", "prompt", "enabled"],
+};
+
+function registeredDbColumn(surface: Surfaces["surfaces"][number], requested?: string): string | null {
+  const column = requested ?? (surface.column === "*" ? undefined : surface.column);
+  return column && DB_COLUMNS[surface.id]?.includes(column) ? column : null;
+}
+
+function pathMatchesGlob(path: string, glob?: string): boolean {
+  if (!glob) return false;
+  const normalizedGlob = glob.replace(/\\/g, "/");
+  if (normalizedGlob.endsWith("/**")) {
+    const prefix = normalizedGlob.slice(0, -3).replace(/\/$/, "");
+    return path === prefix || path.startsWith(prefix + "/");
+  }
+  return path === normalizedGlob;
+}
+
+async function validateCandidateStatic(c: Candidate): Promise<string[]> {
   const fails: string[] = [];
   const surfaces = loadSurfaces();
   const surf = surfaces.surfaces.find((s) => s.id === c.surface);
   if (!surf) return [`미등록 표면: ${c.surface}`];
 
   if (surf.kind === "db") {
-    const col = c.column ?? surf.column;
-    const row = db.prepare(`SELECT rowid FROM ${surf.table} WHERE name = ? OR id = ?`).get(c.target, c.target);
-    if (!row) fails.push(`대상 없음: ${surf.table}.${c.target}`);
+    const col = registeredDbColumn(surf, c.column);
+    if (!col) return [`등록되지 않은 컬럼: ${c.surface}.${c.column ?? "(없음)"}`];
     if (!c.newValue?.trim()) fails.push("newValue 비어 있음");
-    if (col === "model" && c.newValue) {
-      const { listAllModelIds } = await import("./providers");
-      if (!(await listAllModelIds()).has(c.newValue)) fails.push(`미인증 모델: ${c.newValue}`);
-    }
     if (surf.table === "agents" && col === "role_prompt" && c.newValue && !c.newValue.includes("[전문가 수행 기준]"))
       fails.push("역할문에서 [전문가 수행 기준] 프레임이 빠짐 — 약화로 간주");
+    if (!fails.length) {
+      const row = db.prepare(`SELECT rowid FROM ${surf.table} WHERE name = ? OR id = ?`).get(c.target, c.target);
+      if (!row) fails.push(`대상 없음: ${surf.table}.${c.target}`);
+    }
     return fails;
   }
 
-  // code 표면 preflight
-  const path = c.filePath ?? c.target;
-  if (isProtectedPath(path)) fails.push(`보호 경로: ${path}`);
-  if (!existsSync(join(ROOT, path))) fails.push(`파일 없음: ${path}`);
-  if (path.endsWith(".test.ts")) fails.push("테스트 파일은 표면 불가 — 테스트 약화 방지");
+  const rawPath = c.filePath ?? c.target;
+  const path = rawPath.replace(/\\/g, "/").replace(/^\.\//, "");
+  const root = realpathSync(ROOT);
+  const abs = resolve(root, path);
+  const rel = relative(root, abs).replace(/\\/g, "/");
+
+  // 경로·등록부·보호 규칙을 모두 확인하기 전에는 후보 대상 파일을 읽지 않는다.
+  if (!path || path.includes("\0") || isAbsolute(rawPath) || rel === ".." || rel.startsWith("../") || isAbsolute(rel))
+    fails.push(`루트 밖 경로 불가: ${rawPath}`);
+  if (!pathMatchesGlob(rel, surf.glob)) fails.push(`등록 표면 밖 경로: ${rawPath}`);
+  if (isProtectedPath(rel)) fails.push(`보호 경로: ${rel}`);
+  if (rel === "server/src/db.ts") fails.push("DB 하네스는 후보 대상 불가");
+  if (/(^|\/)bun\.lock$|(^|\/)package\.json$|(^|\/)tsconfig\.json$/.test(rel)) fails.push(`하네스 파일은 후보 대상 불가: ${rel}`);
+  if (/(^|\/)[^/]+\.test\.[^/]+$/.test(rel)) fails.push("테스트 파일은 표면 불가 — 테스트 약화 방지");
+  if (!existsSync(abs)) fails.push(`파일 없음: ${rel}`);
+  if (!fails.length) {
+    try {
+      if (!lstatSync(abs).isFile()) fails.push(`일반 파일이 아님: ${rel}`);
+      else if (realpathSync(abs) !== abs) fails.push(`심볼릭 링크는 후보 대상 불가: ${rel}`);
+    } catch {
+      fails.push(`파일 검사 실패: ${rel}`);
+    }
+  }
+
   const content = c.newContent ?? "";
   if (!content.trim()) fails.push("newContent 비어 있음");
   const secretRe = /api[_-]?key\s*[=:]\s*["'][A-Za-z0-9_-]{16,}|BEGIN [A-Z ]*PRIVATE KEY|password\s*[=:]\s*["'][^"']{6,}/i;
   if (secretRe.test(content)) fails.push("비밀값 패턴 포함");
-  if (existsSync(join(ROOT, path))) {
-    const oldLines = readFileSync(join(ROOT, path), "utf8").split("\n").length;
-    const diffLines = Math.abs(content.split("\n").length - oldLines);
-    if (diffLines > surfaces.limits.diffMaxLines) fails.push(`변경 ${diffLines}줄 > 상한 ${surfaces.limits.diffMaxLines}줄`);
-  }
-  if (!fails.length) {
-    // 적용 후 타입체크·테스트 통과 필수 — 코드 후보의 최소 안전선
-    const applied = applyCandidate(c);
-    try {
-      const tsc = Bun.spawnSync(["bunx", "tsc", "--noEmit", "-p", "."], { cwd: ROOT });
-      if (tsc.exitCode !== 0) fails.push("tsc --noEmit 실패: " + tsc.stderr.toString().slice(0, 300));
-      const tst = Bun.spawnSync(["bun", "test", "server/src"], { cwd: ROOT });
-      if (tst.exitCode !== 0) fails.push("bun test 실패: " + tst.stdout.toString().slice(-300));
-    } finally { applied.revert(); }
-  }
+  if (fails.length) return fails;
+
+  const oldLines = readFileSync(abs, "utf8").split("\n").length;
+  const diffLines = Math.abs(content.split("\n").length - oldLines);
+  if (diffLines > surfaces.limits.diffMaxLines) fails.push(`변경 ${diffLines}줄 > 상한 ${surfaces.limits.diffMaxLines}줄`);
   return fails;
+}
+
+// preflight — 계측 전 통과해야 할 결정적 검사. 실패 사유 배열 반환 (빈 배열 = 통과)
+export async function preflightCandidate(c: Candidate): Promise<string[]> {
+  const fails = await validateCandidateStatic(c);
+  return fails.length ? fails : [ISOLATED_PRODUCTION_UNAVAILABLE];
 }
 
 // 결정적 판정 — 비열등 게이트 (계약 §4). inconclusive는 keep 불가.
 export function judge(baseline: BenchResult, candidate: BenchResult): { verdict: "keep" | "discard" | "inconclusive"; reason: string } {
+  const evaluationError = evaluationGate(baseline, candidate);
+  if (evaluationError) return { verdict: "inconclusive", reason: evaluationError };
   const bn = baseline.samples.length, cn = candidate.samples.length;
   const minN = loadSurfaces().limits.benchSamples;
   if (bn < minN || cn < minN) return { verdict: "inconclusive", reason: `표본 부족 (기준선 ${bn}·후보 ${cn} < ${minN})` };
@@ -369,12 +325,33 @@ export function judge(baseline: BenchResult, candidate: BenchResult): { verdict:
 
 // ---------- 사이클 본체 — 후보 하나를 끝까지 돌린다 ----------
 
-const CAND_DIR = join(EVOLVE_DIR, "candidates");
-
 export interface CycleResult { experimentId: string; verdict: string; reason: string }
 
+function boundedArmReceipt(receipt: any): object | undefined {
+  if (!receipt || typeof receipt !== "object") return undefined;
+  return {
+    arm: receipt.arm,
+    pid: receipt.pid,
+    sourceHash: receipt.sourceHash,
+    dependencyHash: receipt.dependencyHash,
+    initialStateHash: receipt.initialStateHash,
+    initialStateKind: receipt.initialStateKind,
+    harnessHash: receipt.harnessHash,
+    policyHash: receipt.policyHash,
+    runtime: receipt.runtime && { path: receipt.runtime.path, version: receipt.runtime.version },
+    runtimeExecutableHash: receipt.runtimeExecutableHash,
+    startedAt: receipt.startedAt,
+    endedAt: receipt.endedAt,
+    model: { requested: null, resolved: null, executed: false },
+    exitCode: receipt.exitCode ?? null,
+    signal: receipt.signal ?? null,
+    reasonCode: typeof receipt.reasonCode === "string" ? receipt.reasonCode.slice(0, 200) : undefined,
+  };
+}
+
 export async function runCycle(candidate: Candidate, opts: { baseline?: BenchResult; samples?: number } = {}): Promise<CycleResult> {
-  if (!IS_DEV) return { experimentId: "", verdict: "crash", reason: "서비스 인스턴스에서는 사이클을 실행할 수 없습니다 — 개발 인스턴스 전용" };
+  void opts; // 호출자가 제공한 과거 기준선은 격리 실행의 증거로 사용하지 않는다.
+  if (!isDevRuntime()) return { experimentId: "", verdict: "crash", reason: "서비스 인스턴스에서는 사이클을 실행할 수 없습니다 — 개발 인스턴스 전용" };
   const surfaces = loadSurfaces();
   if (cycleLockHeld()) return { experimentId: "", verdict: "crash", reason: "다른 사이클 실행 중 — 잠금" };
   if (todayCycleCount() >= surfaces.limits.cyclesPerDay)
@@ -388,35 +365,23 @@ export async function runCycle(candidate: Candidate, opts: { baseline?: BenchRes
   };
 
   try {
-    const pre = await preflightCandidate(candidate);
+    const pre = await validateCandidateStatic(candidate);
     if (pre.length) { finish("discard", `preflight 실패: ${pre.join("; ")}`); return { experimentId: lockId, verdict: "discard", reason: pre.join("; ") }; }
-
-    const baseline = opts.baseline ?? await runBench({ samples: opts.samples });
-    if (baseline.samples.length < surfaces.limits.benchSamples)
-      { finish("inconclusive", "기준선 표본 부족 — 계측 중단", { baseline }); return { experimentId: lockId, verdict: "inconclusive", reason: "기준선 표본 부족" }; }
-
-    const applied = applyCandidate(candidate);
-    let candBench: BenchResult;
-    try {
-      candBench = await runBench({ samples: opts.samples });
-    } finally {
-      applied.revert(); // 판정과 무관하게 즉시 원복 — keep는 승인 경로로 다시 적용한다
-    }
-
-    const j = judge(baseline, candBench);
-    if (j.verdict === "keep") {
-      // 후보 본문을 파일로 보존하고 검증된 개선 패키지를 서비스 인스턴스로 발송한다
-      // — 서비스는 패키지를 받아두기만 하고, 실제 반영은 사용자의 버전 업데이트로만 이뤄진다
-      const { mkdirSync, writeFileSync } = await import("node:fs");
-      mkdirSync(CAND_DIR, { recursive: true });
-      const cpath = join(CAND_DIR, `${lockId}.json`);
-      writeFileSync(cpath, JSON.stringify(candidate, null, 2));
-      db.prepare("UPDATE experiments SET candidate_path = ? WHERE id = ?").run(cpath, lockId);
-      const pub = await publishUpdate(candidate, baseline, candBench, j.reason, lockId);
-      console.log(`[mybot] 자기개선 패키지 발송 — ${pub}`);
-    }
-    finish(j.verdict, j.reason, { baseline, result: candBench });
-    return { experimentId: lockId, verdict: j.verdict, reason: j.reason };
+    const comparison = await isolation.runIsolatedComparison({ sourceRoot: ROOT, mode: "production", candidate });
+    const metadata = {
+      status: comparison.status,
+      promotionEligible: false,
+      reasonCode: comparison.reasonCode,
+      baseline: boundedArmReceipt(comparison.baseline),
+      candidate: boundedArmReceipt(comparison.candidate),
+    };
+    const reason = comparison.reasonCode ?? ISOLATED_PRODUCTION_UNAVAILABLE;
+    const verdict: ExperimentRow["verdict"] = comparison.status === "crash" ? "crash" : "inconclusive";
+    finish(verdict, reason, {
+      baseline: metadata.baseline as object | undefined,
+      result: metadata,
+    });
+    return { experimentId: lockId, verdict, reason };
   } catch (e) {
     finish("crash", (e as Error).message);
     return { experimentId: lockId, verdict: "crash", reason: (e as Error).message };
@@ -441,38 +406,6 @@ export interface UpdatePackage {
   source: string;              // 개발 인스턴스 실험 id
 }
 
-// 후보를 패키지 ops로 변환 — 표면과 무관하게 서비스가 그대로 적용할 수 있는 형태
-function candidateToOps(c: Candidate): UpdateOp[] {
-  const surf = loadSurfaces().surfaces.find((s) => s.id === c.surface);
-  if (surf?.kind === "db") return [{ kind: "db", surface: c.surface, target: c.target, column: c.column ?? surf.column, newValue: c.newValue ?? "" }];
-  return [{ kind: "code", surface: c.surface, target: c.filePath ?? c.target, newContent: c.newContent ?? "" }];
-}
-
-// 개발 인스턴스 — keep 판정 패키지를 서비스 API로 발송. 실패 시 outbox에 남겨 다음에 재시도할 수 있게 한다
-async function publishUpdate(candidate: Candidate, baseline: BenchResult, candBench: BenchResult, reason: string, expId: string): Promise<string> {
-  const pkg: UpdatePackage = {
-    summary: candidate.summary,
-    measurement: { baseline, candidate: candBench, verdict: "keep", reason },
-    ops: candidateToOps(candidate),
-    source: expId,
-  };
-  try {
-    const r = await fetch(`${SERVICE_URL}/api/evolve/updates`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(pkg),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!r.ok) throw new Error(`서비스 응답 ${r.status}`);
-    const d = await r.json() as any;
-    return `서비스 수령 완료 — 업데이트 ${d.id} (사용자 버전 업데이트 대기)`;
-  } catch (e) {
-    const { mkdirSync, writeFileSync } = await import("node:fs");
-    const outbox = join(EVOLVE_DIR, "updates-outbox");
-    mkdirSync(outbox, { recursive: true });
-    writeFileSync(join(outbox, `${expId}.json`), JSON.stringify(pkg, null, 2));
-    return `서비스 발송 실패(${(e as Error).message}) — outbox에 보관: ${expId}.json`;
-  }
-}
-
 // 서비스 인스턴스 — 패키지 ops를 실제 적용하고 되돌림 ops를 만든다 (사용자 버전 업데이트 경로)
 export function applyUpdateOps(ops: UpdateOp[]): { revertOps: UpdateOp[]; restartRequired: boolean } {
   const surfaces = loadSurfaces();
@@ -483,17 +416,23 @@ export function applyUpdateOps(ops: UpdateOp[]): { revertOps: UpdateOp[]; restar
     const surf = surfaces.surfaces.find((s) => s.id === op.surface);
     if (!surf) throw new Error(`미등록 표면: ${op.surface}`);
     if (op.kind === "db") {
-      const col = op.column ?? surf.column;
-      if (!col || col === "*") throw new Error("db 표면은 column 지정 필요");
-      if (!/^[a-z_]+$/.test(col)) throw new Error(`컬럼명 불가: ${col}`);
+      if (surf.kind !== "db") throw new Error(`표면 종류 불일치: ${op.surface}`);
+      const col = registeredDbColumn(surf, op.column);
+      if (!col) throw new Error(`등록되지 않은 컬럼: ${op.surface}.${op.column ?? "(없음)"}`);
       const row = db.prepare(`SELECT rowid, ${col} FROM ${surf.table} WHERE name = ? OR id = ?`).get(op.target, op.target) as any;
       if (!row) throw new Error(`대상 없음: ${surf.table}.${op.target}`);
       return { op, surf, col, rowid: row.rowid as number, revert: { ...op, newValue: row[col] ?? "" } as UpdateOp };
     }
+    if (surf.kind !== "code") throw new Error(`표면 종류 불일치: ${op.surface}`);
     const path = op.target;
     if (isProtectedPath(path)) throw new Error(`보호 경로는 업데이트 불가: ${path}`);
-    const abs = join(ROOT, path);
+    const root = realpathSync(ROOT);
+    const abs = resolve(root, path);
+    const rel = relative(root, abs).replace(/\\/g, "/");
+    if (isAbsolute(path) || rel === ".." || rel.startsWith("../") || isAbsolute(rel) || !pathMatchesGlob(rel, surf.glob))
+      throw new Error(`등록 표면 밖 경로: ${path}`);
     if (!existsSync(abs)) throw new Error(`파일 없음: ${path}`);
+    if (!lstatSync(abs).isFile() || realpathSync(abs) !== abs) throw new Error(`심볼릭 링크 또는 일반 파일이 아닌 대상: ${path}`);
     return { op, surf, abs, revert: { ...op, newContent: readFileSync(abs, "utf8") } as UpdateOp };
   });
   // 2단계: 검증을 통과한 op만 실제 반영한다
@@ -628,23 +567,17 @@ export async function materializeCandidate(p: Proposal): Promise<Candidate | nul
 
 // 매일 루틴 진입점 — 실패 분석 → 후보 탐색 → 구체화 → 사이클 (기준선은 하루 1회 측정해 재사용)
 export async function dailyEvolveTick(): Promise<string> {
-  if (!IS_DEV) return "건너뜀 — 서비스 인스턴스는 사이클을 실행하지 않습니다 (개발 인스턴스 전용)";
+  if (!isDevRuntime()) return "건너뜀 — 서비스 인스턴스는 사이클을 실행하지 않습니다 (개발 인스턴스 전용)";
   const surfaces = loadSurfaces();
   if (cycleLockHeld()) return "건너뜀 — 사이클 실행 중";
   if (todayCycleCount() >= surfaces.limits.cyclesPerDay) return `건너뜀 — 일일 상한(${surfaces.limits.cyclesPerDay})`;
-  const { failureCount, summary } = analyzeFailures();
-  const proposal = await proposeCandidate(summary);
-  if (!proposal) return `후보 없음 (실패 ${failureCount}건 분석했으나 실행 가능한 제안이 나오지 않음)`;
-  const candidate = await materializeCandidate(proposal);
-  if (!candidate) return `후보 구체화 실패 — ${proposal.summary ?? proposal.intent}`;
-  const baseline = await runBench({ samples: surfaces.limits.benchSamples });
-  const r = await runCycle(candidate, { baseline });
-  return `사이클 완료: ${r.verdict} — ${r.reason}`;
+  return `건너뜀 — ${ISOLATED_PRODUCTION_UNAVAILABLE}`;
 }
 
 // 매일 정해진 시각(기본 03:00)에 자기개선 틱 — maintenance와 같은 패턴
 let evolveTimer: ReturnType<typeof setInterval> | null = null;
 export function startEvolveLoop() {
+  if (!isDevRuntime()) return;
   if (evolveTimer) return;
   const tick = async () => {
     const hour = Number((db.prepare("SELECT value FROM settings WHERE key = 'evolve_hour'").get() as any)?.value ?? 3);
@@ -666,6 +599,7 @@ export const evolveRoute = new Hono()
     return c.json({ baseline: v ? JSON.parse(v) : null });
   })
   .post("/cycle", async (c) => {
+    if (!isDevRuntime()) return c.json({ error: "개발 인스턴스 전용" }, 403);
     const b = await c.req.json().catch(() => ({})) as { candidate?: Candidate; dry?: boolean };
     if (!b.candidate?.surface || !b.candidate?.target) return c.json({ error: "candidate {surface, target, ...} 필요" }, 400);
     if (b.dry) return c.json({ preflight: await preflightCandidate(b.candidate) });
@@ -724,4 +658,7 @@ export const evolveRoute = new Hono()
     emitUI("evolve");
     return c.json({ ok: true });
   })
-  .post("/tick", async (c) => c.json({ result: await dailyEvolveTick() }));
+  .post("/tick", async (c) => {
+    if (!isDevRuntime()) return c.json({ error: "개발 인스턴스 전용" }, 403);
+    return c.json({ result: await dailyEvolveTick() });
+  });

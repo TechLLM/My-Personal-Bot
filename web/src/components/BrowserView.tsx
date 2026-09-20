@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { X, Monitor } from "lucide-react";
+import { AuthenticatedEventStream } from "../api";
 
 interface Frame {
   image: string;
@@ -13,10 +14,10 @@ interface Frame {
 export function BrowserView({ viewKey, onClose }: { viewKey: string; onClose: () => void }) {
   const [frame, setFrame] = useState<Frame | null>(null);
   const [live, setLive] = useState(false);
-  const esRef = useRef<EventSource | null>(null);
+  const esRef = useRef<AuthenticatedEventStream | null>(null);
 
   useEffect(() => {
-    const es = new EventSource(`/api/browser/view/${encodeURIComponent(viewKey)}`);
+    const es = new AuthenticatedEventStream(`/api/browser/view/${encodeURIComponent(viewKey)}`);
     esRef.current = es;
     es.addEventListener("frame", (e) => {
       try { setFrame(JSON.parse((e as MessageEvent).data)); setLive(true); } catch {}

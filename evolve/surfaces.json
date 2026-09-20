@@ -10,6 +10,8 @@
     { "id": "src",              "kind": "code",  "glob": "server/src/**", "desc": "소스 코드 — 보호 경로 제외. preflight: tsc+test 통과·diff ≤200줄" }
   ],
   "protected": [
+    "server/src/evaluation-evidence.ts",
+    "server/src/access.ts",
     "server/src/evaluate.ts",
     "server/src/approvals.ts",
     "server/src/evolve.ts",

@@ -10,6 +10,8 @@ import { parseLeaked, execToolCall, execToolBatch, type ToolCtx } from "../tooll
 import { selfcheck } from "../selfcheck";
 import { join } from "node:path";
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { compactResult } from "../../../shared/user-facing";
+import { completeCommand, createCommandJob, recordCommandResult, withRootJob } from "../command-delivery";
 
 const FILES_DIR = join(import.meta.dir, "..", "..", "data", "files");
 mkdirSync(FILES_DIR, { recursive: true });
@@ -74,6 +76,7 @@ export function appendToAgentSession(convId: string, userText: string, assistant
   q.convTouch.run(now(), convId);
   // 봇 세션은 실행 로그 누적용 — 무한 증가를 막기 위해 최근 100건만 유지한다
   db.prepare("DELETE FROM messages WHERE conversation_id = ? AND id NOT IN (SELECT id FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 100)").run(convId, convId);
+  return { user: u, assistant: q.msgGet.get((leafOf(convId) as Msg).id) as Msg };
 }
 
 function withSiblings(m: Msg) {
@@ -353,6 +356,7 @@ export const chatRoute = new Hono()
         };
         send("conversation", { id: convId });
         let asstMsgId: string | null = null; // catch에서도 빈 자리표시를 정리할 수 있게 try 밖에서 추적
+        let rootJobId: string | null = null;
         let runKey = ""; let runOk = false; let runErr = ""; // 스킬 실행 통계 귀속용 — 런 키와 실제 결과
         try {
           let userMsg: Msg | null = null;
@@ -423,12 +427,16 @@ export const chatRoute = new Hono()
               }),
           ];
 
-          // 그룹채팅 모드 — 멤버 봇들이 차례로 응답 (@멘션으로 특정 봇만 지정 가능)
+          const asstMsg = insertMessage(convId!, userMsg ? userMsg.id : parentId, "assistant", "");
+          asstMsgId = asstMsg.id;
+          rootJobId = createCommandJob({ source: "web", conversationId: convId, assistantMessageId: asstMsg.id, request: userMsg?.content ?? recallQuery, ownerAgentId: conv?.agent_id });
+          send("assistant_message", { message: withSiblings(asstMsg) });
+
+          // 그룹채팅 모드 — 모든 멤버가 하나의 명령 자리표시와 root job을 공유한다.
           if (conv?.group_id && userMsg) {
             const { groupMembers } = await import("./groups");
             const { runAgent, defaultModel, agentSessionConvId, delegateTimeout } = await import("../team");
             const { modelLabel } = await import("../providers");
-            const { normalizeReport } = await import("../report");
             let members = groupMembers(conv.group_id);
             const mentionNames = [...userMsg.content.matchAll(/@([^\s@,]+)/g)].map((m) => m[1].trim()).filter(Boolean);
             if (mentionNames.length) {
@@ -437,40 +445,40 @@ export const chatRoute = new Hono()
               if (mentioned.length) members = mentioned;
             }
             const recentCtx = path.slice(-8).map((m) => `${m.role === "user" ? "사용자" : "봇"}: ${(m.content ?? "").slice(0, 250)}`).join("\n");
-            let lastMsgId = userMsg.id;
+            const reports: string[] = [];
             for (const bot of members) {
               send("team", { type: "agent_join", agent: { id: bot.id, name: bot.name, avatar: bot.avatar, role: bot.role_prompt, task: userMsg.content.slice(0, 200), model: bot.model, model_label: modelLabel(bot.model ?? defaultModel()) } });
               send("team", { type: "agent_start", agentId: bot.id });
+              // 기본 모델 확인이 실패하면 running 이력을 만들지 않는다.
+              const selectedModel = bot.model ?? defaultModel();
               const runId = uid();
-              db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, ?, ?, 'running', ?)")
-                .run(runId, bot.id, convId, `[그룹 대화] ${userMsg.content.slice(0, 150)}`, now());
+              db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, root_job_id, created_at) VALUES (?, ?, ?, ?, 'running', ?, ?)")
+                .run(runId, bot.id, convId, `[그룹 대화] ${userMsg.content.slice(0, 150)}`, rootJobId, now());
               const state: any = {
                 id: bot.id, runId, name: bot.name, avatar: bot.avatar ?? "🤖", role: bot.role_prompt,
                 task: `[그룹 대화 메시지 — 다른 봇 멤버들도 같은 대화를 봅니다. 당신의 역할에 맞게 응답·작업하고 보고하세요]\n\n[그룹 최근 대화]\n${recentCtx}\n\n[사용자 메시지]\n${userMsg.content}`,
-                model: bot.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: 0,
+                model: selectedModel, status: "running", steps: 0, toolLog: [], depth: 0,
+                rootJobId,
               };
               const botSig = delegateTimeout(signal);
               if (botSig) await runAgent(state, bot, (ev: any) => send("team", ev), botSig);
               else { state.status = "error"; state.result = "상위 작업이 이미 중단돼 실행하지 않았습니다"; }
-              db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
-                .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
-              const meta = JSON.stringify({ type: "tools", events: state.toolLog.map((l: any) => ({ type: "read", title: l.tool, url: "" })) });
-              const report = await normalizeReport(bot.name, userMsg.content, state.result?.trim() || "(결과 없음)", state.toolLog.map((l: any) => l.tool));
-              const botMsg = insertMessage(convId!, lastMsgId, "assistant", report, null, bot.name, meta);
-              lastMsgId = botMsg.id;
-              send("assistant_message", { message: withSiblings(botMsg) });
+              const report = state.result?.trim() || "(결과 없음)";
+              db.transaction(() => {
+                recordCommandResult(rootJobId, `run:${runId}`, report, bot.id);
+                db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
+                  .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
+              })();
+              reports.push(`## ${bot.name}\n${report}`);
               send("team", { type: "agent_done", agentId: bot.id, status: state.status, result: (state.result?.trim() || "(결과 없음)").slice(0, 4000) });
-              // 봇 자기 세션에도 동일하게 기록 — 봇별 작업 이력 유지
-              appendToAgentSession(agentSessionConvId(bot.id), `[그룹 대화 지시] ${userMsg.content}`, report, bot.model, meta);
             }
+            await completeCommand(rootJobId, reports.join("\n\n---\n\n"), `msg:${asstMsg.id}`);
             q.convTouch.run(now(), convId!);
-            send("done", { message: withSiblings(q.msgGet.get(lastMsgId) as Msg) });
+            const final = q.msgGet.get(asstMsg.id) as Msg;
+            send("delta", { id: asstMsg.id, text: final.content });
+            send("done", { message: withSiblings(final) });
             return;
           }
-
-          const asstMsg = insertMessage(convId!, userMsg ? userMsg.id : parentId, "assistant", "");
-          asstMsgId = asstMsg.id;
-          send("assistant_message", { message: withSiblings(asstMsg) });
 
           // 이미지 생성 모드: 채팅 대신 이미지 API
           if (mode === "image" && userMsg) {
@@ -480,6 +488,7 @@ export const chatRoute = new Hono()
             const md = "file" in img ? `![${userMsg.content}](${img.file})` : `⚠ 이미지 생성 실패: ${img.error}`;
             send("delta", { id: asstMsg.id, text: md });
             q.msgUpdate.run(md, null, "image-gen", null, null, null, asstMsg.id);
+            await completeCommand(rootJobId, md, `msg:${asstMsg.id}`);
             send("done", { message: withSiblings(q.msgGet.get(asstMsg.id) as Msg) });
             return;
           }
@@ -515,6 +524,8 @@ export const chatRoute = new Hono()
               const meta = JSON.stringify({ type: "team", status: "pending", agents });
               send("delta", { id: asstMsg.id, text: notice });
               q.msgUpdate.run(notice, null, realModel, meta, null, null, asstMsg.id);
+              db.prepare("UPDATE command_jobs SET status = 'awaiting_confirmation' WHERE id = ?").run(rootJobId);
+              db.prepare("UPDATE messages SET command_status = 'awaiting_confirmation' WHERE id = ?").run(asstMsg.id);
               send("done", { message: withSiblings(q.msgGet.get(asstMsg.id) as Msg) });
               const count = (db.prepare("SELECT COUNT(*) as n FROM messages WHERE conversation_id = ?").get(convId!) as any).n;
               if (count <= 2) {
@@ -600,6 +611,7 @@ export const chatRoute = new Hono()
             const { workspaceRoot } = await import("../team");
             const toolCtx: ToolCtx = {
               agentId: conv?.agent_id ?? null, context: userMsg?.content ?? "", browserKey, signal, emit: teamEmit,
+              rootJobId,
               fileRoot: workspaceRoot(conv?.workspace_id), // C19 — 프로젝트 대화는 파일 도구가 프로젝트 네임스페이스를 쓴다
               onStart: (n) => { calledTools.add(n); emitTool(n); },
               onGate: (n) => gatedTools.add(n),
@@ -656,13 +668,11 @@ export const chatRoute = new Hono()
             const loopReasoning = [...loopAnswer.matchAll(thinkRe)].map((m) => m[1].trim()).filter(Boolean).join("\n\n");
             if (loopReasoning) { reasoning = loopReasoning; send("reasoning", { id: asstMsg.id, text: loopReasoning }); }
             content = loopAnswer.replace(thinkRe, "").trim();
-            send("delta", { id: asstMsg.id, text: content });
           } else {
             // 도구 루프가 답 없이 끝남(시간·라운드 상한, 빈 응답) — 수집된 도구 결과로 최종 답변을 스트리밍 생성
             for await (const ev of streamChat(endpoint, realModel, history, { signal })) {
               if (ev.type === "content" && ev.text) {
                 content += ev.text;
-                send("delta", { id: asstMsg.id, text: ev.text });
               } else if (ev.type === "reasoning" && ev.text) {
                 reasoning += ev.text;
                 send("reasoning", { id: asstMsg.id, text: ev.text });
@@ -744,7 +754,7 @@ export const chatRoute = new Hono()
                 ?? src.match(/([가-힣A-Za-z0-9_.]{2,20})\s*(?:계정|로그인)/)?.[1]
                 ?? "웹사이트";
               const url = src.match(/https?:\/\/[^\s)"'<>]+/)?.[0];
-              await callBuiltin("request_credentials", { site, url, reason: "봇이 요청한 계정 입력" }, conv?.agent_id, signal).catch(() => "");
+              await callBuiltin("request_credentials", { site, url, reason: "봇이 요청한 계정 입력" }, conv?.agent_id, signal, 0, undefined, undefined, undefined, [], rootJobId ?? undefined).catch(() => "");
               calledTools.add("request_credentials");
               popupShown = true;
               emitTool("request_credentials");
@@ -788,9 +798,17 @@ export const chatRoute = new Hono()
 
           if (!content.trim()) content = "⚠️ 응답이 생성되지 않았습니다 — 같은 지시를 다시 보내주세요."; // 어떤 경로로든 빈 메시지는 저장하지 않음
           content = cleanOutput(content); // 장식 이모지 제거·마커 치환 — 화면에 정돈된 결과만 저장
-          q.msgUpdate.run(content, reasoning || null, usedModel, searchMeta ? JSON.stringify(searchMeta) : null, usage?.prompt_tokens ?? null, usage?.completion_tokens ?? null, asstMsg.id);
+          // 검증 전 본문 delta를 노출하지 않는다. 완료 함수가 compact 본문과 전체 원문을 한 번에 저장한다.
+          db.prepare("UPDATE messages SET reasoning = ?, model = ?, search_meta = ?, tokens_in = ?, tokens_out = ? WHERE id = ?")
+            .run(reasoning || null, usedModel, searchMeta ? JSON.stringify(searchMeta) : null, usage?.prompt_tokens ?? null, usage?.completion_tokens ?? null, asstMsg.id);
+          await withRootJob(rootJobId, () => completeCommand(rootJobId!, content, `msg:${asstMsg.id}`));
+          const delivered = q.msgGet.get(asstMsg.id) as Msg;
+          if (delivered.content) send("delta", { id: asstMsg.id, text: delivered.content });
           runOk = true;
-          emitPhase("done", "완료");
+          const deliveryStatus = (delivered as any).command_status;
+          if (deliveryStatus === "completed") emitPhase("done", "완료");
+          else if (deliveryStatus === "waiting_approval") emitPhase("waiting_approval", "사용자 승인 대기");
+          else if (deliveryStatus === "waiting_children") emitPhase("waiting_children", "하위 작업 완료 대기");
           send("done", { message: withSiblings(q.msgGet.get(asstMsg.id) as Msg) });
 
           // 첫 교환이면 제목 자동 생성 — 응답 경로를 지연시키지 않도록 백그라운드로
@@ -801,16 +819,6 @@ export const chatRoute = new Hono()
           // 메모리 추출 (비차단) — 담당 봇의 장기기억으로 저장
           if (userMsg && content) extractMemories(userMsg.content, content, conv?.agent_id, conv?.workspace_id).catch(() => {});
           // 설정된 알림 채널로 결과 발송 (기본은 채팅창만) — dedupeKey로 같은 메시지의 재발송 차단
-          if (content) {
-            const { notifyResult } = await import("../notify");
-            notifyResult({
-              title: conv?.title ?? "MyBot",
-              agents: [conv?.agent_name ?? "MyBot"],
-              request: userMsg?.content,
-              content,
-              dedupeKey: `msg:${asstMsgId}`,
-            });
-          }
         } catch (e: any) {
           runErr = String(e?.message ?? e);
           if (e?.name !== "AbortError") send("error", { message: runErr });
@@ -822,6 +830,7 @@ export const chatRoute = new Hono()
                 const stopMsg = signal.reason?.name === "TimeoutError" ? "⚠️ 시간이 오래 걸려 작업을 중단했습니다 (15분 상한)." : "⚠️ 작업이 중단됐습니다.";
                 q.msgUpdate.run(e?.name === "AbortError" || e?.name === "TimeoutError" ? stopMsg : `⚠️ 응답 처리 중 오류가 발생했습니다 — ${String(e?.message ?? e).slice(0, 160)}`, null, null, null, null, null, asstMsgId);
                 send("done", { message: withSiblings(q.msgGet.get(asstMsgId) as Msg) });
+                if (rootJobId) await completeCommand(rootJobId, (q.msgGet.get(asstMsgId) as Msg).content, `error:${asstMsgId}`);
               }
             } catch {}
           }

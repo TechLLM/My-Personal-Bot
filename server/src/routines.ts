@@ -27,8 +27,18 @@ async function runRoutineInner(r: any): Promise<string> {
   // 모든 루틴은 봇 세션으로 실행 — 담당 봇, 없으면 대장 봇. 봇의 도구(검색/브라우저/파일/MCP) 사용 가능
   const { ensureBossAgent, getAgent, runAgentDetached } = await import("./team");
   const agent = (r.agent_id ? getAgent(r.agent_id) : null) ?? ensureBossAgent();
+  const { createCommandJob, completeCommand, withRootJob } = await import("./command-delivery");
+  const convId = (db.prepare("SELECT id FROM conversations WHERE agent_id = ? AND (mode IS NULL OR mode != 'routine') ORDER BY updated_at DESC LIMIT 1").get(agent.id) as { id: string } | undefined)?.id
+    ?? (await import("./team")).agentSessionConvId(agent.id);
+  const parent = db.prepare("SELECT id FROM messages WHERE conversation_id = ? AND active = 1 ORDER BY created_at DESC LIMIT 1").get(convId) as { id: string } | undefined;
+  const assistantMessageId = uid();
+  db.prepare("INSERT INTO messages (id, conversation_id, parent_id, active, role, content, created_at) VALUES (?, ?, ?, 1, 'assistant', '', ?)")
+    .run(assistantMessageId, convId, parent?.id ?? null, now());
+  db.prepare("UPDATE messages SET active = 0 WHERE conversation_id = ? AND parent_id IS ? AND id != ?")
+    .run(convId, parent?.id ?? null, assistantMessageId);
+  const rootJobId = createCommandJob({ source: "routine", conversationId: convId, assistantMessageId, request: r.prompt, ownerAgentId: agent.id });
 
-  const { done } = runAgentDetached(agent, {
+  const { done } = withRootJob(rootJobId, () => runAgentDetached(agent, {
     model: agent.model ?? r.model ?? undefined, // 원래 로직 유지 — 봇 모델 우선, 없으면 루틴 지정 모델
     label: `[루틴] ${r.name}: ${r.prompt}`,
     // 정기 실행은 대화 맥락이 없다 — 지시문의 기준을 지키게 하고, 같은 주제의 스킬을 쓰게 유도한다
@@ -36,9 +46,10 @@ async function runRoutineInner(r: any): Promise<string> {
     routineId: r.id ?? null,
     sessionTitle: `[루틴] ${r.name}\n${r.prompt}`,
     sessionTask: r.prompt,
-    notifyTitle: `루틴 · ${agent.name} · ${r.name}`,
-  });
+    rootJobId,
+  }));
   const state = await done;
+  await completeCommand(rootJobId, state.result ?? "(결과 없음)", `run:${state.runId}`);
   return state.result ?? "(결과 없음)";
 }
 

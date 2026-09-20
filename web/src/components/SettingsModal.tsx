@@ -7,6 +7,7 @@ import {
   ChevronDown, ChevronUp, Plus, Zap, KeyRound, LogIn,
 } from "lucide-react";
 import { AgentIcon } from "./icons";
+import { operationLabel } from "../../../shared/user-facing";
 
 type Section = "providers" | "search" | "image" | "agents" | "audit" | "routines" | "tools" | "browser" | "notify" | "memory" | "updates" | "general";
 
@@ -278,6 +279,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
 
   const authed = providers.filter((p) => p.enabled && p.authed);
   const shownMemories = memOpen ? memories : memories.slice(0, 5);
+  const statusLabel = (status: string) => ({ done: "완료", error: "오류", running: "실행 중", waiting: "대기", approved: "승인됨", denied: "거부됨", pending: "대기 중", expired: "만료됨" }[status] ?? "상태 확인 필요");
 
   return (
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-stone-950/30 md:items-center md:p-4" onClick={onClose}>
@@ -457,7 +459,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                       <div className="flex items-center gap-1.5">
                         <AgentIcon name={r.agent_name ?? "?"} seed={r.avatar} size={16} className="shrink-0" />
                         <span className="font-medium">{r.agent_name ?? "(삭제된 봇)"}</span>
-                        <span className={`rounded px-1 text-micro ${r.status === "done" ? "bg-emerald-100 text-emerald-700" : r.status === "error" ? "bg-red-100 text-red-600" : "bg-stone-200 text-stone-500"}`}>{r.status}</span>
+                        <span className={`rounded px-1 text-micro ${r.status === "done" ? "bg-emerald-100 text-emerald-700" : r.status === "error" ? "bg-red-100 text-red-600" : "bg-stone-200 text-stone-500"}`}>{statusLabel(r.status)}</span>
                         {r.routine_id && <span className="rounded bg-amber-100 px-1 text-micro text-amber-700">루틴</span>}
                         {r.resume_count > 0 && <span className="rounded bg-sky-100 px-1 text-micro text-sky-600">재개{r.resume_count}회</span>}
                         <span className="ml-auto text-micro text-stone-400">{new Date(r.created_at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
@@ -472,8 +474,8 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   {(audit?.approvals ?? []).map((r) => (
                     <div key={r.id} className="rounded-lg bg-white px-2.5 py-1.5 text-caption">
                       <div className="flex items-center gap-1.5">
-                        <span className="font-medium">{r.tool}</span>
-                        <span className={`rounded px-1 text-micro ${r.status === "approved" ? "bg-emerald-100 text-emerald-700" : r.status === "denied" ? "bg-red-100 text-red-600" : "bg-amber-100 text-amber-700"}`}>{r.status}</span>
+                        <span className="font-medium">{operationLabel(r.tool)}</span>
+                        <span className={`rounded px-1 text-micro ${r.status === "approved" ? "bg-emerald-100 text-emerald-700" : r.status === "denied" ? "bg-red-100 text-red-600" : "bg-amber-100 text-amber-700"}`}>{statusLabel(r.status)}</span>
                         <span className="ml-auto text-micro text-stone-400">{r.agent_name ?? "—"} · {new Date(r.created_at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
                       </div>
                       <div className="mt-0.5 truncate text-stone-500">{r.summary}</div>
@@ -728,7 +730,10 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     {mcType === "remote" ? (
                       <>
                         <input className={Input} placeholder="엔드포인트 URL (예: https://mcp.example.com/mcp)" value={mcUrl} onChange={(e) => setMcUrl(e.target.value)} />
-                        <input className={Input} placeholder='헤더 JSON (선택 — {"Authorization":"Bearer …"})' value={mcHdrs} onChange={(e) => setMcHdrs(e.target.value)} />
+                        <details className="rounded-lg border border-stone-200 bg-white/50 px-2.5 py-2">
+                          <summary className="cursor-pointer text-xs text-stone-600">고급 설정: 요청 헤더</summary>
+                          <input className={`${Input} mt-2`} type="password" aria-label="요청 헤더 설정" placeholder="서비스 문서의 헤더 설정을 입력하세요" value={mcHdrs} onChange={(e) => setMcHdrs(e.target.value)} />
+                        </details>
                       </>
                     ) : (
                       <input className={Input} placeholder="실행 명령 (예: npx -y @modelcontextprotocol/server-everything)" value={mcCmd} onChange={(e) => setMcCmd(e.target.value)} />
