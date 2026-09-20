@@ -44,16 +44,38 @@ function resolveAllowed(allowed: Set<string>, requested: string): string | null 
 }
 
 // 외부 도구 대행 — worker(샌드박스)는 네트워크가 없으므로 허용된 도구만 부모가 실행한다.
-// 테스트에서는 스텁을 주입한다.
-export type BrokerToolHandler = (tool: string, args: Record<string, unknown>) => Promise<unknown>;
+// 테스트에서는 스텁을 주입한다. tag는 호출 팔(baseline/candidate-N) — 팔별 자원 분리에 쓴다.
+export type BrokerToolHandler = (tool: string, args: Record<string, unknown>, tag: string) => Promise<unknown>;
 
-const defaultToolHandler: BrokerToolHandler = async (tool, args) => {
+// 샌드박스에서 대행 가능한 브라우저 도구 — 읽기 전용만.
+// click·type·eval·login·handoff는 페이지 변형·자격증명·사용자 팝업이 걸리고,
+// look은 부모의 비전 모델 호출이라 계측 밖 비용이 생긴다. ego_run·bsk는 사용자의
+// 실제 브라우저를 임의 스크립트·명령으로 움직이므로 샌드박스에 열지 않는다.
+// (부작용이 생기는 도구는 측정이 아니라 운영 행동이다 — 승인 게이트 없는 샌드박스에 놓지 않는다)
+export const SANDBOX_BROWSER_TOOLS = new Set(["browser_open", "browser_read", "browser_scroll", "browser_wait", "browser_back"]);
+
+const MCP_TOOL_NAME = /^[\w-]+__[\w-]+$/; // MCP 도구는 "서버__도구" 네임스페이스
+
+const defaultToolHandler: BrokerToolHandler = async (tool, args, tag) => {
   if (tool === "web_search") {
     const { webSearch } = await import("../search/index");
     const query = String(args.query ?? "").slice(0, 500);
     if (!query.trim()) throw new Error("invalid_args");
     const limit = Math.min(10, Math.max(1, Number(args.limit) || 6));
     return await webSearch(query, limit);
+  }
+  // 읽기 전용 브라우저 — 부모의 headless Chromium을 팔별 페이지 키로 대행한다.
+  // 허용 목록(과제 선언)을 통과해도 여기 고정 집합 밖 브라우저 도구는 거부된다.
+  if (SANDBOX_BROWSER_TOOLS.has(tool)) {
+    const { browserTool } = await import("../browser");
+    const { __key, ...rest } = args;
+    const key = `e2-${tag}-${String(__key ?? "run").replace(/[^\w-]/g, "").slice(0, 48)}`;
+    return await browserTool(key, tool, rest);
+  }
+  // MCP — 도구 이름 자체가 허용 목록(골든 과제 선언)에 있어야 여기까지 온다.
+  if (MCP_TOOL_NAME.test(tool)) {
+    const { mcpCall } = await import("../mcp");
+    return await mcpCall(tool, args);
   }
   throw new Error("unsupported_tool");
 };
@@ -113,7 +135,7 @@ export function startBroker(opts: {
         per.toolCalls++;
         try {
           const args = parsed.args && typeof parsed.args === "object" && !Array.isArray(parsed.args) ? parsed.args : {};
-          const result = await toolHandler(parsed.tool, args);
+          const result = await toolHandler(parsed.tool, args, tag);
           return reply(200, { result });
         } catch (e) {
           return reply(502, { error: `tool_upstream: ${(e as Error).message.slice(0, 200)}` });

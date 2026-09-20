@@ -121,6 +121,11 @@ export async function closeAgentPage(key: string) {
   for (const x of stack) { try { await x.close(); } catch {} }
 }
 
+// 접두사로 시작하는 키의 페이지를 전부 닫는다 — E2 격리 팔(e2-<tag>-*) 정리용
+export async function closePagesForPrefix(prefix: string) {
+  for (const key of [...pages.keys()].filter((k) => k.startsWith(prefix))) await closeAgentPage(key);
+}
+
 // ─── 컴퓨터 뷰 (A3) — 보는 사람이 있을 때만 2.5초 간격으로 viewport 프레임을 밀어낸다 ───
 const lastAction = new Map<string, string>(); // run별 최근 브라우저 액션 — 뷰 패널 하단에 표시
 const viewSubs = new Map<string, Set<(f: { image: string; url: string; title: string; action: string }) => void>>();
@@ -433,6 +438,18 @@ export async function resolveVisionModel(): Promise<{ endpoint: Endpoint; model:
 
 // 봇이 쓰는 브라우저 도구
 export async function browserTool(agentKey: string, name: string, args: Record<string, unknown>): Promise<string> {
+  // E2 격리 실행 — 샌드박스는 프로세스 생성·네트워크가 차단되므로 브로커가
+  // 읽기 전용 브라우저 도구를 대행한다. 허용 집합은 브로커가 집행한다.
+  if (process.env.MYBOT_ENV === "e2" && process.env.E2_BROKER_URL) {
+    const res = await fetch(`${process.env.E2_BROKER_URL}/tool`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${process.env.E2_BROKER_TOKEN ?? ""}` },
+      body: JSON.stringify({ tool: name, args: { ...args, __key: agentKey } }),
+      signal: AbortSignal.timeout(110_000),
+    });
+    if (!res.ok) throw new Error(`broker_tool_${res.status}`);
+    return String((await res.json()).result ?? "");
+  }
   try {
     lastAction.set(agentKey, `${name} ${String(args.url ?? args.site ?? args.selector ?? args.ref ?? args.text ?? "").slice(0, 80)}`.trim());
     // 테이크오버 — pageFor 전에 처리: 인계가 브라우저 컨텍스트를 headed로 전환해 기존 페이지가 무효화된다

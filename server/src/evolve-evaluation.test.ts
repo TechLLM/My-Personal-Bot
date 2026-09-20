@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { db } from "./db";
-import { checkTask, judge, isProtectedPath, parseProposals, pickWinner, type BenchResult, type GoldenTask, type RunOutcome } from "./evolve";
+import { checkTask, judge, isProtectedPath, parseProposals, pickWinner, sandboxToolOk, type BenchResult, type GoldenTask, type RunOutcome } from "./evolve";
 if (db.filename !== ":memory:") throw new Error("메모리 DB에서만 테스트");
 
 const task: GoldenTask = { id: "G-fixture", holdout: false, env: true, prompt: "fixture", checks: [{ type: "eval_min", score: 0 }] };
@@ -122,4 +122,10 @@ test("parseProposals — 배열·단일 객체·보고서 문장을 모두 받�
   expect(parseProposals(p(1)).length).toBe(1);
   expect(parseProposals(`설명\n[${p(1)}, {"surface":"x"}]\n뒷말`).length).toBe(1); // target 없는 항목 제외
   expect(parseProposals("제안 없음")).toEqual([]);
+});
+test("sandboxToolOk — 읽기 전용 브라우저·선언 MCP만 샌드박스에 연다", () => {
+  for (const ok of ["web_search", "browser_open", "browser_read", "browser_scroll", "browser_wait", "browser_back", "myserver__lookup"])
+    expect(sandboxToolOk(ok)).toBe(true);
+  for (const denied of ["browser_click", "browser_type", "browser_eval", "browser_login", "browser_handoff", "browser_look", "ego_run", "bsk", "computer_look", "shell_run", "agent_create", "__orphan", "plain_name"])
+    expect(sandboxToolOk(denied)).toBe(false);
 });

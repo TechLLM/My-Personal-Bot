@@ -310,6 +310,10 @@ export async function runIsolatedComparison(options: IsolationOptions): Promise<
       const child = await executeSandboxed([join(root, workerRel)], root, policy, deadline, outputLimit, canonicalJson(request), "production",
         options.broker ? { E2_BROKER_URL: `http://127.0.0.1:${options.broker.port}`, E2_BROKER_TOKEN: `${options.broker.token}:${arm}${tagSuffix}` } : {});
       const endedAt = Date.now();
+      // 브로커 대행 브라우저가 부모 프로세스에 남긴 이 팔의 페이지를 닫는다 — 다음 팔·과제로 새지 않게
+      if (options.broker) {
+        try { (await import("../browser")).closePagesForPrefix(`e2-${arm}${tagSuffix}-`); } catch {}
+      }
       const stderrTail = child.stderr.length ? child.stderr.toString("utf8").slice(-2048) : undefined;
       const receipt: ArmReceipt = {
         arm, pid: child.pid, sourceHash, dependencyHash: frozen.dependencyHash,

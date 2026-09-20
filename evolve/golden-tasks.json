@@ -90,8 +90,18 @@
       "prompt": "다우오피스에 접속해서 오늘 수신 메일이 있는지 확인해서 알려줘",
       "agent": "그룹웨어팀장",
       "checks": [
-        { "type": "tool_used", "tool_prefix": "bsk" },
+        { "type": "tool_prefix", "tool_prefix": "bsk" },
         { "type": "eval_min", "score": 60, "desc": "실제 확인한 화면 내용 근거" }
+      ]
+    },
+    {
+      "id": "G11", "holdout": false,
+      "prompt": "browser_open 도구로 https://example.com 페이지를 열고, 페이지 제목이 뭔지 확인해서 알려줘",
+      "agent": "그룹웨어팀장",
+      "tools": ["browser_open", "browser_read"],
+      "checks": [
+        { "type": "tool_used", "tool": "browser_open" },
+        { "type": "content_regex", "pattern": "Example Domain", "desc": "실제 페이지 제목이 응답에 포함" }
       ]
     },
     {

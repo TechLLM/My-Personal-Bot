@@ -10,6 +10,7 @@ import type { EvalVerdict } from "./evaluate";
 import { evaluationCheck, evaluationGate, evaluationStatus } from "./evaluation-evidence";
 import * as isolation from "./evolve/isolation";
 import type { SeedAgent } from "./evolve/protocol";
+import { SANDBOX_BROWSER_TOOLS } from "./evolve/broker";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const EVOLVE_DIR = join(ROOT, "evolve");
@@ -39,6 +40,10 @@ export interface GoldenTask {
   id: string; holdout: boolean; env?: boolean;
   prompt: string; then?: string; agent?: string;
   approvals?: "auto";
+  // 샌드박스가 브로커 경유로 쓸 수 있는 외부 도구 — 읽기 전용 브라우저와
+  // "서버__도구" 형식의 MCP 도구만 선언 가능(아래 sandboxToolOk). 미선언 도구는
+  // 브로커가 403으로 거부해 worker는 도구 오류를 받는다.
+  tools?: string[];
   checks: GoldenCheck[];
 }
 
@@ -375,11 +380,22 @@ function productionModelFor(candidate: Candidate, fallback: string): string {
   return ceo?.model ?? fallback;
 }
 
+// 샌드박스에서 측정 가능한 도구인가 — 고정 읽기 전용 집합 + 과제가 명시 선언한 MCP 도구.
+// 브라우저 변형 도구(click·type·eval·login·handoff·look)·ego_run·bsk·computer_*는
+// 부작용·자격증명·미계측 비용 때문에 어떤 과제 선언으로도 샌드박스에 열리지 않는다.
+export function sandboxToolOk(name: string): boolean {
+  if (name === "web_search" || SANDBOX_BROWSER_TOOLS.has(name)) return true;
+  return /^[\w-]+__[\w-]+$/.test(name); // MCP "서버__도구" — 과제 선언이 곧 승인이다
+}
+
 // 격리 벤치에 넣을 골든 과제 — holdout·외부 환경(env) 과제는 제외한다.
 // approvals:"auto"는 샌드박스 합성 DB의 자동 승인 규칙으로 측정 가능해 포함한다.
 // 네트워크 차단 샌드박스에서 env 과제는 측정이 아니라 노이즈다.
 function benchTasks(limit: number): GoldenTask[] {
-  return loadGoldenTasks().filter((t) => !t.env && (!t.approvals || t.approvals === "auto") && t.prompt).slice(0, Math.max(1, limit));
+  return loadGoldenTasks()
+    .filter((t) => !t.env && (!t.approvals || t.approvals === "auto") && t.prompt
+      && (t.tools ?? []).every(sandboxToolOk))
+    .slice(0, Math.max(1, limit));
 }
 
 // 측정 환경 — 실제 봇 구성(역할문·모델)을 시드한다. 봇 설정 자체가 측정 대상 표면이므로
@@ -526,10 +542,13 @@ export async function runTournament(candidatesIn: Candidate[]): Promise<Tourname
     // 보장되는 호출(벤치·평가)은 여기서 fail-closed로 검증하고, 봇 개별 모델은 호출 시점에 해석한다
     for (const id of [...new Set([...benchModels, evalModelId])]) resolveModel(id);
     // 과제당 팔 최대 ~30회 호출 여유 — 팔별 상한이 같아야 후보가 더 많은 호출로
-    // 이기는 일이 없다(E4 대칭 예산). 도구는 벤치 과제가 쓰는 web_search만 연다.
-    // 전체 상한·토큰 예산은 후보 수에 비례해 늘린다.
+    // 이기는 일이 없다(E4 대칭 예산). 도구는 web_search + 벤치·holdout 과제가 선언한
+    // 샌드박스 허용 도구만 연다(읽기 전용 브라우저·명시 MCP). 변형 도구는 과제가 선언해도
+    // 브로커 핸들러가 거부한다. 전체 상한·토큰 예산은 후보 수에 비례해 늘린다.
+    const declaredTools = [...tasks, ...loadGoldenTasks(true).filter((t) => t.holdout && !t.env && !t.approvals)]
+      .flatMap((t) => (t.tools ?? []).filter(sandboxToolOk));
     const broker = await startBroker({
-      models: allowed, tools: ["web_search"],
+      models: allowed, tools: [...new Set(["web_search", ...declaredTools])],
       maxCalls: tasks.length * 60 * alive.length, maxCallsPerTag: tasks.length * 30,
       maxToolCallsPerTag: tasks.length * 5, maxEstTokens: 300_000 * alive.length,
     });
@@ -568,7 +587,7 @@ export async function runTournament(candidatesIn: Candidate[]): Promise<Tourname
       // 후보 생성·구체화 입력에 들어가지 않으므로 여기서 미달이면 주 세트 과적합을 의심한다.
       let holdout: { baseline: BenchResult; candidate: BenchResult } | undefined;
       if (verdict.verdict === "keep") {
-        const holdoutTasks = loadGoldenTasks(true).filter((t) => t.holdout && !t.env && !t.approvals && t.prompt);
+        const holdoutTasks = loadGoldenTasks(true).filter((t) => t.holdout && !t.env && !t.approvals && t.prompt && (t.tools ?? []).every(sandboxToolOk));
         if (holdoutTasks.length) {
           const pair = await measureCandidateArms({
             candidate: winCandidate, tasks: holdoutTasks, brokerPort: broker.port, brokerToken: broker.token,
