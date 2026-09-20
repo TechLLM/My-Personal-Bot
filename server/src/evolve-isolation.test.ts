@@ -143,7 +143,7 @@ function expectReceiptInvariant(receipt: any, arm: "baseline" | "candidate") {
   expect(receipt.policyHash).toMatch(/^[a-f0-9]{64}$/);
   expect(receipt.runtime.path.length).toBeGreaterThan(0);
   expect(receipt.runtime.version.length).toBeGreaterThan(0);
-  expect(receipt.model).toEqual({ requested: null, resolved: null, executed: false });
+  expect(receipt.model).toEqual({ requested: null, resolved: [], executed: false, calls: 0 });
 }
 
 function resolveTypeScriptCompiler(command: string): string | undefined {
@@ -677,6 +677,61 @@ export async function probe(ctx) {
       expect(failing.reasonCode).toBe("tests_failed");
       expect(failing.baseline?.pid).toBeGreaterThan(0);
       expect(failing.candidate).toBeUndefined();
+    } finally {
+      cleanupFixture(fixture);
+    }
+  }, 10_000);
+
+  childTest("routes model calls through the credential broker on its loopback port only", async () => {
+    const { startBroker } = await import("./evolve/broker");
+    const { createServer } = await import("node:http");
+    const broker = await startBroker({
+      models: ["test/bench-model"],
+      upstream: async (_model, messages) => ({ content: `ok:${(messages as any[])[0]?.content}` }),
+    });
+    // 브로커 외 포트도 열려 있는 제어 서버 — 샌드박스가 브로커 포트만 열었는지 증명한다
+    const dummy = createServer((_, res) => res.end("x"));
+    await new Promise<void>((r) => dummy.listen(0, "127.0.0.1", r));
+    const dummyPort = (dummy.address() as { port: number }).port;
+    const brokerProbe = `
+export async function probe(ctx) {
+  const content = await ctx.chat("test/bench-model", [{ role: "user", content: "ping" }]);
+  let deniedModel = false, deniedPort = false;
+  try { await ctx.chat("not/allowed", []); } catch { deniedModel = true; }
+  try { await fetch("http://127.0.0.1:${dummyPort}/"); } catch { deniedPort = true; }
+  return { content, deniedModel, deniedPort };
+}`;
+    const fixture = makeFixture(brokerProbe);
+    try {
+      const result = await runIsolatedComparison(options(fixture, brokerProbe, {
+        broker: { port: broker.port, token: broker.token },
+        model: "test/bench-model",
+      }));
+      expect(result.status).toBe("complete");
+      for (const arm of [result.baseline!, result.candidate!]) {
+        expect(arm.value).toEqual({ content: "ok:ping", deniedModel: true, deniedPort: true });
+        expect(arm.model).toEqual({ requested: "test/bench-model", resolved: ["test/bench-model"], executed: true, calls: 2 });
+      }
+      // 브로커는 승인된 호출만 비용으로 집계한다 — 팔당 허용 1건 + 거부 1건(403에서 차단)
+      expect(broker.usage().calls).toBe(2);
+    } finally {
+      cleanupFixture(fixture);
+      await broker.close();
+      dummy.close();
+    }
+  }, 15_000);
+
+  childTest("fails closed when a probe calls ctx.chat without a broker", async () => {
+    const fixture = makeFixture(`
+export async function probe(ctx) {
+  try { await ctx.chat("any/model", []); return { leaked: true }; }
+  catch { return { leaked: false }; }
+}`);
+    try {
+      const result = await runIsolatedComparison(options(fixture, baselineProbe));
+      expect(result.status).toBe("complete");
+      expect(result.baseline!.value).toEqual({ leaked: false });
+      expect(result.baseline!.model.executed).toBe(false);
     } finally {
       cleanupFixture(fixture);
     }

@@ -33,6 +33,11 @@ export interface IsolationOptions {
   deadlineMs?: number;
   maxOutputBytes?: number;
   preflight?: { typeScriptCompiler?: string; testFiles?: string[]; preload?: string };
+  // E2-B — credential broker. 지정하면 샌드박스가 이 루프백 포트로의 outbound만 허용하고
+  // worker는 토큰으로 브로커를 통해 모델을 호출한다. API 키는 부모 프로세스에만 있다.
+  broker?: { port: number; token: string };
+  // 이 측정이 요구하는 모델 id — 영수증의 model.requested로 기록된다
+  model?: string;
 }
 
 export interface IsolationResult {
@@ -110,11 +115,16 @@ function quotePolicy(path: string) {
   return `"${path.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-function sandboxPolicy(armRoot: string, runtime: string, extraRead: string[] = []) {
+function sandboxPolicy(armRoot: string, runtime: string, extraRead: string[] = [], brokerPort?: number) {
   const subpaths = [armRoot, "/System/Library", "/usr/lib", "/usr/share", ...extraRead];
   const literals = ["/", runtime, "/dev/null", "/dev/random", "/dev/urandom"];
   const filters = `${literals.map((p) => `(literal ${quotePolicy(p)})`).join(" ")} ${subpaths.map((p) => `(subpath ${quotePolicy(p)})`).join(" ")}`;
-  return `(version 1)\n(deny default)\n(allow signal (target self))\n(allow sysctl-read)\n(allow file-read-metadata ${filters})\n(allow file-read* ${filters})\n(allow process-exec (literal ${quotePolicy(runtime)}))\n(deny process-fork)\n(deny network*)\n(allow file-write* (literal ${quotePolicy("/dev/null")}))\n(allow file-write* (subpath ${quotePolicy(join(armRoot, "server", "data"))}))\n(allow file-write* (subpath ${quotePolicy(join(armRoot, "tmp"))}))\n`;
+  // 브로커가 있으면 그 루프백 포트로만 outbound를 연다 — 나머지 네트워크는 전면 차단 유지.
+  // SBPL의 remote tcp 필터는 숫자 IP를 받지 않고 호스트명만 받는다 — localhost를 쓴다.
+  const network = brokerPort
+    ? `(allow network-outbound (remote tcp "localhost:${brokerPort}"))`
+    : `(deny network*)`;
+  return `(version 1)\n(deny default)\n(allow signal (target self))\n(allow sysctl-read)\n(allow file-read-metadata ${filters})\n(allow file-read* ${filters})\n(allow process-exec (literal ${quotePolicy(runtime)}))\n(deny process-fork)\n${network}\n(allow file-write* (literal ${quotePolicy("/dev/null")}))\n(allow file-write* (subpath ${quotePolicy(join(armRoot, "server", "data"))}))\n(allow file-write* (subpath ${quotePolicy(join(armRoot, "tmp"))}))\n`;
 }
 
 interface ChildResult { pid: number; exitCode: number | null; signal: string | null; stdout: Buffer; reasonCode?: string }
@@ -252,13 +262,14 @@ export async function runIsolatedComparison(options: IsolationOptions): Promise<
     const runArm = async (arm: "baseline" | "candidate", root: string): Promise<ArmReceipt> => {
       const sourceHash = hashSnapshot(root, manifest);
       if (hashFrozenDeps(root, frozen.dependencies) !== frozen.dependencyHash) throw new Error("dependency_mutated");
-      const policy = sandboxPolicy(root, runtime.path);
+      const policy = sandboxPolicy(root, runtime.path, [], options.broker?.port);
       const policyHash = hashBytes([policy]);
       const request: WorkerRequest = {
         protocolVersion: PROTOCOL_VERSION, runId: randomUUID(), arm,
         armRoot: root, fixtureModule: fixturePath, exportName: options.fixture!.exportName ?? "probe",
         input: options.fixture!.input, seed,
         candidate: arm === "candidate" && !codeTarget ? options.candidate : undefined,
+        broker: options.broker ? { url: `http://127.0.0.1:${options.broker.port}`, token: options.broker.token } : undefined,
       };
       const startedAt = Date.now();
       const child = await executeSandboxed([join(root, workerRel)], root, policy, deadline, outputLimit, canonicalJson(request));
@@ -267,7 +278,7 @@ export async function runIsolatedComparison(options: IsolationOptions): Promise<
         arm, pid: child.pid, sourceHash, dependencyHash: frozen.dependencyHash,
         initialStateHash, initialStateKind: "synthetic-seed-and-schema", harnessHash, policyHash, runtime,
         startedAt, endedAt, runtimeExecutableHash,
-        model: { requested: null, resolved: null, executed: false }, exitCode: child.exitCode, signal: child.signal,
+        model: { requested: options.model ?? null, resolved: [], executed: false, calls: 0 }, exitCode: child.exitCode, signal: child.signal,
       };
       if (hashSnapshot(root, manifest) !== sourceHash) return { ...receipt, reasonCode: "source_mutated" };
       try {
@@ -282,6 +293,8 @@ export async function runIsolatedComparison(options: IsolationOptions): Promise<
       if (!isWorkerResponse(response, request)) return { ...receipt, reasonCode: "worker_invalid_output" };
       if (!response.ok) return { ...receipt, reasonCode: response.reasonCode ?? "worker_failed" };
       receipt.value = response.value;
+      // worker가 보고한 실제 브로커 호출 — executed는 영수증의 진실 원천이다
+      receipt.model = { requested: options.model ?? null, resolved: response.models, executed: response.modelCalls > 0, calls: response.modelCalls };
       return receipt;
     };
 

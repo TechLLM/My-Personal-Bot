@@ -500,6 +500,30 @@ const targetListForPrompt = (max = 40) => liveTargets()
   .map((g) => `- ${g.table}: ${g.names.slice(0, max).join(", ")}${g.names.length > max ? ` 외 ${g.names.length - max}개` : ""}`)
   .join("\n") || "- (등록된 대상 없음)";
 
+// ---------- 자기개선 역할별 모델 배정 ----------
+// 원칙: 기계적 변환은 빠른 기본 모델로, 생성 품질이 벤치 비용을 좌우하는 곳은 작업급 모델로.
+//   extract — 탐색 보고서 → JSON 구조화 (기계적)      : 기본 모델 + 낮은 추론
+//   rewrite — db 표면 현재 값의 한정 재작성 (기계적)  : 기본 모델 + 낮은 추론
+//   codegen — code 표면 파일 전체 재작성 (생성)       : 작업급 모델 — 약한 재작성은
+//             후보를 조기에 죽여 벤치 판(훨씬 비쌈)을 통째로 날린다
+//   탐색(explore)은 Eggbot의 설정 모델, 벤치는 측정 대상의 운영 모델 그대로 —
+//   벤치를 싼 모델로 재면 측정 자체가 무효라 절약 대상이 아니다.
+// 설정 'evolve_models' = {"extract":"provider/model", ...} 로 역할별 재지정 가능.
+type EvolveRole = "extract" | "rewrite" | "codegen";
+
+export async function evolveModel(role: EvolveRole) {
+  const { resolveModel, defaultModelId } = await import("./providers");
+  let overrides: Record<string, string> = {};
+  try { overrides = JSON.parse(getSetting("evolve_models") || "{}"); } catch {}
+  if (overrides[role]) return resolveModel(overrides[role]);
+  if (role === "codegen") {
+    const { findAgentByName, ensureBossAgent } = await import("./team");
+    const boss = findAgentByName("Eggbot") ?? ensureBossAgent();
+    return resolveModel(boss.model ?? defaultModelId());
+  }
+  return resolveModel(defaultModelId());
+}
+
 // 탐색 봇 실행 — 실제 파이프라인(도구 포함)으로 실패를 분석하고 개선 후보 1건을 JSON으로 제안
 export async function proposeCandidate(analysis: string): Promise<Proposal | null> {
   const { runAgentDetached, ensureBossAgent, findAgentByName } = await import("./team");
@@ -525,7 +549,7 @@ ${targetListForPrompt()}
 [출력] JSON만 출력하세요:
 {"surface":"표면id","target":"대상(스킬명·봇명·파일경로)","column":"db컬럼(db표면이면)","newValue":"새 값(db 표면이면 전체 내용)","filePath":"src 표면이면","intent":"무엇을 왜 바꾸는지","summary":"한 줄 설명"}
 - summary는 최종 사용자에게 그대로 보여지는 문구입니다 — "무엇이 어떻게 좋아지는지"만 쓰고, 표면 id·파일 경로·내부 구조 명칭(개발 인스턴스·실험·벤치 등)은 절대 넣지 마세요`;
-  const { done } = runAgentDetached(agent, { label: "[자기개선] 개선 후보 탐색", task, verifyIntent: false });
+  const { done } = runAgentDetached(agent, { label: "[자기개선] 개선 후보 탐색", task, verifyIntent: false, internal: true });
   const state = await done;
   const text = state.result ?? "";
   // 1차 — 원시 JSON 블록 추출. 모델이 지시를 따라 JSON만 출력한 경우의 빠른 경로
@@ -535,9 +559,8 @@ ${targetListForPrompt()}
   // 2차 — 모델이 보고서 형식(표·문단)으로 제안한 경우 소형 추출 호출로 구조화한다.
   // 형식 의존 없이 파이프라인이 살아야 한다 — 탐색 산출물이 있으면 후보를 놓치지 않는다
   if (!p?.surface || !p?.target) {
-    const { resolveModel, defaultModelId } = await import("./providers");
     const { chatOnce } = await import("./providers/openaiCompat");
-    const { endpoint, model } = resolveModel(defaultModelId());
+    const { endpoint, model } = await evolveModel("extract");
     const ex = await chatOnce(endpoint, model, [{
       role: "user",
       content: `아래 개선 제안 보고에서 후보를 JSON으로 추출하세요. 실행 가능한 제안이 없으면 null만 출력.\n출력 형식: {"surface":"표면id","target":"대상(스킬명·봇명·파일경로)","column":"db컬럼","newValue":"새 값(db 표면이면)","intent":"무엇을 왜 바꾸는지","summary":"한 줄 설명"} — JSON만.\n표면id는 skill.prompt·agent.role·agent.model·agent.tools·routine.config·src 중 하나.\n\n[보고]\n${text.slice(0, 8000)}`,
@@ -565,9 +588,8 @@ export async function materializeCandidate(p: Proposal): Promise<Candidate | nul
     if (!col || col === "*") return null;
     const row = db.prepare(`SELECT rowid, ${col} FROM ${surf.table!} WHERE name = ? OR id = ?`).get(p.target, p.target) as any;
     if (!row) return null;
-    const { resolveModel, defaultModelId } = await import("./providers");
     const { chatOnce } = await import("./providers/openaiCompat");
-    const { endpoint, model } = resolveModel(defaultModelId());
+    const { endpoint, model } = await evolveModel("rewrite");
     const res = await chatOnce(endpoint, model, [{
       role: "user",
       content: `아래 현재 값을 개선하세요. 변경 의도: ${p.intent}\n요구: 기존 구조·형식·톤 유지, 필요한 부분만 수정, 개선된 전체 값의 본문만 출력. 라벨·설명·코드펜스 없이.\n\n[현재 값 — ${surf.table}.${col} (${p.target})]\n${String(row[col] ?? "").slice(0, 20000)}`,
@@ -584,9 +606,8 @@ export async function materializeCandidate(p: Proposal): Promise<Candidate | nul
   const path = p.filePath ?? p.target;
   if (isProtectedPath(path) || !existsSync(join(ROOT, path)) || !path.endsWith(".ts")) return null;
   const src = readFileSync(join(ROOT, path), "utf8");
-  const { resolveModel, defaultModelId } = await import("./providers");
   const { chatOnce } = await import("./providers/openaiCompat");
-  const { endpoint, model } = resolveModel(defaultModelId());
+  const { endpoint, model } = await evolveModel("codegen");
   const res = await chatOnce(endpoint, model, [{
     role: "user",
     content: `아래 파일을 개선하세요. 변경 의도: ${p.intent}\n요구: 기존 동작·스타일 유지, 필요한 부분만 수정, 파일 전체를 출력. 다른 설명 없이 코드만.\n\n[파일 ${path}]\n${src.slice(0, 60000)}`,

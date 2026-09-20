@@ -112,6 +112,7 @@ export interface TeamAgentState {
   toolLog: ToolLogEntry[];
   depth: number; // 위임 깊이 — agent_direct 재귀 제한용
   verifyIntent?: boolean; // false면 지시-실측 검증 생략 — 봇 간 메시지(보고·알림)는 지시가 아니라서 의도 파싱이 오독됨
+  internal?: boolean;     // true면 결과가 기계 소비 — 사람에게 갈 보고서가 아니므로 재작성·품질 평가를 건너뛴다 (자기개선 탐색 등)
   fileRoot?: string;      // C19 — 프로젝트 파일 네임스페이스 (없으면 공유 WORK_DIR)
   chain?: string[];       // 이 실행을 일으킨 상위 봇 id — 이 봇들에게 되돌아가는 지시·메시지는 순환이라 차단
   rootJobId?: string;
@@ -1025,7 +1026,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
   const deadline = Date.now() + runDeadlineSec() * 1000;
   // 중계 실행 — 결과가 사용자가 아니라 지시·메시지를 보낸 봇에게 돌아가고 그 봇이 검증·취합한다.
   // 최종 보고서 재작성·품질 평가는 사용자에게 가는 최종 답에만 적용한다 (단계마다 LLM 1~3회씩 겹치던 지연 제거)
-  const relay = state.depth > 0 || !!state.chain?.length;
+  const relay = state.depth > 0 || !!state.chain?.length || !!state.internal;
   let evalCount = 0; // PGE 평가-재작업 루프 카운터 — 상한으로 무한 반복 차단
   const { shouldEvaluate, evaluateResult, EVAL_MAX_ROUNDS } = await import("./evaluate");
   // 평가는 기본(fast) 모델로 수행 — 작업 모델과 평가자를 분리해 자기 확증을 줄이고 지연을 줄인다
@@ -1341,6 +1342,7 @@ export interface DetachedRunOpts {
   model?: string;                      // 봇 기본 모델 대신 쓸 모델 (루틴 지정 모델 등)
   notifyTitle?: string;                // 설정하면 notifyResult로 결과 발송
   verifyIntent?: boolean;              // false면 지시-실측 검증 생략 (보고 메시지 등)
+  internal?: boolean;                  // true면 재작성·품질 평가 생략 — 결과를 기계가 소비하는 내부 실행
   runId?: string;                      // 기존 run 이어달리기 (resumeAgentRun)
   fileRoot?: string;                   // C19 — 프로젝트 파일 네임스페이스 (없으면 봇 배정 프로젝트 → 그래도 없으면 WORK_DIR)
   chain?: string[];                    // 이 실행을 일으킨 상위 봇 id (봇 메시지·회신) — 되돌아가는 지시·메시지 차단
@@ -1375,6 +1377,7 @@ export function runAgentDetached(agent: Agent, o: DetachedRunOpts): { runId: str
     id: agent.id, runId, name: agent.name, avatar: agent.avatar ?? "🤖", role: agent.role_prompt,
     task: o.task, model: selectedModel, status: "running", steps: 0, toolLog: [], depth: 0,
     verifyIntent: o.verifyIntent,
+    internal: o.internal,
     fileRoot: o.fileRoot ?? workspaceRoot(agent.workspace_id),
     chain: o.chain,
     rootJobId: inheritedRoot ?? undefined,

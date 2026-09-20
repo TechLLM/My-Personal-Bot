@@ -38,6 +38,9 @@ export interface WorkerRequest {
   input: unknown;
   seed: SyntheticSeed;
   candidate?: CandidateSpec;
+  // E2-B credential broker — 있으면 worker는 이 루프백 주소로만 모델 호출 가능
+  // (샌드박스가 그 포트 outbound만 허용). API 키는 부모에만 있고 worker는 토큰만 든다.
+  broker?: { url: string; token: string };
 }
 
 export interface WorkerResponse {
@@ -47,6 +50,8 @@ export interface WorkerResponse {
   ok: boolean;
   value?: unknown;
   reasonCode?: string;
+  modelCalls: number;   // worker가 브로커를 통해 실제로 한 모델 호출 수 (없으면 0)
+  models: string[];     // 실제로 호출된 모델 id — receipt.model.resolved로 들어간다
 }
 
 export interface ArmReceipt {
@@ -62,7 +67,9 @@ export interface ArmReceipt {
   startedAt: number;
   endedAt: number;
   runtimeExecutableHash: string;
-  model: { requested: null; resolved: null; executed: false };
+  // E2-B — requested: 이 측정이 요구하는 모델(표면의 운영 모델), resolved: 실제 호출된
+  // 모델 id 목록, executed: 브로커 호출이 실제로 일어났는지, calls: 호출 횟수
+  model: { requested: string | null; resolved: string[]; executed: boolean; calls: number };
   exitCode: number | null;
   signal: string | null;
   value?: unknown;
@@ -108,11 +115,12 @@ export function isWorkerResponse(value: unknown, request: WorkerRequest): value 
   const v = value as Record<string, unknown>;
   if (v.protocolVersion !== PROTOCOL_VERSION || v.runId !== request.runId || v.arm !== request.arm || typeof v.ok !== "boolean") return false;
   const keys = Object.keys(v).sort().join(",");
+  if (typeof v.modelCalls !== "number" || !Array.isArray(v.models)) return false;
   if (v.ok) {
-    if (keys !== "arm,ok,protocolVersion,runId,value" || !Object.prototype.hasOwnProperty.call(v, "value")) return false;
+    if (keys !== "arm,modelCalls,models,ok,protocolVersion,runId,value" || !Object.prototype.hasOwnProperty.call(v, "value")) return false;
     try { canonicalJson(v.value); } catch { return false; }
     return true;
   }
-  return keys === "arm,ok,protocolVersion,reasonCode,runId"
+  return keys === "arm,modelCalls,models,ok,protocolVersion,reasonCode,runId"
     && typeof v.reasonCode === "string" && WORKER_FAILURE_REASONS.has(v.reasonCode);
 }

@@ -15,7 +15,7 @@ const MAX_REQUEST = 512 * 1024;
 const MAX_RESULT = 512 * 1024;
 
 function fail(reasonCode: WorkerResponse["reasonCode"], request?: Pick<WorkerRequest, "runId" | "arm">): WorkerResponse {
-  return { protocolVersion: PROTOCOL_VERSION, runId: request?.runId ?? "invalid", arm: request?.arm ?? "baseline", ok: false, reasonCode };
+  return { protocolVersion: PROTOCOL_VERSION, runId: request?.runId ?? "invalid", arm: request?.arm ?? "baseline", ok: false, reasonCode, modelCalls: 0, models: [] };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -28,7 +28,11 @@ function validRequest(value: unknown): value is WorkerRequest {
   if (typeof value.armRoot !== "string" || typeof value.fixtureModule !== "string" || typeof value.exportName !== "string" || !isRecord(value.seed)) return false;
   if (!Array.isArray(value.seed.agents ?? []) || !isRecord(value.seed.workspaceFiles ?? {})) return false;
   if (value.candidate !== undefined && !isRecord(value.candidate)) return false;
-  return Object.keys(value).every((key) => ["protocolVersion", "runId", "arm", "armRoot", "fixtureModule", "exportName", "input", "seed", "candidate"].includes(key));
+  if (value.broker !== undefined) {
+    const b = value.broker;
+    if (!isRecord(b) || typeof b.url !== "string" || typeof b.token !== "string" || !/^https?:\/\/127\.0\.0\.1:\d+$/.test(b.url)) return false;
+  }
+  return Object.keys(value).every((key) => ["protocolVersion", "runId", "arm", "armRoot", "fixtureModule", "exportName", "input", "seed", "candidate", "broker"].includes(key));
 }
 
 function applyDatabaseCandidate(db: any, candidate: CandidateSpec): void {
@@ -82,10 +86,28 @@ async function run(request: WorkerRequest): Promise<WorkerResponse> {
     const fixture = await import(pathToFileURL(fixturePath).href);
     const probe = fixture[request.exportName];
     if (typeof probe !== "function") return fail("fixture_export_missing", request);
-    const value = await probe({ db, workspaceDir, input: request.input });
+    // E2-B — 모델 호출은 브로커 경유만. 샌드박스가 그 포트 외 네트워크를 막아서
+    // 직접 프로바이더 호출은 물리적으로 불가하고, 토큰 없는 호출은 브로커가 401로 거른다.
+    let modelCalls = 0;
+    const models = new Set<string>();
+    const chat = request.broker
+      ? async (model: string, messages: unknown[], opts: Record<string, unknown> = {}) => {
+          modelCalls++;
+          const res = await fetch(`${request.broker!.url}/chat`, {
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${request.broker!.token}` },
+            body: JSON.stringify({ model, messages, opts }),
+          });
+          if (!res.ok) throw new Error(`broker_${res.status}`);
+          const data = await res.json() as { content: string };
+          models.add(model);
+          return data.content;
+        }
+      : async () => { throw new Error("model_unavailable"); };
+    const value = await probe({ db, workspaceDir, input: request.input, chat });
     const encoded = canonicalJson(value);
     if (Buffer.byteLength(encoded) > MAX_RESULT) return fail("result_too_large", request);
-    return { protocolVersion: PROTOCOL_VERSION, runId: request.runId, arm: request.arm, ok: true, value: JSON.parse(encoded) };
+    return { protocolVersion: PROTOCOL_VERSION, runId: request.runId, arm: request.arm, ok: true, value: JSON.parse(encoded), modelCalls, models: [...models] };
   } catch {
     return fail("fixture_failed", request);
   } finally {
