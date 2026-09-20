@@ -212,7 +212,7 @@ export interface ReleaseReceipt {
 export interface EvolveUpdate {
   id: string; version: number | null; status: "pending" | "applied" | "rejected" | "reverted";
   restart_required: number; source: string | null; created_at: number; applied_at: number | null;
-  payload: { summary: string; measurement: { verdict: string; reason: string; baseline?: { passRate: number; avgLatencyMs: number }; candidate?: { passRate: number; avgLatencyMs: number } }; ops: { kind: string; surface: string; target: string }[] };
+  payload: { summary: string; measurement: { verdict: string; reason: string; baseline?: { passRate: number; avgLatencyMs: number }; candidate?: { passRate: number; avgLatencyMs: number } }; ops: { kind: string; surface: string; target: string }[]; rejectedReason?: string };
 }
 
 export interface ApprovalRequest {

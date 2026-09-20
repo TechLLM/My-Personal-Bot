@@ -3,8 +3,9 @@
 import { Hono } from "hono";
 import { db, uid, now, getSetting, setSetting } from "./db";
 import { emitUI } from "./events";
-import { readFileSync, readdirSync, statSync, existsSync, lstatSync, realpathSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, existsSync, lstatSync, realpathSync, openSync, fstatSync, closeSync, constants, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve, relative, isAbsolute } from "node:path";
+import { createHash } from "node:crypto";
 import type { EvalVerdict } from "./evaluate";
 import { evaluationCheck, evaluationGate, evaluationStatus } from "./evaluation-evidence";
 import * as isolation from "./evolve/isolation";
@@ -484,9 +485,16 @@ export async function runCycle(candidate: Candidate, opts: { baseline?: BenchRes
         // 승격은 벤치 원장이 아니라 사용자의 버전 업데이트로만 — promotionEligible은 항상 false
         result: { candidate: measured, holdout, promotionEligible: false, brokerUsage: usage, arms: armReceipts },
       });
+      let ship = "";
+      if (verdict.verdict === "keep") {
+        // E7 — keep 판정 패키지에 격리 측정 증거를 붙여 서비스로 발송. 적용은 사용자 버전 업데이트로만.
+        ship = " · " + await publishUpdate(candidate, lockId, verdict.reason, {
+          baseline, candidate: measured, holdout, arms: armReceipts, brokerUsage: usage,
+        });
+      }
       const cost = usage.byTag ?? {};
       const est = (tag: string) => Math.round((cost[tag]?.estTokens ?? 0) / 100) / 10;
-      return { experimentId: lockId, verdict: verdict.verdict, reason: `${verdict.reason} — 토큰 추정 기준선 ~${est("baseline")}k · 후보 ~${est("candidate")}k` };
+      return { experimentId: lockId, verdict: verdict.verdict, reason: `${verdict.reason}${ship} — 토큰 추정 기준선 ~${est("baseline")}k · 후보 ~${est("candidate")}k` };
     } finally {
       await broker.close();
     }
@@ -512,6 +520,59 @@ export interface UpdatePackage {
   measurement: { baseline: unknown; candidate: unknown; verdict: string; reason: string };
   ops: UpdateOp[];
   source: string;              // 개발 인스턴스 실험 id
+  evidence?: PackageEvidence;  // E7 — 서비스가 검증하는 측정 증거
+}
+
+// E7 — 패키지가 주장하는 "검증됨"을 서비스가 독립 검사한다.
+// dev가 만든 증거이므로 출처를 암호학적으로 증명할 수는 없지만, 적어도 증거 없는
+// 패키지·측정과 다른 ops·실모델 호출이 없는 벤치는 수령 단계에서 걸러진다.
+export interface PackageEvidence {
+  experimentId: string;
+  candidateKey: string;        // ops와 측정한 후보가 같은 것인지 묶는 지문
+  arms: unknown[];             // 팔별 격리 영수증 (boundedArmReceipt)
+  brokerUsage?: unknown;       // 브로커 계측 — 팔별 호출·토큰
+  holdout?: unknown;           // E3 holdout 재측정 결과
+  at: number;
+}
+
+// ops의 정규 지문 — dev가 측정한 후보와 서비스에 도착한 ops가 같은 것인지 대조한다
+export function opsKey(ops: UpdateOp[]): string {
+  const canon = ops
+    .map((o) => ({ kind: o.kind, surface: o.surface, target: o.target, column: o.column ?? null, newValue: o.newValue ?? null, newContent: o.newContent ?? null }))
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return createHash("sha256").update(JSON.stringify(canon)).digest("hex");
+}
+
+// 서비스 수령 검증 — 증거가 없거나 형식이 안 맞거나 측정이 불완전하면 수령하지 않는다.
+// 이 검사는 형식의 정합성만 본다 — 증거가 진짜 실측인지는 dev의 격리 인프라가 보장한다.
+export function verifyUpdatePackage(pkg: UpdatePackage): { ok: true } | { ok: false; error: string } {
+  if (typeof pkg.source !== "string" || !pkg.source.trim())
+    return { ok: false, error: "출처 실험 id(source)가 없습니다 — 원장 추적이 안 되는 패키지는 받지 않습니다" };
+  const m = pkg.measurement as any;
+  if (!m || typeof m !== "object") return { ok: false, error: "측정 근거(measurement)가 없습니다" };
+  if (m.verdict !== "keep") return { ok: false, error: `판정이 keep이 아닙니다: ${m.verdict ?? "없음"}` };
+  const gate = evaluationGate(m.baseline, m.candidate);
+  if (gate) return { ok: false, error: `측정 불완전 — ${gate}` };
+  const e = pkg.evidence;
+  if (!e || typeof e !== "object") return { ok: false, error: "증거(evidence)가 없습니다 — 격리 측정 영수증이 필요합니다" };
+  if (e.experimentId !== pkg.source) return { ok: false, error: "증거의 실험 id가 패키지 출처와 다릅니다" };
+  if (!Array.isArray(e.arms) || e.arms.length < 2) return { ok: false, error: "팔별 격리 영수증이 없습니다" };
+  const arms = e.arms as any[];
+  if (!arms.some((a) => a?.arm === "baseline") || !arms.some((a) => a?.arm === "candidate"))
+    return { ok: false, error: "기준선·후보 두 팔의 영수증이 모두 필요합니다" };
+  for (const a of arms) {
+    for (const f of ["sourceHash", "dependencyHash", "harnessHash", "policyHash"] as const)
+      if (typeof a?.[f] !== "string" || !/^[a-f0-9]{64}$/.test(a[f])) return { ok: false, error: `영수증 ${f} 누락 또는 형식 오류` };
+    if (!a?.runtime?.path) return { ok: false, error: "영수증에 실행 런타임 정보가 없습니다" };
+    if (a?.model?.executed !== true || !(a?.model?.calls >= 1))
+      return { ok: false, error: "실모델 호출이 확인되지 않는 영수증입니다 — 격리 실측 없는 패키지는 받지 않습니다" };
+  }
+  // 패키지의 ops가 실제로 측정된 후보와 같은 것인지 — 측정 A·발송 B 사기를 차단
+  if (e.candidateKey !== opsKey(pkg.ops)) return { ok: false, error: "ops가 측정된 후보와 다릅니다 — 측정과 다른 내용은 적용할 수 없습니다" };
+  const h = e.holdout as any;
+  if (!h || evaluationGate(h.baseline) || evaluationGate(h.candidate))
+    return { ok: false, error: "holdout 재측정 근거가 없거나 불완전합니다" };
+  return { ok: true };
 }
 
 // 서비스 인스턴스 — 패키지 ops를 실제 적용하고 되돌림 ops를 만든다 (사용자 버전 업데이트 경로)
@@ -557,6 +618,85 @@ export function applyUpdateOps(ops: UpdateOp[]): { revertOps: UpdateOp[]; restar
     }
   }
   return { revertOps, restartRequired };
+}
+
+// ---------- 발송 — keep 판정 패키지를 서비스로 보낸다 (dev 인스턴스 전용) ----------
+
+const SERVICE_URL = process.env.MYBOT_SERVICE_URL ?? "http://127.0.0.1:5274";
+
+// 측정한 후보를 패키지 ops로 번역 — code 표면은 파일 내용, db 표면은 컬럼 값
+export function candidateToOps(c: Candidate): UpdateOp[] {
+  const surf = loadSurfaces().surfaces.find((s) => s.id === c.surface);
+  if (surf?.kind === "code")
+    return [{ kind: "code", surface: c.surface, target: c.filePath ?? c.target, newContent: c.newContent ?? "" }];
+  return [{ kind: "db", surface: c.surface, target: c.target, column: c.column, newValue: c.newValue ?? "" }];
+}
+
+// dev가 서비스 API를 부를 때 쓰는 키 — 명시 설정(env·설정)이 없으면 같은 머신의
+// 서비스 인증 저장소를 읽는다. 서비스는 access.key 파일, 없으면 DB의 access_code로 인증한다.
+async function serviceKey(): Promise<string | null> {
+  const env = process.env.MYBOT_SERVICE_KEY?.trim();
+  if (env) return env;
+  const svcDir = process.env.MYBOT_SERVICE_DIR || getSetting("evolve_service_dir") || join(ROOT, "..", "MyBot");
+  const file = process.env.MYBOT_SERVICE_KEY_FILE || getSetting("evolve_service_key_file")
+    || join(svcDir, "server", "data", "access.key");
+  const fd = (() => { try { return openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW); } catch { return null; } })();
+  if (fd !== null) {
+    try {
+      const s = fstatSync(fd);
+      if (s.isFile() && (s.mode & 0o077) === 0 && (!process.getuid || s.uid === process.getuid()))
+        return readFileSync(fd, "utf8").trim() || null;
+    } finally { closeSync(fd); }
+  }
+  try {
+    const { Database } = await import("bun:sqlite");
+    const svcDb = new Database(join(svcDir, "server", "data", "mybot.db"), { readonly: true });
+    try {
+      const row = svcDb.prepare("SELECT value FROM settings WHERE key = 'access_code'").get() as any;
+      return (row?.value ?? "").trim() || null;
+    } finally { svcDb.close(); }
+  } catch { return null; }
+}
+
+// 개발 인스턴스 — keep 판정 패키지에 격리 측정 증거를 붙여 서비스로 발송한다.
+// 실패하면 outbox에 남겨 다음에 재시도할 수 있게 한다.
+async function publishUpdate(candidate: Candidate, expId: string, reason: string, measurement: { baseline: BenchResult; candidate: BenchResult; holdout?: unknown; arms: object[]; brokerUsage: unknown }): Promise<string> {
+  const ops = candidateToOps(candidate);
+  const pkg: UpdatePackage = {
+    summary: candidate.summary,
+    measurement: { baseline: measurement.baseline, candidate: measurement.candidate, verdict: "keep", reason },
+    ops,
+    source: expId,
+    evidence: {
+      experimentId: expId,
+      candidateKey: opsKey(ops),
+      arms: measurement.arms,
+      brokerUsage: measurement.brokerUsage,
+      holdout: measurement.holdout,
+      at: now(),
+    },
+  };
+  const key = await serviceKey();
+  const toOutbox = (why: string) => {
+    const outbox = join(EVOLVE_DIR, "updates-outbox");
+    mkdirSync(outbox, { recursive: true });
+    writeFileSync(join(outbox, `${expId}.json`), JSON.stringify(pkg, null, 2));
+    return `${why} — outbox에 보관: ${expId}.json`;
+  };
+  if (!key) return toOutbox("서비스 접속 키가 설정되지 않았습니다");
+  try {
+    const r = await fetch(`${SERVICE_URL}/api/evolve/updates`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-mybot-key": key },
+      body: JSON.stringify(pkg),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!r.ok) throw new Error(`서비스 응답 ${r.status} — ${(await r.text()).slice(0, 200)}`);
+    const d = (await r.json()) as any;
+    return `서비스 수령 완료 — 업데이트 ${d.id} (사용자 버전 업데이트 대기)`;
+  } catch (e) {
+    return toOutbox(`서비스 발송 실패(${(e as Error).message})`);
+  }
 }
 
 // ---------- S5: 능동 탐색 — 실패 분석 → 개선 후보 발굴 → 사이클 진입 ----------
@@ -774,6 +914,15 @@ export const evolveRoute = new Hono()
       if (op.kind !== "db" && op.kind !== "code") return c.json({ error: `op.kind 불가: ${op.kind}` }, 400);
       if (op.kind === "code" && isProtectedPath(op.target)) return c.json({ error: `보호 경로는 업데이트 불가: ${op.target}` }, 400);
     }
+    // E7 — 측정 증거 검증: 영수증 없는 패키지·측정과 다른 ops·불완전한 벤치는 수령하지 않는다.
+    // 거부 사실은 rejected로 남겨 사용자가 무엇이 걸렸는지 볼 수 있게 한다.
+    const check = verifyUpdatePackage(pkg);
+    if (!check.ok) {
+      db.prepare("INSERT INTO evolve_updates (id, payload, status, source, created_at) VALUES (?, ?, 'rejected', ?, ?)")
+        .run(uid(), JSON.stringify({ ...pkg, rejectedReason: check.error }), pkg.source ?? null, now());
+      emitUI("evolve");
+      return c.json({ error: check.error }, 400);
+    }
     const id = uid();
     db.prepare("INSERT INTO evolve_updates (id, payload, status, source, created_at) VALUES (?, ?, 'pending', ?, ?)")
       .run(id, JSON.stringify(pkg), pkg.source ?? null, now());
@@ -790,6 +939,15 @@ export const evolveRoute = new Hono()
     const row = db.prepare("SELECT * FROM evolve_updates WHERE id = ? AND status = 'pending'").get(c.req.param("id")) as any;
     if (!row) return c.json({ error: "대기 중인 업데이트가 아닙니다" }, 404);
     const pkg = JSON.parse(row.payload) as UpdatePackage;
+    // 수령 이후 코드가 바뀌었거나 구형 패키지가 남아 있을 수 있다 — 적용 전에 증거를 다시 검증한다.
+    // 결정적 검증이므로 실패하면 이 패키지는 영원히 통과 못 한다 — rejected로 마감한다.
+    const recheck = verifyUpdatePackage(pkg);
+    if (!recheck.ok) {
+      db.prepare("UPDATE evolve_updates SET status = 'rejected', payload = ? WHERE id = ?")
+        .run(JSON.stringify({ ...pkg, rejectedReason: `적용 시 재검증 실패 — ${recheck.error}` }), row.id);
+      emitUI("evolve");
+      return c.json({ error: `증거 재검증 실패 — ${recheck.error}` }, 400);
+    }
     try {
       const { revertOps, restartRequired } = applyUpdateOps(pkg.ops);
       const version = (Number(getSetting("app_version")) || 0) + 1;

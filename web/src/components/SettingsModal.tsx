@@ -1128,6 +1128,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                           <span className="flex-1 font-medium text-stone-800">{u.payload?.summary}</span>
                         </div>
                         {gain && <div className="mt-1 text-caption text-stone-500">{gain}</div>}
+                        {u.status === "rejected" && !!u.payload?.rejectedReason && <div className="mt-1 text-caption text-red-500">거부 사유: {u.payload.rejectedReason}</div>}
                         {!!u.restart_required && <div className="mt-1 text-caption text-amber-600">적용 후 반영까지 잠시 시간이 걸릴 수 있습니다</div>}
                         <div className="mt-2 flex gap-1.5">
                           {u.status === "pending" && (
