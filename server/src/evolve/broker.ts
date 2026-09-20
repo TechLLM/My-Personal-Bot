@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 export interface BrokerUsage {
   calls: number;
   estTokens: number; // usage 미제공 프로바이더용 추정치(문자/4) — E4에서 실제 usage로 대체 가능
+  byTag: Record<string, { calls: number; estTokens: number; models: string[] }>;
 }
 
 export interface BrokerHandle {
@@ -23,14 +24,22 @@ export type BrokerUpstream = (
   model: string,
   messages: unknown[],
   opts: Record<string, unknown>,
-) => Promise<{ content: string; usage?: { total_tokens?: number } }>;
+) => Promise<{ content: string; toolCalls?: { id?: string; name: string; arguments: string }[]; usage?: { total_tokens?: number } }>;
 
 async function realUpstream(model: string, messages: unknown[], opts: Record<string, unknown>) {
   const { resolveModel } = await import("../providers");
   const { chatOnce } = await import("../providers/openaiCompat");
   const { endpoint, model: resolved } = resolveModel(model);
   const res = await chatOnce(endpoint, resolved, messages as any, opts as any);
-  return { content: res.content ?? "", usage: (res as any).usage };
+  return { content: res.content ?? "", toolCalls: res.toolCalls, usage: (res as any).usage };
+}
+
+// 허용 목록은 풀 id("prov/model")로 관리한다 — worker가 보낸 bare 이름은
+// 목록 중 그 접미사와 정확히 하나만 일치할 때 해석된다.
+function resolveAllowed(allowed: Set<string>, requested: string): string | null {
+  if (allowed.has(requested)) return requested;
+  const hits = [...allowed].filter((id) => id.endsWith(`/${requested}`) || id === requested);
+  return hits.length === 1 ? hits[0] : null;
 }
 
 export function startBroker(opts: {
@@ -44,15 +53,24 @@ export function startBroker(opts: {
   const maxCalls = opts.maxCalls ?? 40;
   const maxEstTokens = opts.maxEstTokens ?? 200_000;
   const upstream = opts.upstream ?? realUpstream;
-  const usage: BrokerUsage = { calls: 0, estTokens: 0 };
+  const usage: BrokerUsage = { calls: 0, estTokens: 0, byTag: {} };
+  const tagUsage = (tag: string) => (usage.byTag[tag] ??= { calls: 0, estTokens: 0, models: [] });
 
   const server: Server = createServer((req, res) => {
     const reply = (code: number, body: object) => {
       res.writeHead(code, { "content-type": "application/json" });
       res.end(JSON.stringify(body));
     };
-    if (req.method !== "POST" || req.url !== "/chat") return reply(404, { error: "not_found" });
-    if (req.headers.authorization !== `Bearer ${token}`) return reply(401, { error: "unauthorized" });
+    const isChat = req.method === "POST" && req.url === "/chat";
+    const isOpenAI = req.method === "POST" && req.url === "/v1/chat/completions";
+    const isUsage = req.method === "GET" && req.url === "/usage";
+    if (!isChat && !isOpenAI && !isUsage) return reply(404, { error: "not_found" });
+    // 토큰 뒤에 ":태그"를 붙이면 호출이 그 태그로 계측된다 — 격리 비교는 팔(arm)별
+    // 토큰 태그를 써서 같은 브로커를 공유하면서도 팔별 비용을 분리해 기록한다.
+    const auth = req.headers.authorization ?? "";
+    const [bearer, tag = "default"] = auth.startsWith("Bearer ") ? auth.slice(7).split(":") : ["", "default"];
+    if (bearer !== token) return reply(401, { error: "unauthorized" });
+    if (isUsage) return reply(200, usage);
     let body = "";
     req.on("data", (c) => {
       body += c;
@@ -62,15 +80,39 @@ export function startBroker(opts: {
       let parsed: any;
       try { parsed = JSON.parse(body); } catch { return reply(400, { error: "invalid_json" }); }
       if (typeof parsed?.model !== "string" || !Array.isArray(parsed?.messages)) return reply(400, { error: "invalid_request" });
-      if (!allowed.has(parsed.model)) return reply(403, { error: "model_not_allowed" });
+      const resolvedModel = resolveAllowed(allowed, parsed.model);
+      if (!resolvedModel) return reply(403, { error: "model_not_allowed" });
       if (usage.calls >= maxCalls) return reply(429, { error: "call_limit" });
       if (usage.estTokens >= maxEstTokens) return reply(429, { error: "token_budget" });
       usage.calls++;
+      const per = tagUsage(tag);
       try {
-        const out = await upstream(parsed.model, parsed.messages, parsed.opts ?? {});
+        // /v1은 OpenAI 요청 형식을 받는다 — tools·tool_choice·reasoning_effort를 그대로 전달
+        const opts = isOpenAI
+          ? { tools: parsed.tools, toolChoice: parsed.tool_choice, reasoningEffort: parsed.reasoning_effort }
+          : (parsed.opts ?? {});
+        const out = await upstream(resolvedModel, parsed.messages, opts);
         const inChars = parsed.messages.reduce((n: number, m: any) => n + String(m?.content ?? "").length, 0);
-        usage.estTokens += out.usage?.total_tokens ?? Math.ceil((inChars + out.content.length) / 4);
-        reply(200, { content: out.content });
+        const spent = out.usage?.total_tokens ?? Math.ceil((inChars + out.content.length) / 4);
+        usage.estTokens += spent;
+        per.calls++;
+        per.estTokens += spent;
+        if (!per.models.includes(resolvedModel)) per.models.push(resolvedModel);
+        if (isOpenAI) {
+          reply(200, {
+            id: `broker-${randomUUID()}`, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: resolvedModel,
+            choices: [{
+              index: 0, finish_reason: out.toolCalls?.length ? "tool_calls" : "stop",
+              message: {
+                role: "assistant", content: out.content,
+                ...(out.toolCalls?.length ? { tool_calls: out.toolCalls.map((tc, i) => ({ id: tc.id ?? `call_${i}`, type: "function", function: { name: tc.name, arguments: tc.arguments ?? "{}" } })) } : {}),
+              },
+            }],
+            usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: out.usage?.total_tokens ?? 0 },
+          });
+        } else {
+          reply(200, { content: out.content, model: resolvedModel });
+        }
       } catch (e) {
         reply(502, { error: `upstream_error: ${(e as Error).message.slice(0, 200)}` });
       }

@@ -51,8 +51,7 @@ test("정적 preflight는 traversal·보호 대상·미등록 DB 컬럼을 실�
     newContent: `${originalReport.toString("utf8")}\n// static preflight fixture\n`, summary: "fixture",
   };
   const validResult = await preflightCandidate(valid);
-  expect(validResult.length).toBeGreaterThan(0);
-  expect(validResult.join(" ")).toContain("isolated-production-unavailable");
+  expect(validResult).toEqual([]); // 유효한 후보는 정적 검사를 통과한다 — 격리 실행 자체는 runCycle이 수행
   expect(readFileSync(reportPath)).toEqual(originalReport);
 
   const traversal: Candidate = {
@@ -161,7 +160,7 @@ test("runCycle은 격리 결과를 승격하지 않고 원장을 마감하며 �
     expect(readFileSync(reportPath)).toEqual(originalReport);
     expect(outboxCounts()).toEqual(beforeOutbox);
     expect(fetchCount).toBe(0);
-    expect(isolationSpy).toHaveBeenCalledTimes(1);
+    expect(isolationSpy).toHaveBeenCalled(); // 골든 과제마다 한 번 — 과제당 baseline/candidate 비교 1회
   } finally {
     isolationSpy.mockRestore();
     fetchSpy.mockRestore();
@@ -172,7 +171,7 @@ test("runCycle은 격리 결과를 승격하지 않고 원장을 마감하며 �
   }
 });
 
-test("dailyEvolveTick은 모델·네트워크·상태 생성 없이 격리 실행 불가를 반환한다", async () => {
+test("dailyEvolveTick은 모델·네트워크·상태 생성 없이 자동 사이클 보류를 반환한다", async () => {
   const previousEnv = process.env.MYBOT_ENV;
   const restoreExperiments = parkExistingExperiments();
   const before = {
@@ -191,7 +190,7 @@ test("dailyEvolveTick은 모델·네트워크·상태 생성 없이 격리 실�
   try {
     process.env.MYBOT_ENV = "dev";
     const result = await dailyEvolveTick();
-    expect(result).toContain("isolated-production-unavailable");
+    expect(result).toContain("auto-cycle-paused");
     expect(fetchCount).toBe(0);
     expect({
       agents: tableCount("agents"),

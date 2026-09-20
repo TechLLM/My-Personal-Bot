@@ -721,6 +721,57 @@ export async function probe(ctx) {
     }
   }, 15_000);
 
+  childTest("production mode runs a golden task through the real pipeline via broker", async () => {
+    const { startBroker } = await import("./evolve/broker");
+    // production은 실제 파이프라인을 도니 sourceRoot가 실제 저장소여야 한다 —
+    // 스냅샷에 server/src 전체와 node_modules가 들어가야 team.ts가 샌드박스 안에서 임포트된다.
+    const repoRoot = resolve(import.meta.dir, "../..");
+    // 스텁: 첫 호출은 agent_list 도구 호출을, 도구 결과가 messages에 들어오면 최종 답을 반환.
+    // 모델→도구→모델 왕복이 샌드박스 안에서 실제로 도는지 검증한다.
+    const broker = await startBroker({
+      models: ["zai/glm-5.3-flash"],
+      upstream: async (_m, messages) => {
+        const hasToolResult = (messages as any[]).some((m) => m?.role === "tool");
+        if (!hasToolResult) return { content: "", toolCalls: [{ name: "agent_list", arguments: "{}" }] };
+        return { content: "확인 완료 — 등록 봇 수 보고" };
+      },
+    });
+    try {
+      const result = await runIsolatedComparison({
+        sourceRoot: repoRoot,
+        candidate: { surface: "agent.role", target: "bench-bot", newValue: "개선된 역할", summary: "DB 표면 후보" },
+        mode: "production",
+        seed: {
+          agents: [{ id: "bench-bot", name: "Bench Bot", role_prompt: "원래 역할", model: "zai/glm-5.3-flash" }],
+          workspaceFiles: { "seed.txt": "seed-data" },
+        },
+        golden: {
+          id: "GT", prompt: "봇 수를 확인해줘", agent: "Bench Bot",
+          checks: [{ type: "tool_used", tool: "agent_list" }, { type: "content_regex", pattern: "봇 수" }],
+        },
+        model: "zai/glm-5.3-flash",
+        broker: { port: broker.port, token: broker.token },
+        deadlineMs: 120_000,
+      });
+      expect(result.status).toBe("complete");
+      for (const arm of [result.baseline!, result.candidate!]) {
+        const v = arm.value as any;
+        expect(v.pass).toBe(true);
+        expect(v.checks.every((c: any) => c.pass === true)).toBe(true);
+        expect(arm.model.executed).toBe(true);
+        expect(arm.model.calls).toBeGreaterThanOrEqual(2); // 도구 왕복 = 호출 2회
+        expect(arm.model.resolved).toContain("zai/glm-5.3-flash");
+      }
+      expect(broker.usage().calls).toBeGreaterThanOrEqual(4);
+      expect(broker.usage().byTag.baseline?.calls).toBeGreaterThanOrEqual(2);
+      expect(broker.usage().byTag.candidate?.calls).toBeGreaterThanOrEqual(2);
+      expectDead(result.baseline!.pid);
+      expectDead(result.candidate!.pid);
+    } finally {
+      await broker.close();
+    }
+  }, 180_000);
+
   childTest("fails closed when a probe calls ctx.chat without a broker", async () => {
     const fixture = makeFixture(`
 export async function probe(ctx) {
@@ -738,7 +789,7 @@ export async function probe(ctx) {
   }, 10_000);
 });
 
-test("production mode is unavailable before arbitrary fixture execution", async () => {
+test("production mode refuses to run without broker, golden task, and model", async () => {
   const fixture = makeFixture();
   const marker = join(fixture.outer, "production-executed");
   writeFileSync(join(fixture.root, "server/src/probe.ts"), `import { writeFileSync } from "node:fs"; export async function probe(){ writeFileSync(${JSON.stringify(marker)}, "bad"); return 1 }`);
@@ -747,7 +798,7 @@ test("production mode is unavailable before arbitrary fixture execution", async 
     expect(result).toMatchObject({
       status: "inconclusive",
       promotionEligible: false,
-      reasonCode: "model_execution_unavailable",
+      reasonCode: "production_requirements_missing",
     });
     expect(existsSync(marker)).toBe(false);
   } finally {

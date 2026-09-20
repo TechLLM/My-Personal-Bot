@@ -49,7 +49,7 @@
       ]
     },
     {
-      "id": "G6", "holdout": false,
+      "id": "G6", "holdout": false, "env": true,
       "prompt": "오늘의 주요 기술 뉴스를 웹 검색해서 3줄로 요약해줘",
       "agent": "CEO",
       "checks": [

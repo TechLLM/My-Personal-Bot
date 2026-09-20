@@ -20,6 +20,22 @@ export interface SyntheticSeed {
   workspaceFiles?: Record<string, string>;
 }
 
+// E2-B production — 격리 worker가 실제 파이프라인으로 수행할 골든 과제.
+// 모델 호출은 브로커 경유로만 가능하다 (샌드박스가 그 포트 외 네트워크를 막는다).
+export interface GoldenCheckSpec {
+  type: string;
+  tool?: string; tool_prefix?: string; query?: string; pattern?: string; glob?: string;
+  fresh_minutes?: number; score?: number; name?: string; desc?: string;
+}
+
+export interface GoldenSpec {
+  id: string;
+  prompt: string;
+  agent?: string;   // 과제를 수행할 시드 봇 이름 (기본 CEO)
+  checks?: GoldenCheckSpec[];
+  then?: string;    // 2턴 과제의 후속 프롬프트
+}
+
 export const PROTOCOL_VERSION = 1;
 export type WorkerArm = "baseline" | "candidate";
 
@@ -33,7 +49,7 @@ export interface WorkerRequest {
   runId: string;
   arm: WorkerArm;
   armRoot: string;
-  fixtureModule: string;
+  fixtureModule?: string;
   exportName: string;
   input: unknown;
   seed: SyntheticSeed;
@@ -41,6 +57,10 @@ export interface WorkerRequest {
   // E2-B credential broker — 있으면 worker는 이 루프백 주소로만 모델 호출 가능
   // (샌드박스가 그 포트 outbound만 허용). API 키는 부모에만 있고 worker는 토큰만 든다.
   broker?: { url: string; token: string };
+  // E2-B production — 골든 과제가 있으면 fixture 대신 실제 파이프라인으로 실행한다
+  golden?: GoldenSpec;
+  model?: string;      // 측정 대상의 운영 모델 id — worker가 broker/<bare>로 재배선
+  evalModel?: string;  // eval_min 체크의 평가 모델 id
 }
 
 export interface WorkerResponse {
@@ -74,6 +94,8 @@ export interface ArmReceipt {
   signal: string | null;
   value?: unknown;
   reasonCode?: string;
+  // 실패 시 worker stderr의 마지막 2KB — 샌드박스 안 진단은 이것이 유일한 통로다
+  stderrTail?: string;
 }
 
 export function canonicalJson(value: unknown): string {

@@ -9,6 +9,7 @@ import {
   PROTOCOL_VERSION,
   type ArmReceipt,
   type CandidateSpec,
+  type GoldenSpec,
   type SyntheticSeed,
   type WorkerRequest,
 } from "./protocol";
@@ -38,6 +39,8 @@ export interface IsolationOptions {
   broker?: { port: number; token: string };
   // 이 측정이 요구하는 모델 id — 영수증의 model.requested로 기록된다
   model?: string;
+  evalModel?: string;    // eval_min 체크의 평가 모델 id
+  golden?: GoldenSpec;   // production 모드: worker가 실제 파이프라인으로 실행할 골든 과제
 }
 
 export interface IsolationResult {
@@ -127,7 +130,7 @@ function sandboxPolicy(armRoot: string, runtime: string, extraRead: string[] = [
   return `(version 1)\n(deny default)\n(allow signal (target self))\n(allow sysctl-read)\n(allow file-read-metadata ${filters})\n(allow file-read* ${filters})\n(allow process-exec (literal ${quotePolicy(runtime)}))\n(deny process-fork)\n${network}\n(allow file-write* (literal ${quotePolicy("/dev/null")}))\n(allow file-write* (subpath ${quotePolicy(join(armRoot, "server", "data"))}))\n(allow file-write* (subpath ${quotePolicy(join(armRoot, "tmp"))}))\n`;
 }
 
-interface ChildResult { pid: number; exitCode: number | null; signal: string | null; stdout: Buffer; reasonCode?: string }
+interface ChildResult { pid: number; exitCode: number | null; signal: string | null; stdout: Buffer; stderr: Buffer; reasonCode?: string }
 
 function executeSandboxed(args: string[], cwd: string, policy: string, deadlineMs: number, maxOutput: number, input = "", nodeEnv: "production" | "test" = "production"): Promise<ChildResult> {
   return new Promise((done) => {
@@ -141,6 +144,7 @@ function executeSandboxed(args: string[], cwd: string, policy: string, deadlineM
       },
     });
     const chunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
     let size = 0;
     let reasonCode: string | undefined;
     let settled = false;
@@ -159,14 +163,20 @@ function executeSandboxed(args: string[], cwd: string, policy: string, deadlineM
       else chunks.push(Buffer.from(chunk));
     };
     child.stdout.on("data", collect);
-    child.stderr.on("data", (chunk: Buffer) => { if (!killed) { size += chunk.length; if (size > maxOutput) kill("output_limit"); } });
+    // stderr는 영수증 진단용으로만 보관한다 — stdout과 같은 크기 예산을 공유한다
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (killed) return;
+      size += chunk.length;
+      if (size > maxOutput) kill("output_limit");
+      else errChunks.push(Buffer.from(chunk.subarray(0, Math.min(chunk.length, 8 * 1024))));
+    });
     child.stdin.on("error", () => { reasonCode ||= "stdin_failed"; });
     child.on("error", () => { reasonCode ||= "spawn_failed"; kill(reasonCode); });
     child.on("close", (code, signal) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      done({ pid: child.pid ?? 0, exitCode: code, signal, stdout: Buffer.concat(chunks), reasonCode });
+      done({ pid: child.pid ?? 0, exitCode: code, signal, stdout: Buffer.concat(chunks), stderr: Buffer.concat(errChunks), reasonCode });
     });
     child.stdin.end(input);
   });
@@ -213,14 +223,23 @@ async function candidatePreflight(options: IsolationOptions, root: string, depen
 
 export async function runIsolatedComparison(options: IsolationOptions): Promise<IsolationResult> {
   if (!options || typeof options !== "object") return { status: "inconclusive", promotionEligible: false, reasonCode: "mode_invalid" };
-  if (options.mode === "production") return { status: "inconclusive", promotionEligible: false, reasonCode: "model_execution_unavailable" };
-  if (options.mode !== "fixture") return { status: "inconclusive", promotionEligible: false, reasonCode: "mode_invalid" };
-  if (process.env.NODE_ENV !== "test") return { status: "inconclusive", promotionEligible: false, reasonCode: "fixture_mode_disabled" };
+  if (options.mode === "production") {
+    // E2-B — 실제 골든 업무를 브로커 경유 실모델로 격리 실행한다.
+    // broker·golden·model 없이는 측정할 수 없으므로 명시적으로 불능 처리한다.
+    if (!options.broker || !options.golden?.prompt || !options.model)
+      return { status: "inconclusive", promotionEligible: false, reasonCode: "production_requirements_missing" };
+  } else if (options.mode !== "fixture") {
+    return { status: "inconclusive", promotionEligible: false, reasonCode: "mode_invalid" };
+  } else {
+    if (process.env.NODE_ENV !== "test") return { status: "inconclusive", promotionEligible: false, reasonCode: "fixture_mode_disabled" };
+    if (!options.fixture?.modulePath) return { status: "inconclusive", promotionEligible: false, reasonCode: "fixture_required" };
+  }
   if (process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec"))
     return { status: "inconclusive", promotionEligible: false, reasonCode: "sandbox_unavailable" };
-  if (!options.fixture?.modulePath) return { status: "inconclusive", promotionEligible: false, reasonCode: "fixture_required" };
 
-  const deadline = bounded(options.deadlineMs, 5_000, 100, 60_000);
+  // production은 실모델 호출이 들어가 기본 3분·최대 10분까지, fixture는 기존 5초 상한
+  const production = options.mode === "production";
+  const deadline = bounded(options.deadlineMs, production ? 180_000 : 5_000, 100, production ? 600_000 : 60_000);
   const outputLimit = bounded(options.maxOutputBytes, 64 * 1024, 1_024, 1024 * 1024);
   let comparisonRoot: string | undefined;
   try {
@@ -233,8 +252,8 @@ export async function runIsolatedComparison(options: IsolationOptions): Promise<
       if (!options.candidate.surface.startsWith("agent.") || !seeded)
         return { status: "inconclusive", promotionEligible: false, reasonCode: "candidate_target_missing" };
     }
-    const fixturePath = safeRelativePath(options.fixture.modulePath);
-    if (!frozen.files.has(fixturePath)) throw new Error("fixture_not_frozen");
+    const fixturePath = production ? undefined : safeRelativePath(options.fixture!.modulePath);
+    if (fixturePath && !frozen.files.has(fixturePath)) throw new Error("fixture_not_frozen");
     const seed = options.seed ?? {};
     const schemaHash = hashBytes([frozen.files.get("server/src/db.ts")!]);
     const initialStateHash = hashBytes([canonicalJson({ seed, schemaHash })]);
@@ -266,35 +285,56 @@ export async function runIsolatedComparison(options: IsolationOptions): Promise<
       const policyHash = hashBytes([policy]);
       const request: WorkerRequest = {
         protocolVersion: PROTOCOL_VERSION, runId: randomUUID(), arm,
-        armRoot: root, fixtureModule: fixturePath, exportName: options.fixture!.exportName ?? "probe",
-        input: options.fixture!.input, seed,
+        armRoot: root, fixtureModule: fixturePath, exportName: options.fixture?.exportName ?? "probe",
+        input: options.fixture?.input, seed,
         candidate: arm === "candidate" && !codeTarget ? options.candidate : undefined,
-        broker: options.broker ? { url: `http://127.0.0.1:${options.broker.port}`, token: options.broker.token } : undefined,
+        // 토큰에 팔 태그를 붙인다 — 브로커가 같은 인증으로 팔별 비용을 분리 집계한다
+        broker: options.broker ? { url: `http://127.0.0.1:${options.broker.port}`, token: `${options.broker.token}:${arm}` } : undefined,
+        golden: production ? options.golden : undefined,
+        model: production ? options.model : undefined,
+        evalModel: production ? options.evalModel : undefined,
       };
       const startedAt = Date.now();
       const child = await executeSandboxed([join(root, workerRel)], root, policy, deadline, outputLimit, canonicalJson(request));
       const endedAt = Date.now();
+      const stderrTail = child.stderr.length ? child.stderr.toString("utf8").slice(-2048) : undefined;
       const receipt: ArmReceipt = {
         arm, pid: child.pid, sourceHash, dependencyHash: frozen.dependencyHash,
         initialStateHash, initialStateKind: "synthetic-seed-and-schema", harnessHash, policyHash, runtime,
         startedAt, endedAt, runtimeExecutableHash,
         model: { requested: options.model ?? null, resolved: [], executed: false, calls: 0 }, exitCode: child.exitCode, signal: child.signal,
       };
-      if (hashSnapshot(root, manifest) !== sourceHash) return { ...receipt, reasonCode: "source_mutated" };
+      const failReceipt = (reasonCode: string): ArmReceipt => ({ ...receipt, reasonCode, stderrTail });
+      if (hashSnapshot(root, manifest) !== sourceHash) return failReceipt("source_mutated");
       try {
         if (hashFrozenDeps(root, frozen.dependencies) !== frozen.dependencyHash)
-          return { ...receipt, reasonCode: "dependency_mutated" };
-      } catch { return { ...receipt, reasonCode: "dependency_mutated" }; }
-      if (child.reasonCode) return { ...receipt, reasonCode: child.reasonCode };
-      if (child.signal) return { ...receipt, reasonCode: "worker_signaled" };
-      if (child.exitCode !== 0) return { ...receipt, reasonCode: "worker_nonzero_exit" };
+          return failReceipt("dependency_mutated");
+      } catch { return failReceipt("dependency_mutated"); }
+      if (child.reasonCode) return failReceipt(child.reasonCode);
+      if (child.signal) return failReceipt("worker_signaled");
+      if (child.exitCode !== 0) return failReceipt("worker_nonzero_exit");
       let response: unknown;
-      try { response = JSON.parse(child.stdout.toString("utf8")); } catch { return { ...receipt, reasonCode: "worker_invalid_output" }; }
-      if (!isWorkerResponse(response, request)) return { ...receipt, reasonCode: "worker_invalid_output" };
-      if (!response.ok) return { ...receipt, reasonCode: response.reasonCode ?? "worker_failed" };
+      try { response = JSON.parse(child.stdout.toString("utf8")); } catch { return failReceipt("worker_invalid_output"); }
+      if (!isWorkerResponse(response, request)) return failReceipt("worker_invalid_output");
+      if (!response.ok) return failReceipt(response.reasonCode ?? "worker_failed");
       receipt.value = response.value;
-      // worker가 보고한 실제 브로커 호출 — executed는 영수증의 진실 원천이다
-      receipt.model = { requested: options.model ?? null, resolved: response.models, executed: response.modelCalls > 0, calls: response.modelCalls };
+      // 영수증의 진실 원천은 브로커 — 파이프라인 호출은 worker가 못 보지만 브로커는 다 본다.
+      // worker 보고(ctx.chat 경유)와 병합한다.
+      let brokerCalls = 0; let brokerModels: string[] = [];
+      if (options.broker) {
+        try {
+          const u = await (await fetch(`http://127.0.0.1:${options.broker.port}/usage`, { headers: { authorization: `Bearer ${options.broker.token}` } })).json() as any;
+          const per = u?.byTag?.[arm];
+          brokerCalls = per?.calls ?? 0;
+          brokerModels = per?.models ?? [];
+        } catch {}
+      }
+      receipt.model = {
+        requested: options.model ?? null,
+        resolved: [...new Set([...response.models, ...brokerModels])],
+        executed: response.modelCalls > 0 || brokerCalls > 0,
+        calls: Math.max(response.modelCalls, brokerCalls),
+      };
       return receipt;
     };
 
@@ -331,6 +371,7 @@ export async function runIsolatedComparison(options: IsolationOptions): Promise<
     return { status: "complete", promotionEligible: false, baseline, candidate };
   } catch (error) {
     const code = (error as Error).message;
+    if (process.env.E2_DEBUG) console.error("E2 parent failure:", error);
     return { status: "crash", promotionEligible: false, reasonCode: /^[a-z0-9_]+$/.test(code) ? code : "parent_failure" };
   } finally {
     if (comparisonRoot) {

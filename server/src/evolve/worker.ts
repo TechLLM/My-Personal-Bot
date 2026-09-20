@@ -1,9 +1,10 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   canonicalJson,
   PROTOCOL_VERSION,
+  WORKER_FAILURE_REASONS,
   type CandidateSpec,
   type WorkerArm,
   type WorkerRequest,
@@ -25,14 +26,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function validRequest(value: unknown): value is WorkerRequest {
   if (!isRecord(value) || value.protocolVersion !== PROTOCOL_VERSION || typeof value.runId !== "string" || !/^[0-9a-f-]{36}$/.test(value.runId)) return false;
   if (value.arm !== "baseline" && value.arm !== "candidate") return false;
-  if (typeof value.armRoot !== "string" || typeof value.fixtureModule !== "string" || typeof value.exportName !== "string" || !isRecord(value.seed)) return false;
+  if (typeof value.armRoot !== "string" || typeof value.exportName !== "string" || !isRecord(value.seed)) return false;
+  if (value.fixtureModule !== undefined && typeof value.fixtureModule !== "string") return false;
+  if (value.fixtureModule === undefined && value.golden === undefined) return false;
   if (!Array.isArray(value.seed.agents ?? []) || !isRecord(value.seed.workspaceFiles ?? {})) return false;
   if (value.candidate !== undefined && !isRecord(value.candidate)) return false;
   if (value.broker !== undefined) {
     const b = value.broker;
     if (!isRecord(b) || typeof b.url !== "string" || typeof b.token !== "string" || !/^https?:\/\/127\.0\.0\.1:\d+$/.test(b.url)) return false;
   }
-  return Object.keys(value).every((key) => ["protocolVersion", "runId", "arm", "armRoot", "fixtureModule", "exportName", "input", "seed", "candidate", "broker"].includes(key));
+  if (value.golden !== undefined) {
+    const g = value.golden;
+    if (!isRecord(g) || typeof g.id !== "string" || typeof g.prompt !== "string" || g.prompt.length > 32_768) return false;
+  }
+  if ((value.model !== undefined && typeof value.model !== "string") || (value.evalModel !== undefined && typeof value.evalModel !== "string")) return false;
+  return Object.keys(value).every((key) => ["protocolVersion", "runId", "arm", "armRoot", "fixtureModule", "exportName", "input", "seed", "candidate", "broker", "golden", "model", "evalModel"].includes(key));
 }
 
 function applyDatabaseCandidate(db: any, candidate: CandidateSpec): void {
@@ -82,10 +90,6 @@ async function run(request: WorkerRequest): Promise<WorkerResponse> {
       try { applyDatabaseCandidate(db, request.candidate); }
       catch { return fail("candidate_apply_failed", request); }
     }
-    const fixturePath = join(root, safeRelativePath(request.fixtureModule));
-    const fixture = await import(pathToFileURL(fixturePath).href);
-    const probe = fixture[request.exportName];
-    if (typeof probe !== "function") return fail("fixture_export_missing", request);
     // E2-B — 모델 호출은 브로커 경유만. 샌드박스가 그 포트 외 네트워크를 막아서
     // 직접 프로바이더 호출은 물리적으로 불가하고, 토큰 없는 호출은 브로커가 401로 거른다.
     let modelCalls = 0;
@@ -99,37 +103,159 @@ async function run(request: WorkerRequest): Promise<WorkerResponse> {
             body: JSON.stringify({ model, messages, opts }),
           });
           if (!res.ok) throw new Error(`broker_${res.status}`);
-          const data = await res.json() as { content: string };
-          models.add(model);
+          const data = await res.json() as { content: string; model?: string };
+          models.add(data.model ?? model); // 브로커가 해석한 실제 모델 id를 기록한다
           return data.content;
         }
       : async () => { throw new Error("model_unavailable"); };
-    const value = await probe({ db, workspaceDir, input: request.input, chat });
+    const value = request.golden
+      ? await runGolden(request, dbModule, db, workspaceDir, root, chat)
+      : await runFixture(request, root, db, workspaceDir, chat);
     const encoded = canonicalJson(value);
     if (Buffer.byteLength(encoded) > MAX_RESULT) return fail("result_too_large", request);
     return { protocolVersion: PROTOCOL_VERSION, runId: request.runId, arm: request.arm, ok: true, value: JSON.parse(encoded), modelCalls, models: [...models] };
-  } catch {
-    return fail("fixture_failed", request);
+  } catch (e) {
+    // stderr로 진단을 남긴다 — 부모는 실패 시 영수증의 stderrTail로만 수집한다
+    try { console.error("worker_error:", (e as Error)?.stack ?? e); } catch {}
+    const code = (e as Error).message;
+    return fail(WORKER_FAILURE_REASONS.has(code as any) ? code as WorkerResponse["reasonCode"] : "fixture_failed", request);
   } finally {
     try { db.close(); } catch {}
   }
 }
 
+type ChatFn = (model: string, messages: unknown[], opts?: Record<string, unknown>) => Promise<string>;
+
+async function runFixture(request: WorkerRequest, root: string, db: any, workspaceDir: string, chat: ChatFn): Promise<unknown> {
+  const fixturePath = join(root, safeRelativePath(request.fixtureModule!));
+  const fixture = await import(pathToFileURL(fixturePath).href);
+  const probe = fixture[request.exportName];
+  if (typeof probe !== "function") throw new Error("fixture_export_missing");
+  return await probe({ db, workspaceDir, input: request.input, chat });
+}
+
+const bareModel = (id: string) => id.slice(id.lastIndexOf("/") + 1);
+
+// E2-B production — 골든 과제를 실제 파이프라인(runAgentDetached)으로 실행한다.
+// 모델 호출은 전부 브로커 경유: 브로커를 OpenAI 호환 프로바이더로 등록해 운영 코드를
+// 수정 없이 재사용하고, 시드된 봇의 모델은 broker/<bare>로 재배선한다.
+// 운영 API 키·외부 데이터는 들어오지 않는다 — 합성 seed + 부모의 토큰뿐.
+async function runGolden(request: WorkerRequest, dbModule: any, db: any, workspaceDir: string, root: string, chat: ChatFn): Promise<unknown> {
+  const g = request.golden!;
+  if (!request.broker || !request.model) throw new Error("worker_environment_invalid");
+  // 브로커 프로바이더 등록 — defaultModelId()가 인증된 유일한 프로바이더로 이것을 고른다
+  const modelIds = new Set<string>();
+  for (const id of [request.model, request.evalModel, ...(request.seed.agents ?? []).map((a) => a.model)]) {
+    if (id) modelIds.add(bareModel(id));
+  }
+  dbModule.setSetting("custom_providers", JSON.stringify([{
+    id: "broker", name: "e2-broker", kind: "openai",
+    baseUrl: `${request.broker.url}/v1`, apiKey: request.broker.token,
+    models: [...modelIds],
+  }]));
+  // 시드된 봇의 모델을 브로커 경유로 재배선 — 측정된 실제 모델은 영수증 resolved에 기록된다
+  for (const a of request.seed.agents ?? []) {
+    db.prepare("UPDATE agents SET model = ? WHERE id = ?").run(`broker/${bareModel(a.model ?? request.model)}`, a.id);
+  }
+  const team = await import(pathToFileURL(join(root, "server", "src", "team.ts")).href);
+  const agentName = g.agent ?? "CEO";
+  const agent = team.findAgentByName(agentName)
+    ?? db.prepare("SELECT * FROM agents WHERE name = ? OR id = ?").get(agentName, agentName)
+    ?? team.ensureBossAgent();
+  const runOnce = async (task: string, label: string) => {
+    const { done } = team.runAgentDetached(agent, { label, task, verifyIntent: false, internal: true });
+    return await done;
+  };
+  const s1 = await runOnce(g.prompt, `[골든] ${g.id}`);
+  const s2 = g.then ? await runOnce(g.then, `[골든] ${g.id} 후속`) : null;
+  const final = s2 ?? s1;
+  const out = {
+    content: final.result ?? "",
+    content2: s2 ? s1.result ?? "" : undefined,
+    toolLog: [...(s1.toolLog ?? []), ...(s2?.toolLog ?? [])],
+  };
+  const checks = await evalGoldenChecks(g.checks ?? [], g.prompt, out, db, workspaceDir, root, chat, request.evalModel ?? request.model);
+  return {
+    status: final.status, steps: s1.steps + (s2?.steps ?? 0),
+    pass: checks.length > 0 && checks.every((c) => c.pass === true), checks,
+    result: out.content.slice(0, 4000),
+  };
+}
+
+// 골든 체크 — worker의 합성 DB·workspace를 대상으로 평가한다 (부모의 실제 DB가 아님).
+// eval_min은 evaluate.ts의 독립 평가 프롬프트를 재사용하고 모델 호출은 브로커로 간다.
+async function evalGoldenChecks(checks: any[], task: string, out: { content: string; toolLog: any[] }, db: any, workspaceDir: string, root: string, chat: ChatFn, evalModel: string): Promise<any[]> {
+  const walk = (d: string): string[] => {
+    try { return readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)])); } catch { return []; }
+  };
+  const results: any[] = [];
+  for (const c of checks) {
+    switch (c.type) {
+      case "tool_used":
+        results.push({ pass: out.toolLog.some((t) => t.tool === c.tool && t.ok), detail: c.tool });
+        break;
+      case "tool_prefix":
+        results.push({ pass: out.toolLog.some((t) => typeof t.tool === "string" && t.tool.startsWith(c.tool_prefix) && t.ok), detail: `${c.tool_prefix}*` });
+        break;
+      case "db_count": {
+        const row = db.prepare(c.query).get() as any;
+        const expected = row ? Number(Object.values(row)[0]) : 0;
+        const nums = (out.content.match(/\d+/g) ?? []).map(Number);
+        results.push({ pass: nums.includes(expected), detail: `기대값 ${expected}` });
+        break;
+      }
+      case "content_regex":
+        results.push({ pass: new RegExp(c.pattern).test(out.content), detail: `/${c.pattern}/` });
+        break;
+      case "file_exists": {
+        const exts = String(c.glob ?? "").replace("*", "");
+        const cutoff = Date.now() - (c.fresh_minutes ?? 10) * 60_000;
+        const hit = walk(workspaceDir).some((f) => f.endsWith(exts) && statSync(f).mtimeMs > cutoff);
+        results.push({ pass: hit, detail: c.glob });
+        break;
+      }
+      case "lifecycle": {
+        const created = db.prepare("SELECT 1 FROM approval_requests WHERE args LIKE ? AND tool = 'agent_create' LIMIT 1").get(`%${c.name}%`)
+          || db.prepare("SELECT 1 FROM agent_runs WHERE task LIKE ? LIMIT 1").get(`%${c.name}%`);
+        const exists = db.prepare("SELECT 1 FROM agents WHERE name = ?").get(c.name);
+        results.push({ pass: !!created && !exists, detail: `생성 흔적 ${created ? "있음" : "없음"}, 최종 존재 ${exists ? "함" : "없음"}` });
+        break;
+      }
+      case "eval_min": {
+        const { evaluateResult } = await import(pathToFileURL(join(root, "server", "src", "evaluate.ts")).href);
+        const { evaluationCheck } = await import(pathToFileURL(join(root, "server", "src", "evaluation-evidence.ts")).href);
+        const verdict = await evaluateResult({} as any, bareModel(evalModel), task, out.content, {
+          callModel: async (_ep: any, _m: string, msgs: any[]) => ({ content: await chat(bareModel(evalModel), msgs, {}) }),
+        });
+        results.push(evaluationCheck(verdict, c.score ?? 70));
+        break;
+      }
+      default:
+        // 모르는 체크는 평가하지 못한다 — 평가 안 된 항목을 통과로 세지 않도록 실패 처리
+        results.push({ pass: false, detail: `미지원 체크 유형: ${String(c?.type)}` });
+    }
+  }
+  return results;
+}
+
 async function main() {
+  // 응답을 쓰면 작업은 끝이다 — 파이프라인이 남긴 타이머·핸들이 이벤트 루프를 잡아도
+  // 부모의 deadline이 이 프로세스를 kill하지 않도록 flush 후 명시적으로 종료한다.
+  const reply = (r: WorkerResponse) => process.stdout.write(canonicalJson(r), () => process.exit(0));
   let body = "";
   for await (const chunk of Bun.stdin.stream()) {
     body += Buffer.from(chunk).toString("utf8");
     if (Buffer.byteLength(body) > MAX_REQUEST) {
-      process.stdout.write(canonicalJson(fail("request_too_large")));
+      reply(fail("request_too_large"));
       return;
     }
   }
   let parsed: unknown;
   try { parsed = JSON.parse(body); }
-  catch { process.stdout.write(canonicalJson(fail("request_invalid"))); return; }
-  if (!validRequest(parsed)) { process.stdout.write(canonicalJson(fail("request_invalid"))); return; }
+  catch { reply(fail("request_invalid")); return; }
+  if (!validRequest(parsed)) { reply(fail("request_invalid")); return; }
   const request = parsed;
-  process.stdout.write(canonicalJson(await run(request)));
+  reply(await run(request));
 }
 
 if (import.meta.main) await main();

@@ -15,7 +15,7 @@ const EVOLVE_DIR = join(ROOT, "evolve");
 // 서비스 인스턴스는 검증된 개선 패키지를 받아 사용자의 버전 업데이트로만 적용한다.
 export const IS_DEV = process.env.MYBOT_ENV === "dev";
 const isDevRuntime = () => process.env.MYBOT_ENV === "dev";
-const ISOLATED_PRODUCTION_UNAVAILABLE = "isolated-production-unavailable — E2-B 실제 골든 브리지가 준비되지 않았습니다";
+const AUTO_CYCLE_PAUSED = "auto-cycle-paused — 자동 사이클은 E3 동일 조건·E4 비용 계측까지 보류합니다 (수동 /evolve/cycle로 측정 가능)";
 const LEGACY_BENCH_UNAVAILABLE = "legacy-bench-unavailable — 격리되지 않은 골든 실행은 비활성화되었습니다";
 
 // ---------- 등록부·골든 과제 로더 ----------
@@ -301,8 +301,7 @@ async function validateCandidateStatic(c: Candidate): Promise<string[]> {
 
 // preflight — 계측 전 통과해야 할 결정적 검사. 실패 사유 배열 반환 (빈 배열 = 통과)
 export async function preflightCandidate(c: Candidate): Promise<string[]> {
-  const fails = await validateCandidateStatic(c);
-  return fails.length ? fails : [ISOLATED_PRODUCTION_UNAVAILABLE];
+  return validateCandidateStatic(c);
 }
 
 // 결정적 판정 — 비열등 게이트 (계약 §4). inconclusive는 keep 불가.
@@ -342,10 +341,50 @@ function boundedArmReceipt(receipt: any): object | undefined {
     runtimeExecutableHash: receipt.runtimeExecutableHash,
     startedAt: receipt.startedAt,
     endedAt: receipt.endedAt,
-    model: { requested: null, resolved: null, executed: false },
+    model: receipt.model ?? { requested: null, resolved: [], executed: false, calls: 0 },
     exitCode: receipt.exitCode ?? null,
     signal: receipt.signal ?? null,
     reasonCode: typeof receipt.reasonCode === "string" ? receipt.reasonCode.slice(0, 200) : undefined,
+    stderrTail: typeof receipt.stderrTail === "string" ? receipt.stderrTail.slice(-500) : undefined,
+  };
+}
+
+// 측정 대상의 운영 모델 — agent.* 표면은 그 봇의 모델, 나머지는 골든을 실행하는 CEO의 모델.
+// 벤치를 싼 모델로 재면 측정 자체가 무효라 절약하지 않는다 (개선지침서 역할 배정표).
+function productionModelFor(candidate: Candidate, fallback: string): string {
+  if (candidate.surface.startsWith("agent.")) {
+    const row = db.prepare("SELECT model FROM agents WHERE name = ? OR id = ?").get(candidate.target, candidate.target) as any;
+    if (row?.model) return row.model;
+  }
+  const ceo = db.prepare("SELECT model FROM agents WHERE is_boss = 1 LIMIT 1").get() as any;
+  return ceo?.model ?? fallback;
+}
+
+// 격리 벤치에 넣을 골든 과제 — holdout·외부 환경(env)·승인 필요 과제는 제외한다.
+// 네트워크 차단 샌드박스에서 env 과제는 측정이 아니라 노이즈다.
+function benchTasks(limit: number): GoldenTask[] {
+  return loadGoldenTasks().filter((t) => !t.env && !t.approvals && t.prompt).slice(0, Math.max(1, limit));
+}
+
+// 측정 환경 — 실제 봇 구성(역할문·모델)을 시드한다. 봇 설정 자체가 측정 대상 표면이므로
+// 합성으로 대체하면 후보를 재지 못한다. 키·사용자 데이터는 들어가지 않는다.
+function liveAgents(): { id: string; name: string; role_prompt?: string; model?: string }[] {
+  return db.prepare("SELECT id, name, role_prompt, model FROM agents").all() as any[];
+}
+
+function toBenchResult(samples: BenchSample[]): BenchResult {
+  const n = samples.length || 1;
+  const byTask: BenchResult["byTask"] = {};
+  for (const s of samples) {
+    byTask[s.taskId] ??= { n: 0, pass: 0 };
+    byTask[s.taskId].n++;
+    if (s.pass) byTask[s.taskId].pass++;
+  }
+  return {
+    passRate: samples.filter((s) => s.pass).length / n,
+    avgLatencyMs: samples.reduce((a, s) => a + s.latencyMs, 0) / n,
+    samples, byTask,
+    evaluationStatus: evaluationStatus(samples),
   };
 }
 
@@ -367,21 +406,54 @@ export async function runCycle(candidate: Candidate, opts: { baseline?: BenchRes
   try {
     const pre = await validateCandidateStatic(candidate);
     if (pre.length) { finish("discard", `preflight 실패: ${pre.join("; ")}`); return { experimentId: lockId, verdict: "discard", reason: pre.join("; ") }; }
-    const comparison = await isolation.runIsolatedComparison({ sourceRoot: ROOT, mode: "production", candidate });
-    const metadata = {
-      status: comparison.status,
-      promotionEligible: false,
-      reasonCode: comparison.reasonCode,
-      baseline: boundedArmReceipt(comparison.baseline),
-      candidate: boundedArmReceipt(comparison.candidate),
-    };
-    const reason = comparison.reasonCode ?? ISOLATED_PRODUCTION_UNAVAILABLE;
-    const verdict: ExperimentRow["verdict"] = comparison.status === "crash" ? "crash" : "inconclusive";
-    finish(verdict, reason, {
-      baseline: metadata.baseline as object | undefined,
-      result: metadata,
+
+    const { resolveModel, defaultModelId } = await import("./providers");
+    const { startBroker } = await import("./evolve/broker");
+    const tasks = benchTasks(surfaces.limits.benchSamples);
+    if (!tasks.length) {
+      finish("inconclusive", "격리 가능한 골든 과제가 없습니다 (holdout·env·승인 과제 제외)");
+      return { experimentId: lockId, verdict: "inconclusive", reason: "골든 과제 없음" };
+    }
+    const benchModel = productionModelFor(candidate, defaultModelId());
+    const evalModelId = defaultModelId();
+    // 측정에 필요한 모델만 허용 — 벤치 모델(측정 대상) + 평가 모델
+    const allowed = [...new Set([benchModel, evalModelId])];
+    for (const id of allowed) resolveModel(id); // 미인증·미등록 모델은 여기서 실패
+    // 과제당 양쪽 팔 최대 ~30회 호출 여유 — 브로커 상한이 무한 루프를 끊는다
+    const broker = await startBroker({ models: allowed, maxCalls: tasks.length * 60, maxEstTokens: 300_000 });
+    const seed = { agents: liveAgents() };
+    const baselineSamples: BenchSample[] = [];
+    const candidateSamples: BenchSample[] = [];
+    const armReceipts: object[] = [];
+    try {
+      for (const task of tasks) {
+        const cmp = await isolation.runIsolatedComparison({
+          sourceRoot: ROOT, mode: "production", candidate, golden: task,
+          broker: { port: broker.port, token: broker.token },
+          model: benchModel, evalModel: evalModelId, seed, deadlineMs: 180_000,
+        });
+        for (const [bucket, receipt] of [[baselineSamples, cmp.baseline], [candidateSamples, cmp.candidate]] as const) {
+          if (!receipt) continue;
+          armReceipts.push(boundedArmReceipt(receipt)!);
+          const v = receipt.value as any;
+          bucket.push({
+            taskId: task.id, pass: !!v?.pass, latencyMs: receipt.endedAt - receipt.startedAt,
+            checks: v?.checks ?? [], error: receipt.reasonCode,
+          });
+        }
+      }
+    } finally {
+      await broker.close();
+    }
+    const baseline = toBenchResult(baselineSamples);
+    const measured = toBenchResult(candidateSamples);
+    const verdict = judge(baseline, measured);
+    finish(verdict.verdict, verdict.reason, {
+      baseline: baseline as object | undefined,
+      // 승격은 벤치 원장이 아니라 사용자의 버전 업데이트로만 — promotionEligible은 항상 false
+      result: { candidate: measured, promotionEligible: false, brokerUsage: broker.usage(), arms: armReceipts },
     });
-    return { experimentId: lockId, verdict, reason };
+    return { experimentId: lockId, verdict: verdict.verdict, reason: verdict.reason };
   } catch (e) {
     finish("crash", (e as Error).message);
     return { experimentId: lockId, verdict: "crash", reason: (e as Error).message };
@@ -623,7 +695,7 @@ export async function dailyEvolveTick(): Promise<string> {
   const surfaces = loadSurfaces();
   if (cycleLockHeld()) return "건너뜀 — 사이클 실행 중";
   if (todayCycleCount() >= surfaces.limits.cyclesPerDay) return `건너뜀 — 일일 상한(${surfaces.limits.cyclesPerDay})`;
-  return `건너뜀 — ${ISOLATED_PRODUCTION_UNAVAILABLE}`;
+  return `건너뜀 — ${AUTO_CYCLE_PAUSED}`;
 }
 
 // 매일 정해진 시각(기본 03:00)에 자기개선 틱 — maintenance와 같은 패턴
