@@ -3,6 +3,20 @@ export interface SeedAgent {
   name: string;
   role_prompt?: string;
   model?: string;
+  // 조직 역할·구조 — is_boss/is_lead/special_role이 없으면 샌드박스에서 MANAGE_TOOLS가
+  // 비노출돼 생성·삭제 과제를 측정할 수 없고, CEO도 일반 봇 프롬프트로 강등돼
+  // 측정값이 운영 행동을 반영하지 못한다. 시드는 이 필드를 그대로 운반한다.
+  tools?: string | null;
+  persistent?: number;
+  is_boss?: number;
+  is_lead?: number;
+  parent_id?: string | null;
+  pinned?: number;
+  hidden?: number;
+  max_children?: number | null;
+  sort_order?: number | null;
+  workspace_id?: string | null;
+  special_role?: string | null;
 }
 
 export interface CandidateSpec {
@@ -34,6 +48,7 @@ export interface GoldenSpec {
   agent?: string;   // 과제를 수행할 시드 봇 이름 (기본 CEO)
   checks?: GoldenCheckSpec[];
   then?: string;    // 2턴 과제의 후속 프롬프트
+  approvals?: string; // "auto"이면 샌드박스 합성 DB에 agent_* allow 규칙을 심는다
 }
 
 export const PROTOCOL_VERSION = 1;

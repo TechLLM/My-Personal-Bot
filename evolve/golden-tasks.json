@@ -59,11 +59,11 @@
     },
     {
       "id": "G7", "holdout": false,
-      "prompt": "테스트용 봇 '골든테스트봇'을 만들고, 간단한 상태 확인을 지시한 뒤, 끝나면 삭제해줘",
+      "prompt": "테스트용 봇 '골든수명주기봇'을 만들고, 간단한 상태 확인을 지시한 뒤, 끝나면 삭제해줘",
       "agent": "CEO",
       "approvals": "auto",
       "checks": [
-        { "type": "lifecycle", "name": "골든테스트봇", "desc": "생성→실행→삭제가 agents 테이블에 실제 반영됐다가 정리" }
+        { "type": "lifecycle", "name": "골든수명주기봇", "desc": "생성→실행→삭제가 agents 테이블에 실제 반영됐다가 정리" }
       ]
     },
     {

@@ -52,3 +52,42 @@ test("빈 검사 표본과 도메인 밖 수치는 비교할 수 없다", () => 
   expect(judge(bench(-1,100), bench(1,50)).verdict).toBe("inconclusive");
   expect(judge(bench(0.5,100), bench(1,-10)).verdict).toBe("inconclusive");
 });
+
+// lifecycle 체크 — 생성이 "실행"된 증거만 인정한다. 부모 실행 프롬프트가 봇 이름을
+// 포함해 agent_runs.task LIKE %name%은 항상 매칭되는 허점이 있었다 (시도 없이 보고만 해도 pass).
+// sinceMs로 증거 범위를 한정해 다른 테스트의 행이 섞이지 않게 한다.
+const LIFE_SINCE = 9_000_000_000_000, LIFE_AT = LIFE_SINCE + 1;
+const lifeTask: GoldenTask = { id: "G-life", holdout: false, prompt: "봇 '수명주기테스트봇' 생성→지시→삭제", checks: [{ type: "lifecycle", name: "수명주기테스트봇" }] };
+const lifeOut = (toolLog: RunOutcome["toolLog"]): RunOutcome => ({ content: "완료", toolLog, latencyMs: 10, tokensIn: 0, tokensOut: 0 });
+test("lifecycle — 이름이 든 실행 기록만으로는 생성 증거가 아니다", async () => {
+  db.prepare("INSERT INTO agent_runs (id, agent_id, task, status, created_at) VALUES ('r-life-1', 'a1', ?, 'done', ?)").run("테스트용 봇 '수명주기테스트봇'을 만들고 상태 확인 뒤 삭제해줘", LIFE_AT);
+  const r = await checkTask(lifeTask, lifeOut([]), LIFE_SINCE, async () => null as any);
+  expect(r.checks[0].pass).toBe(false);
+  db.prepare("DELETE FROM agent_runs WHERE id = 'r-life-1'").run();
+});
+test("lifecycle — 실행된 agent_create(tool_log ok)와 최종 부재면 통과", async () => {
+  const r = await checkTask(lifeTask, lifeOut([{ tool: "agent_create", ok: true }, { tool: "agent_delete", ok: true }]), LIFE_SINCE, async () => null as any);
+  expect(r.checks[0].pass).toBe(true);
+});
+test("lifecycle — 위임 실행의 tool_log에 있는 생성도 증거로 인정", async () => {
+  db.prepare("INSERT INTO agent_runs (id, agent_id, task, status, tool_log, created_at) VALUES ('r-life-2', 'a2', '봇 만들어줘', 'done', ?, ?)")
+    .run(JSON.stringify([{ tool: "agent_create", ok: true }]), LIFE_AT);
+  const r = await checkTask(lifeTask, lifeOut([]), LIFE_SINCE, async () => null as any);
+  expect(r.checks[0].pass).toBe(true);
+  db.prepare("DELETE FROM agent_runs WHERE id = 'r-life-2'").run();
+});
+test("lifecycle — 승인 경로로 실행된 생성 요청은 증거, 대기 요청은 아니다", async () => {
+  db.prepare("INSERT INTO approval_requests (id, tool, args, agent_id, status, created_at) VALUES ('ap-life-1', 'agent_create', '{\"name\":\"수명주기테스트봇\"}', 'a1', 'pending', ?)").run(LIFE_AT);
+  const pending = await checkTask(lifeTask, lifeOut([]), LIFE_SINCE, async () => null as any);
+  expect(pending.checks[0].pass).toBe(false);
+  db.prepare("UPDATE approval_requests SET status = 'approved', result = '봇 생성됨', resolved_at = ? WHERE id = 'ap-life-1'").run(LIFE_AT);
+  const approved = await checkTask(lifeTask, lifeOut([]), LIFE_SINCE, async () => null as any);
+  expect(approved.checks[0].pass).toBe(true);
+  db.prepare("DELETE FROM approval_requests WHERE id = 'ap-life-1'").run();
+});
+test("lifecycle — 생성 증거가 있어도 봇이 남아 있으면 실패", async () => {
+  db.prepare("INSERT INTO agents (id, name, role_prompt, created_at) VALUES ('a-life', '수명주기테스트봇', '', ?)").run(LIFE_AT);
+  const r = await checkTask(lifeTask, lifeOut([{ tool: "agent_create", ok: true }]), LIFE_SINCE, async () => null as any);
+  expect(r.checks[0].pass).toBe(false);
+  db.prepare("DELETE FROM agents WHERE id = 'a-life'").run();
+});

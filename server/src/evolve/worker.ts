@@ -76,8 +76,12 @@ async function run(request: WorkerRequest): Promise<WorkerResponse> {
       if (!agent || typeof agent.id !== "string" || typeof agent.name !== "string" || !agent.id || !agent.name || ids.has(agent.id) || names.has(agent.name))
         return fail("seed_invalid", request);
       ids.add(agent.id); names.add(agent.name);
-      db.prepare("INSERT INTO agents (id, name, role_prompt, model, created_at) VALUES (?, ?, ?, ?, ?)")
-        .run(agent.id, agent.name, agent.role_prompt ?? "", agent.model ?? null, 1_700_000_000_000);
+      db.prepare("INSERT INTO agents (id, name, role_prompt, model, tools, persistent, is_boss, is_lead, parent_id, pinned, hidden, max_children, sort_order, workspace_id, special_role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(agent.id, agent.name, agent.role_prompt ?? "", agent.model ?? null,
+          agent.tools ?? null, agent.persistent ?? 1, agent.is_boss ?? 0, agent.is_lead ?? 0,
+          agent.parent_id ?? null, agent.pinned ?? 0, agent.hidden ?? 0,
+          agent.max_children ?? null, agent.sort_order ?? null, agent.workspace_id ?? null,
+          agent.special_role ?? null, 1_700_000_000_000);
     }
     for (const [name, content] of Object.entries(request.seed.workspaceFiles ?? {})) {
       if (typeof content !== "string") return fail("seed_invalid", request);
@@ -157,6 +161,12 @@ async function runGolden(request: WorkerRequest, dbModule: any, db: any, workspa
   for (const a of request.seed.agents ?? []) {
     db.prepare("UPDATE agents SET model = ? WHERE id = ?").run(`broker/${bareModel(a.model ?? request.model)}`, a.id);
   }
+  // approvals:"auto" — 샌드박스 합성 DB 안에서만 유효한 자동 승인 규칙.
+  // 서비스의 사람 승인 정책과 무관하게, 여기서는 "승인이 주어졌을 때 에이전트가
+  // 수명주기 절차를 올바르게 수행하는가"를 측정한다. 규칙은 이 팔의 일회용 DB에만 있다.
+  if (g.approvals === "auto")
+    db.prepare("INSERT INTO approval_rules (id, pattern, action, created_at) VALUES (?, ?, 'allow', ?)")
+      .run(`ar-${request.runId}`, "^agent_", dbModule.now());
   const team = await import(pathToFileURL(join(root, "server", "src", "team.ts")).href);
   const agentName = g.agent ?? "CEO";
   const agent = team.findAgentByName(agentName)
@@ -215,10 +225,17 @@ async function evalGoldenChecks(checks: any[], task: string, out: { content: str
         break;
       }
       case "lifecycle": {
-        const created = db.prepare("SELECT 1 FROM approval_requests WHERE args LIKE ? AND tool = 'agent_create' LIMIT 1").get(`%${c.name}%`)
-          || db.prepare("SELECT 1 FROM agent_runs WHERE task LIKE ? LIMIT 1").get(`%${c.name}%`);
+        // 생성이 실제로 실행된 증거만 인정한다 — 어느 실행의 tool_log에서 agent_create ok,
+        // 또는 승인 경로에서 실행까지 간 agent_create 요청. agent_runs.task LIKE %name%은
+        // 부모 실행의 프롬프트가 봇 이름을 포함해 항상 매칭되는 허점이 있어 증거로 쓰지 않는다
+        // (생성 시도 없이 보고만 해도 pass가 되던 문제).
+        const createdByTool = out.toolLog.some((t) => t.tool === "agent_create" && t.ok)
+          || (db.prepare("SELECT tool_log FROM agent_runs").all() as any[])
+              .some((r: any) => { try { return JSON.parse(r.tool_log ?? "[]").some((t: any) => t?.tool === "agent_create" && t.ok); } catch { return false; } });
+        const createdByApproval = db.prepare("SELECT 1 FROM approval_requests WHERE args LIKE ? AND tool = 'agent_create' AND status = 'approved' LIMIT 1").get(`%${c.name}%`);
+        const created = createdByTool || createdByApproval;
         const exists = db.prepare("SELECT 1 FROM agents WHERE name = ?").get(c.name);
-        results.push({ pass: !!created && !exists, detail: `생성 흔적 ${created ? "있음" : "없음"}, 최종 존재 ${exists ? "함" : "없음"}` });
+        results.push({ pass: !!created && !exists, detail: `생성 실행 증거 ${created ? "있음" : "없음"}, 최종 존재 ${exists ? "함" : "없음"}` });
         break;
       }
       case "eval_min": {

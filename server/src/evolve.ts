@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import type { EvalVerdict } from "./evaluate";
 import { evaluationCheck, evaluationGate, evaluationStatus } from "./evaluation-evidence";
 import * as isolation from "./evolve/isolation";
+import type { SeedAgent } from "./evolve/protocol";
 
 const ROOT = join(import.meta.dir, "..", "..");
 const EVOLVE_DIR = join(ROOT, "evolve");
@@ -98,13 +99,17 @@ function checkFileExists(glob: string, freshMinutes: number): CheckResult {
   return { pass: hit, detail: hit ? `${glob} 파일이 ${freshMinutes}분 내 생성됨` : `최근 ${freshMinutes}분 내 ${glob} 파일 없음` };
 }
 
-// G7류 — 생성→삭제 생명주기가 실제 DB에 반영됐는지 (승인 요청 흔적 + 최종 부재)
-function checkLifecycle(name: string, sinceMs: number): CheckResult {
-  const created = db.prepare("SELECT 1 FROM approval_requests WHERE created_at > ? AND args LIKE ? AND tool = 'agent_create' LIMIT 1").get(sinceMs, `%${name}%`)
-    || db.prepare("SELECT 1 FROM agent_runs WHERE created_at > ? AND task LIKE ? LIMIT 1").get(sinceMs, `%${name}%`);
+// G7류 — 생성→삭제 생명주기가 실제로 실행됐는지 (실행 증거 + 최종 부재)
+// agent_runs.task LIKE %name%은 부모 실행 프롬프트가 봇 이름을 포함해 항상 매칭되는 허점이라
+// 증거로 쓰지 않는다 — 실행된 agent_create(tool_log ok 또는 승인 경로로 실행된 요청)만 인정.
+function checkLifecycle(name: string, sinceMs: number, toolLog: { tool: string; ok?: boolean }[]): CheckResult {
+  const created = toolLog.some((t) => t.tool === "agent_create" && t.ok)
+    || db.prepare("SELECT 1 FROM approval_requests WHERE created_at > ? AND args LIKE ? AND tool = 'agent_create' AND status = 'approved' LIMIT 1").get(sinceMs, `%${name}%`)
+    || (db.prepare("SELECT tool_log FROM agent_runs WHERE created_at > ?").all(sinceMs) as { tool_log: string | null }[])
+        .some((r) => { try { return JSON.parse(r.tool_log ?? "[]").some((t: any) => t?.tool === "agent_create" && t.ok); } catch { return false; } });
   const exists = db.prepare("SELECT 1 FROM agents WHERE name = ?").get(name);
   const pass = !!created && !exists;
-  return { pass, detail: `생성 흔적 ${created ? "있음" : "없음"}, 최종 존재 ${exists ? "함(미삭제)" : "없음(삭제됨)"}` };
+  return { pass, detail: `생성 실행 증거 ${created ? "있음" : "없음"}, 최종 존재 ${exists ? "함(미삭제)" : "없음(삭제됨)"}` };
 }
 
 export async function checkTask(task: GoldenTask, out: RunOutcome, sinceMs: number, evaluateFn: (task: string, result: string) => Promise<EvalVerdict>): Promise<{ pass: boolean; checks: CheckResult[] }> {
@@ -134,7 +139,7 @@ export async function checkTask(task: GoldenTask, out: RunOutcome, sinceMs: numb
         break;
       }
       case "lifecycle":
-        results.push(checkLifecycle(c.name!, sinceMs));
+        results.push(checkLifecycle(c.name!, sinceMs, out.toolLog));
         break;
     }
   }
@@ -361,16 +366,20 @@ function productionModelFor(candidate: Candidate, fallback: string): string {
   return ceo?.model ?? fallback;
 }
 
-// 격리 벤치에 넣을 골든 과제 — holdout·외부 환경(env)·승인 필요 과제는 제외한다.
+// 격리 벤치에 넣을 골든 과제 — holdout·외부 환경(env) 과제는 제외한다.
+// approvals:"auto"는 샌드박스 합성 DB의 자동 승인 규칙으로 측정 가능해 포함한다.
 // 네트워크 차단 샌드박스에서 env 과제는 측정이 아니라 노이즈다.
 function benchTasks(limit: number): GoldenTask[] {
-  return loadGoldenTasks().filter((t) => !t.env && !t.approvals && t.prompt).slice(0, Math.max(1, limit));
+  return loadGoldenTasks().filter((t) => !t.env && (!t.approvals || t.approvals === "auto") && t.prompt).slice(0, Math.max(1, limit));
 }
 
 // 측정 환경 — 실제 봇 구성(역할문·모델)을 시드한다. 봇 설정 자체가 측정 대상 표면이므로
 // 합성으로 대체하면 후보를 재지 못한다. 키·사용자 데이터는 들어가지 않는다.
-function liveAgents(): { id: string; name: string; role_prompt?: string; model?: string }[] {
-  return db.prepare("SELECT id, name, role_prompt, model FROM agents").all() as any[];
+function liveAgents(): SeedAgent[] {
+  // 조직 역할·구조까지 운반한다 — is_boss/is_lead/special_role이 빠지면 샌드박스에서
+  // 관리 도구(MANAGE_TOOLS)가 비노출돼 수명주기 과제를 측정할 수 없고,
+  // CEO도 일반 봇 프롬프트로 강등돼 측정이 운영 행동을 반영하지 못한다.
+  return db.prepare("SELECT id, name, role_prompt, model, tools, persistent, is_boss, is_lead, parent_id, pinned, hidden, max_children, sort_order, workspace_id, special_role FROM agents").all() as any[];
 }
 
 function toBenchResult(samples: BenchSample[]): BenchResult {
