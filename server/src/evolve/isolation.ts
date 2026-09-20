@@ -37,6 +37,9 @@ export interface IsolationOptions {
   // E2-B — credential broker. 지정하면 샌드박스가 이 루프백 포트로의 outbound만 허용하고
   // worker는 토큰으로 브로커를 통해 모델을 호출한다. API 키는 부모 프로세스에만 있다.
   broker?: { port: number; token: string };
+  // 다중 후보 토너먼트에서 팔별 계측을 후보별로 분리하기 위한 태그 접미사.
+  // 브로커 토큰이 `token:baseline-1`·`token:candidate-1`처럼 붙어 byTag가 후보별로 갈린다.
+  tagSuffix?: string;
   // 이 측정이 요구하는 모델 id — 영수증의 model.requested로 기록된다
   model?: string;
   evalModel?: string;    // eval_min 체크의 평가 모델 id
@@ -237,6 +240,10 @@ export async function runIsolatedComparison(options: IsolationOptions): Promise<
   }
   if (process.platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec"))
     return { status: "inconclusive", promotionEligible: false, reasonCode: "sandbox_unavailable" };
+  // 태그는 브로커 토큰의 ":" 뒤에 실린다 — ":"·공백이 섞이면 태그 파싱이 깨져 계측이 엉킨다
+  const tagSuffix = options.tagSuffix ?? "";
+  if (!/^[\w-]{0,16}$/.test(tagSuffix))
+    return { status: "inconclusive", promotionEligible: false, reasonCode: "tag_suffix_invalid" };
 
   // production은 실모델 호출이 들어가 기본 3분·최대 10분까지, fixture는 30초 상한.
   // 기한은 정지 감지용이라 판정과 무관하다 — 5초는 외장 디스크 I/O 경합에서
@@ -292,7 +299,7 @@ export async function runIsolatedComparison(options: IsolationOptions): Promise<
         input: options.fixture?.input, seed,
         candidate: arm === "candidate" && !codeTarget ? options.candidate : undefined,
         // 토큰에 팔 태그를 붙인다 — 브로커가 같은 인증으로 팔별 비용을 분리 집계한다
-        broker: options.broker ? { url: `http://127.0.0.1:${options.broker.port}`, token: `${options.broker.token}:${arm}` } : undefined,
+        broker: options.broker ? { url: `http://127.0.0.1:${options.broker.port}`, token: `${options.broker.token}:${arm}${tagSuffix}` } : undefined,
         golden: production ? options.golden : undefined,
         model: production ? options.model : undefined,
         evalModel: production ? options.evalModel : undefined,
@@ -301,7 +308,7 @@ export async function runIsolatedComparison(options: IsolationOptions): Promise<
       // 파이프라인 깊은 곳(검색 등)은 요청 객체에 닿지 못하므로 브로커 주소·팔 태그 토큰을
       // env로 넘긴다 — search.ts의 e2 분기가 이걸 읽어 브로커의 /tool을 호출한다.
       const child = await executeSandboxed([join(root, workerRel)], root, policy, deadline, outputLimit, canonicalJson(request), "production",
-        options.broker ? { E2_BROKER_URL: `http://127.0.0.1:${options.broker.port}`, E2_BROKER_TOKEN: `${options.broker.token}:${arm}` } : {});
+        options.broker ? { E2_BROKER_URL: `http://127.0.0.1:${options.broker.port}`, E2_BROKER_TOKEN: `${options.broker.token}:${arm}${tagSuffix}` } : {});
       const endedAt = Date.now();
       const stderrTail = child.stderr.length ? child.stderr.toString("utf8").slice(-2048) : undefined;
       const receipt: ArmReceipt = {
@@ -330,7 +337,7 @@ export async function runIsolatedComparison(options: IsolationOptions): Promise<
       if (options.broker) {
         try {
           const u = await (await fetch(`http://127.0.0.1:${options.broker.port}/usage`, { headers: { authorization: `Bearer ${options.broker.token}` } })).json() as any;
-          const per = u?.byTag?.[arm];
+          const per = u?.byTag?.[`${arm}${tagSuffix}`];
           brokerCalls = per?.calls ?? 0;
           brokerModels = per?.models ?? [];
         } catch {}

@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import { db } from "./db";
-import { checkTask, judge, isProtectedPath, type BenchResult, type GoldenTask, type RunOutcome } from "./evolve";
+import { checkTask, judge, isProtectedPath, parseProposals, pickWinner, type BenchResult, type GoldenTask, type RunOutcome } from "./evolve";
 if (db.filename !== ":memory:") throw new Error("메모리 DB에서만 테스트");
 
 const task: GoldenTask = { id: "G-fixture", holdout: false, env: true, prompt: "fixture", checks: [{ type: "eval_min", score: 0 }] };
@@ -90,4 +90,36 @@ test("lifecycle — 생성 증거가 있어도 봇이 남아 있으면 실패", 
   const r = await checkTask(lifeTask, lifeOut([{ tool: "agent_create", ok: true }]), LIFE_SINCE, async () => null as any);
   expect(r.checks[0].pass).toBe(false);
   db.prepare("DELETE FROM agents WHERE id = 'a-life'").run();
+});
+
+// ---------- 다방법 경쟁: 토큰 축 판정·승자 순위·복수 제안 파싱 ----------
+
+const benchT = (passRate: number, latency: number, avgTokens?: number): BenchResult => ({ ...bench(passRate, latency), avgTokens });
+
+test("judge — 통과율·지연이 같아도 토큰 10% 이상 절약이면 채택 근거가 된다", () => {
+  expect(judge(benchT(0.5, 100, 1000), benchT(0.5, 100, 800)).verdict).toBe("keep");
+});
+test("judge — 토큰 절약이 미세하면 개선 근거로 인정하지 않는다", () => {
+  expect(judge(benchT(0.5, 100, 1000), benchT(0.5, 100, 950)).verdict).toBe("inconclusive");
+});
+test("judge — 토큰이 더 들어도 통과율이 오르면 채택 — 정확도가 비용보다 우선", () => {
+  expect(judge(benchT(0.5, 100, 1000), benchT(0.8, 100, 2000)).verdict).toBe("keep");
+});
+test("judge — 토큰 정보가 없으면 기존과 같이 통과율·지연만 본다", () => {
+  expect(judge(bench(0.5, 100), bench(0.5, 100)).verdict).toBe("inconclusive");
+  expect(judge(bench(0.5, 100), bench(0.5, 50)).verdict).toBe("keep");
+});
+test("pickWinner — 통과율 → 지연 → 토큰 순으로만 가린다", () => {
+  const slow = benchT(0.9, 500, 100), fast = benchT(0.9, 300, 500), cheapFast = benchT(0.9, 300, 100), better = benchT(1, 600, 900);
+  expect(pickWinner([slow, fast, cheapFast])).toBe(2);          // 같은 통과율·지연에서 토큰 최소
+  expect(pickWinner([fast, better, cheapFast])).toBe(1);        // 통과율이 지연·토큰 역전을 이긴다
+  expect(pickWinner([cheapFast, slow])).toBe(0);                // 지연이 토큰보다 우선
+  expect(pickWinner([])).toBe(-1);
+});
+test("parseProposals — 배열·단일 객체·보고서 문장을 모두 받는다", () => {
+  const p = (n: number) => `{"surface":"skill.prompt","target":"s${n}","intent":"i","summary":"s"}`;
+  expect(parseProposals(`[${p(1)},${p(2)}]`).length).toBe(2);
+  expect(parseProposals(p(1)).length).toBe(1);
+  expect(parseProposals(`설명\n[${p(1)}, {"surface":"x"}]\n뒷말`).length).toBe(1); // target 없는 항목 제외
+  expect(parseProposals("제안 없음")).toEqual([]);
 });

@@ -29,8 +29,9 @@
   ],
   "limits": {
     "cyclesPerDay": 5,
-    "cycleWallClockMin": 30,
+    "cycleWallClockMin": 90,
     "diffMaxLines": 200,
-    "benchSamples": 3
+    "benchSamples": 3,
+    "variantsPerCycle": 4
   }
 }
