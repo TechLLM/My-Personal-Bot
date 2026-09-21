@@ -52,7 +52,7 @@ export type BrokerToolHandler = (tool: string, args: Record<string, unknown>, ta
 // look은 부모의 비전 모델 호출이라 계측 밖 비용이 생긴다. ego_run·bsk는 사용자의
 // 실제 브라우저를 임의 스크립트·명령으로 움직이므로 샌드박스에 열지 않는다.
 // (부작용이 생기는 도구는 측정이 아니라 운영 행동이다 — 승인 게이트 없는 샌드박스에 놓지 않는다)
-export const SANDBOX_BROWSER_TOOLS = new Set(["browser_open", "browser_read", "browser_scroll", "browser_wait", "browser_back"]);
+export const SANDBOX_BROWSER_TOOLS = new Set(["browser_open", "browser_read", "browser_scroll", "browser_wait", "browser_verify", "browser_back"]);
 
 const MCP_TOOL_NAME = /^[\w-]+__[\w-]+$/; // MCP 도구는 "서버__도구" 네임스페이스
 

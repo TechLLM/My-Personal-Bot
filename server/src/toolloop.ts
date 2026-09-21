@@ -36,7 +36,7 @@ const READONLY_TOOLS = new Set([
   "web_search", "read_file", "list_files", "mail_list", "mail_read",
   "agent_list", "routine_list", "skill_list", "org_audit", "memory_save",
   "agent_direct", "agent_message",
-  "browser_open", "browser_read", "browser_scroll", "browser_wait", "browser_back", "browser_look",
+  "browser_open", "browser_read", "browser_scroll", "browser_wait", "browser_verify", "browser_back", "browser_look",
 ]);
 function isReadOnlyCall(name: string, args: Record<string, unknown>, isReadOnlyShell: (c: unknown) => boolean): boolean {
   if (name === "shell_run") return isReadOnlyShell(args.command ?? args.cmd ?? args.script);

@@ -974,6 +974,7 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
     },
     { role: "user", content: state.task },
   ];
+  if (handsOn && toolsCapable) messages[0].content += "\n\n[브라우저 변경 검증] 게시·전송·저장·제출처럼 외부 상태를 바꾼 뒤에는 browser_verify로 URL·문구·요소 완료 조건을 확인하세요. 검증 실패나 실행 결과가 불명확한 변경 작업은 중복 부작용을 막기 위해 자동 재시도하지 말고 미확인으로 보고하세요.";
   // ─── 검증 하네스: 내부 엔티티 지시는 서버가 실측해 주입 → 실행 후 DB 상태로 이행 검증 ───
   const calledTools = new Set<string>();
   let budgetWarned = false; // 남은 단계 안내는 실행당 한 번

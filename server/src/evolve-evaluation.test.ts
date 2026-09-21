@@ -124,7 +124,7 @@ test("parseProposals — 배열·단일 객체·보고서 문장을 모두 받�
   expect(parseProposals("제안 없음")).toEqual([]);
 });
 test("sandboxToolOk — 읽기 전용 브라우저·선언 MCP만 샌드박스에 연다", () => {
-  for (const ok of ["web_search", "browser_open", "browser_read", "browser_scroll", "browser_wait", "browser_back", "myserver__lookup"])
+  for (const ok of ["web_search", "browser_open", "browser_read", "browser_scroll", "browser_wait", "browser_verify", "browser_back", "myserver__lookup"])
     expect(sandboxToolOk(ok)).toBe(true);
   for (const denied of ["browser_click", "browser_type", "browser_eval", "browser_login", "browser_handoff", "browser_look", "ego_run", "bsk", "computer_look", "shell_run", "agent_create", "__orphan", "plain_name"])
     expect(sandboxToolOk(denied)).toBe(false);

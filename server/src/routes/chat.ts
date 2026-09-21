@@ -157,6 +157,7 @@ export function systemPrompt(mode: string, personaId?: string | null, workspaceI
     }
   }
   // 대화창은 html 코드블록을 격리된 iframe으로 렌더한다 — 결과를 그림으로 보여줄 수 있다
+  p += "\n\n[브라우저 변경 검증] 게시·전송·저장·제출처럼 외부 상태를 바꾼 뒤에는 browser_verify로 URL·문구·요소 완료 조건을 확인하세요. 검증 실패나 실행 결과가 불명확한 변경 작업은 중복 부작용을 막기 위해 자동 재시도하지 말고 미확인으로 보고하세요.";
   p += "\n\n[결과 화면] 비교·추이·상태·구성도처럼 그림이 이해를 빠르게 하는 결과는 ```html 코드블록으로 그리면 대화창에 그대로 렌더됩니다. 인라인 <style>·<script>만 동작하고 외부 CDN·이미지 URL·네트워크 요청은 차단되니 순수 HTML/CSS(필요하면 인라인 JS)로만 만드세요. 짧은 답변·단순 목록까지 HTML로 만들지는 마세요.";
   if (workspaceId) {
     const ws = db.prepare("SELECT * FROM workspaces WHERE id = ?").get(workspaceId) as any;

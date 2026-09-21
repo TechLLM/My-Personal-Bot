@@ -96,6 +96,42 @@ const pages = new Map<string, Page[]>();
 // 모델이 놓치기 쉽다. 모아 두었다가 다음 도구 결과 끝에 붙여 알린다 (Aside의 agent signals).
 const pendingEvents = new Map<string, string[]>();
 
+export interface BrowserVerificationObservation {
+  url: string;
+  title: string;
+  text: string | null;
+  selectors?: Record<string, boolean | null>;
+}
+
+// 브라우저 변경 작업의 완료 여부를 모델의 추측이 아니라 현재 페이지 증거로 판정한다.
+// 모든 지정 조건이 맞아야 통과하며, 조건이 없으면 fail-closed한다.
+export function evaluateBrowserVerification(
+  args: Record<string, unknown>,
+  observed: BrowserVerificationObservation,
+): { ok: boolean; checks: { label: string; ok: boolean }[] } {
+  const checks: { label: string; ok: boolean }[] = [];
+  const addContains = (field: string, actual: string | null, expected: unknown, negate = false) => {
+    const needle = String(expected ?? "").trim();
+    if (!needle) return;
+    if (actual === null) {
+      checks.push({ label: `${field} 확인 실패: ${needle.slice(0, 160)}`, ok: false });
+      return;
+    }
+    const found = actual.toLocaleLowerCase().includes(needle.toLocaleLowerCase());
+    checks.push({ label: `${field}${negate ? "에 없음" : "에 포함"}: ${needle.slice(0, 160)}`, ok: negate ? !found : found });
+  };
+  addContains("URL", observed.url, args.url_contains);
+  addContains("URL", observed.url, args.url_absent, true);
+  addContains("제목", observed.title, args.title_contains);
+  addContains("화면", observed.text, args.text);
+  addContains("화면", observed.text, args.absent_text, true);
+  const selector = String(args.selector ?? "").trim();
+  const selectorAbsent = String(args.selector_absent ?? "").trim();
+  if (selector) checks.push({ label: `요소 존재: ${selector.slice(0, 160)}`, ok: observed.selectors?.[selector] === true });
+  if (selectorAbsent) checks.push({ label: `요소 없음: ${selectorAbsent.slice(0, 160)}`, ok: observed.selectors?.[selectorAbsent] === false });
+  return { ok: checks.length > 0 && checks.every((c) => c.ok), checks };
+}
+
 function pushEvent(key: string, msg: string) {
   const arr = pendingEvents.get(key) ?? [];
   arr.push(msg);
@@ -589,6 +625,29 @@ async function browserToolInner(agentKey: string, name: string, args: Record<str
         await settle(page);
         return await snapshot(page);
       }
+      case "browser_verify": {
+        const selectors = [String(args.selector ?? "").trim(), String(args.selector_absent ?? "").trim()].filter(Boolean);
+        const selectorResults: Record<string, boolean | null> = {};
+        for (const selector of selectors) {
+          try { selectorResults[selector] = await page.locator(selector).first().count() > 0; }
+          catch { selectorResults[selector] = null; }
+        }
+        const bodyText = await page.locator("body").innerText({ timeout: 5000 }).then((text) => ({ ok: true as const, text })).catch(() => ({ ok: false as const, text: "" }));
+        const observed: BrowserVerificationObservation = {
+          url: page.url(),
+          title: await page.title().catch(() => ""),
+          text: bodyText.ok ? bodyText.text : null,
+          selectors: selectorResults,
+        };
+        const result = evaluateBrowserVerification(args, observed);
+        if (!result.checks.length)
+          return "검증 조건이 없습니다 — text, absent_text, url_contains, url_absent, title_contains, selector, selector_absent 중 하나 이상을 지정하세요.";
+        const details = result.checks.map((c) => `- ${c.ok ? "통과" : "실패"}: ${c.label}`).join("\n");
+        const head = result.ok
+          ? "검증 통과 — 현재 페이지 증거가 완료 조건을 모두 충족합니다."
+          : "검증 실패 — 완료로 보고하거나 같은 변경 작업을 자동 재시도하지 마세요. 현재 상태를 확인해 불확실성을 보고하세요.";
+        return `${head}\nURL: ${observed.url}\n제목: ${observed.title}\n${details}`;
+      }
       case "browser_back": {
         const stack = (pages.get(agentKey) ?? []).filter((x) => !x.isClosed());
         if (stack.length > 1 && stack[stack.length - 1] === page) {
@@ -722,6 +781,7 @@ export const BROWSER_TOOLS = [
   { type: "function", function: { name: "browser_type", description: "입력 필드에 텍스트를 입력합니다. ref에 @번호를 쓰세요. enter를 true로 주면 입력 후 Enter까지 누르고 바뀐 화면을 읽어 돌려줍니다.", parameters: { type: "object", properties: { ref: { type: "string", description: "요소 번호 (예: \"@4\")" }, selector: { type: "string", description: "대안 — CSS 선택자" }, text: { type: "string" }, enter: { type: "boolean", description: "입력 후 Enter" } }, required: ["text"] } } },
   { type: "function", function: { name: "browser_scroll", description: "페이지를 스크롤하고 화면을 다시 읽습니다. 요소 목록에서 · 표시가 붙은 항목은 화면 밖이므로, 클릭하려면 먼저 스크롤하세요.", parameters: { type: "object", properties: { direction: { type: "string", enum: ["down", "up"] } } } } },
   { type: "function", function: { name: "browser_wait", description: "화면에 특정 텍스트나 요소가 나타날 때까지 기다린 뒤 화면을 읽습니다. 목록이 비어 보이거나 '로딩 중'일 때 바로 실패로 판단하지 말고 이 도구로 한 번 기다리세요.", parameters: { type: "object", properties: { text: { type: "string", description: "나타나기를 기다릴 화면 텍스트" }, selector: { type: "string", description: "나타나기를 기다릴 CSS 선택자" }, seconds: { type: "number", description: "최대 대기 초 (기본 15, 최대 30)" } } } } },
+  { type: "function", function: { name: "browser_verify", description: "게시·전송·저장·제출처럼 외부 상태를 바꾼 뒤 현재 페이지의 URL·제목·문구·요소로 완료 여부를 독립 검증합니다. 지정한 조건은 모두 충족해야 통과합니다. 검증 실패나 결과 불명확 시 같은 변경 작업을 자동 재시도하지 말고 미확인으로 보고하세요.", parameters: { type: "object", properties: { text: { type: "string", description: "화면에 있어야 하는 문구" }, absent_text: { type: "string", description: "화면에 없어야 하는 문구" }, url_contains: { type: "string", description: "현재 URL에 포함돼야 하는 문자열" }, url_absent: { type: "string", description: "현재 URL에 없어야 하는 문자열" }, title_contains: { type: "string", description: "페이지 제목에 포함돼야 하는 문자열" }, selector: { type: "string", description: "존재해야 하는 CSS 선택자" }, selector_absent: { type: "string", description: "존재하지 않아야 하는 CSS 선택자" } } } } },
   { type: "function", function: { name: "browser_back", description: "이전 화면으로 돌아갑니다. 링크가 새 창으로 열렸던 경우에는 그 창을 닫고 원래 목록 화면으로 복귀합니다 (문서 열람 후 목록으로 돌아오는 흐름).", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "browser_login", description: "설정에 등록된 사이트 계정으로 자동 로그인합니다 (회사 그룹웨어·사내 시스템 등). 로그인 후 browser_read로 화면과 요소 번호를 확인하세요.", parameters: { type: "object", properties: { site: { type: "string", description: "설정에 등록한 사이트 이름" } }, required: ["site"] } } },
   { type: "function", function: { name: "browser_eval", description: "현재 페이지에서 임의 JavaScript를 실행합니다. @번호 기반 클릭·입력으로 안 되는 경우에만 쓰세요 — 먼저 browser_read로 요소 번호를 확인하고 browser_click을 시도하는 것이 원칙입니다. 대량 데이터 추출처럼 클릭으로 불가능한 작업에 적합합니다.", parameters: { type: "object", properties: { script: { type: "string", description: "페이지에서 실행할 JS 본문 (반환값이 결과로 옴)" } }, required: ["script"] } } },
