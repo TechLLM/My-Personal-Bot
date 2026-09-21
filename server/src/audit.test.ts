@@ -1,6 +1,6 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { db, now } from "./db";
-import { auditOrg, formatAudit, repeatedParagraph, modelProblem, failRateFinding, isInfraFailure, skillTally, unattendedExpiry, type Run } from "./audit";
+import { auditOrg, formatAudit, repeatedParagraph, modelProblem, failRateFinding, isInfraFailure, skillTally, unattendedExpiry, atStepCap, type Run } from "./audit";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
 
@@ -238,4 +238,34 @@ test("방치된 만료가 실제로 많으면 경고한다", () => {
   for (let i = 0; i < 10; i++) add.run("ok" + i, "approved", null);
   for (let i = 0; i < 15; i++) add.run("st" + i, "expired", null); // 사유 없는 만료 = 방치
   expect(ids(auditOrg())).toContain("ops.expired_rate");
+});
+
+// --- 단계 상한 판정 (개선지침서 A-3) ---
+// 상한이 도구마다 다른데 한 기준(steps>=12)으로만 세어, 브라우저 업무의 정상 완료가
+// 상한 도달로 잡히고 있었다. 실측 2026-09-21: 152건 중 55건이 그런 오집계였다.
+
+const log = (...tools: string[]) => JSON.stringify(tools.map((t) => ({ tool: t, ok: true, ms: 1 })));
+
+test("브라우저 업무는 12단계에서 상한에 걸리지 않는다", () => {
+  // browserRounds는 32 — 12는 아직 예산의 절반도 안 쓴 정상 진행이다
+  expect(atStepCap({ steps: 12, tool_log: log("browser_open", "browser_read") })).toBe(false);
+  expect(atStepCap({ steps: 31, tool_log: log("browser_read") })).toBe(false);
+  expect(atStepCap({ steps: 32, tool_log: log("browser_read") })).toBe(true);
+});
+
+test("일반 업무는 12단계가 상한이다", () => {
+  expect(atStepCap({ steps: 11, tool_log: log("read_file", "agent_list") })).toBe(false);
+  expect(atStepCap({ steps: 12, tool_log: log("read_file", "agent_list") })).toBe(true);
+});
+
+test("ego_run·bsk도 브라우저 예산을 쓴다", () => {
+  // roundLimitFor가 isBrowserish로 판정하므로 여기서도 같은 기준이어야 한다
+  for (const t of ["ego_run", "bsk"]) expect(atStepCap({ steps: 12, tool_log: log(t) })).toBe(false);
+});
+
+test("도구 기록이 없거나 깨져 있으면 일반 상한으로 본다", () => {
+  // 없는 실행을 상한 도달로 만들지 않되, 판정 자체가 예외로 죽지도 않아야 한다
+  expect(atStepCap({ steps: 12, tool_log: null })).toBe(true);
+  expect(atStepCap({ steps: 11, tool_log: "{깨진 JSON" })).toBe(false);
+  expect(atStepCap({ steps: null, tool_log: null })).toBe(false);
 });

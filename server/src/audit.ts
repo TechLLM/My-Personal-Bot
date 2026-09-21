@@ -1,8 +1,9 @@
 // ─── 조직 설계 점검 ───
 // 점검을 모델 판단에 맡기면 모델마다 놓치는 항목이 달라진다. 규칙을 코드로 고정해
 // 어떤 모델이 실행하든 같은 결과가 나오게 한다. 봇은 이 결과를 읽고 보고서로 정리만 한다.
-import { db } from "./db";
+import { db, getSetting } from "./db";
 import { findProvider } from "./providers/registry";
+import { isBrowserish } from "./toolloop";
 
 export type Severity = "위험" | "주의" | "참고";
 
@@ -68,7 +69,19 @@ export function unattendedExpiry(result: string | null | undefined): boolean {
   return !/대체됨|직접 정리|사용자 요청|수동 정리/.test(String(result ?? ""));
 }
 
-export interface Run { status: string; steps: number | null; created_at: number }
+export interface Run { status: string; steps: number | null; created_at: number; tool_log?: string | null }
+
+// 단계 상한은 실행이 쓴 도구에 따라 다르다(team.ts의 roundLimitFor) — 브라우저 계열을 쓴 실행은
+// 32라운드, 나머지는 12다. 한 기준으로만 세면 브라우저 업무가 정상 완료한 것까지 상한 도달로 잡힌다.
+// 실측 2026-09-21: steps>=12인 152건 중 55건이 브라우저 업무의 정상 완료였고, 실제 상한 도달은
+// 97건(일반 95 · 브라우저 2)이었다. 규칙이 재려는 것과 실제로 재는 것을 맞춘다 (개선지침서 A-3).
+export function atStepCap(r: Pick<Run, "steps" | "tool_log">): boolean {
+  let browserish = false;
+  try {
+    browserish = (JSON.parse(r.tool_log ?? "[]") as { tool?: string }[]).some((t) => isBrowserish(String(t?.tool ?? "")));
+  } catch {} // 기록이 깨졌으면 일반 상한으로 본다 — 없는 실행을 상한 도달로 만들지 않는다
+  return (r.steps ?? 0) >= (browserish ? Number(getSetting("tool_rounds_browser")) || 32 : Number(getSetting("tool_rounds")) || 12);
+}
 
 // 실패율을 7일 한 창으로만 보면 이미 고친 문제가 일주일 내내 "위험"으로 남는다.
 // 24시간과 7일을 함께 재고, 최근 하루가 잠잠하면 심각도를 낮춰 지금 조치가 필요한 것만 위험으로 남긴다.
@@ -170,11 +183,11 @@ export function auditOrg(): Finding[] {
 
   // ── 운영 지표 ──
   const since = Date.now() - 7 * 86_400_000;
-  const runs = db.prepare("SELECT status, steps, created_at FROM agent_runs WHERE created_at > ?").all(since) as Run[];
+  const runs = db.prepare("SELECT status, steps, created_at, tool_log FROM agent_runs WHERE created_at > ?").all(since) as Run[];
   if (runs.length >= 10) {
     const f = failRateFinding(runs);
     if (f) add("ops.fail_rate", f.severity, f.title, f.detail, f.fix);
-    const capped = runs.filter((r) => (r.steps ?? 0) >= 12).length;
+    const capped = runs.filter(atStepCap).length;
     if (capped / runs.length > 0.2) add("ops.step_cap", "주의", "단계 상한에 걸리는 실행이 많습니다", `${capped}/${runs.length}`, "반복 조회를 줄이거나 tool_rounds·tool_rounds_browser를 조정하세요.");
   }
   const stale = db.prepare("SELECT COUNT(*) c FROM approval_requests WHERE status = 'pending' AND created_at < ?").get(Date.now() - PENDING_STALE_H * 3_600_000) as { c: number };

@@ -43,7 +43,11 @@ function isReadOnlyCall(name: string, args: Record<string, unknown>, isReadOnlyS
   return READONLY_TOOLS.has(name);
 }
 // 병렬 안전 — 서로 상태를 공유하지 않는 읽기·독립 작업. 브라우저(페이지 공유)·쓰기(경로 공유)는 순차 유지
-const PARALLEL_SAFE = new Set(["agent_direct", "agent_message", "web_search", "read_file", "list_files", "agent_list", "routine_list", "skill_list"]);
+export const PARALLEL_SAFE = new Set(["agent_direct", "agent_message", "web_search", "read_file", "list_files", "agent_list", "routine_list", "skill_list"]);
+// 프롬프트에 안내할 조회 도구 이름 — 위임·메시지는 프롬프트에서 따로 설명하므로 뺀다.
+// 목록을 손으로 적지 않고 위에서 파생시켜, 병렬 대상이 바뀌어도 안내가 어긋나지 않게 한다.
+// (실측 2026-09-21: 이 도구들의 연속 호출 815회가 병렬로 묶일 수 있는데 한 라운드씩 소모됐다)
+export const parallelQueryHint = () => [...PARALLEL_SAFE].filter((n) => n !== "agent_direct" && n !== "agent_message").join("·");
 const LONG_RUNNING = /^browser_(handoff|login)$/; // 테이크오버·로그인 인계 — 사용자 완료까지 최대 5분 블로킹이 정상
 export const isBrowserish = (n: string) => n.startsWith("browser_") || n === "ego_run" || n === "bsk";
 
