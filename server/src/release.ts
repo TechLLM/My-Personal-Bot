@@ -276,102 +276,233 @@ const deployGates = (): Gate[] => [
 
 const installDeps = (dir: string) => run([BUN, "install"], { cwd: dir });
 
+type CommandResult = { ok: boolean; out: string };
+
+export interface ReleaseManagerDeps {
+  root?: string;
+  run?: (cmd: string[], opts?: { cwd?: string; env?: Record<string, string> }) => CommandResult;
+  git?: (...args: string[]) => CommandResult;
+  getSetting?: (key: string) => string | null | undefined;
+  setSetting?: (key: string, value: string) => void;
+  writeReceipt?: (receipt: Receipt) => void;
+  now?: () => number;
+  makeStageDir?: () => string;
+  removeStageDir?: (path: string) => void;
+  installDeps?: (dir: string) => CommandResult;
+  defaultGates?: (root: string) => Gate[];
+  deployGates?: () => Gate[];
+}
+
+export interface ReleaseManager {
+  applyRelease(gates?: Gate[]): Promise<{ ok: true; version: number; sha: string; release: string; tier: ReleaseTier } | Fail>;
+}
+
+// 릴리스 트랜잭션의 부수효과 경계를 한곳에 모은다. 운영 래퍼는 기존 API를 유지하고,
+// 테스트는 폐기 가능한 git 저장소와 메모리 설정/영수증을 주입해 현재 체크아웃을 건드리지 않는다.
+export function createReleaseManager(overrides: ReleaseManagerDeps = {}): ReleaseManager {
+  const root = overrides.root ?? ROOT;
+  const runner = overrides.run ?? run;
+  const managerGit = overrides.git ?? ((...args: string[]) => runner(["git", ...args], { cwd: root }));
+  const readSetting = overrides.getSetting ?? getSetting;
+  const writeSetting = overrides.setSetting ?? setSetting;
+  const recordReceipt = overrides.writeReceipt
+    ?? ((receipt: Receipt) => writeReceipt(receipt, join(root, "server", "data", "release-log.jsonl")));
+  const now = overrides.now ?? Date.now;
+  const makeStageDir = overrides.makeStageDir ?? (() => mkdtempSync(join(tmpdir(), "mybot-stage-")));
+  const removeStageDir = overrides.removeStageDir ?? ((path: string) => rmSync(path, { recursive: true, force: true }));
+  const install = overrides.installDeps ?? ((dir: string) => runner([BUN, "install"], { cwd: dir }));
+  const stageGates = overrides.defaultGates ?? defaultGates;
+  const liveGates = overrides.deployGates ?? (() => [
+    { name: "웹 빌드", run: async () => runner([BUN, "run", "build"], { cwd: join(root, "web") }) },
+    { name: "기동 시험", run: () => bootCheck(join(root, "server")) },
+  ]);
+
+  const loadManagerHistory = (): ReleaseRecord[] => {
+    try { return JSON.parse(readSetting("release_history") || "[]") as ReleaseRecord[]; } catch { return []; }
+  };
+  const saveManagerHistory = (history: ReleaseRecord[]) =>
+    writeSetting("release_history", JSON.stringify(history.slice(-50)));
+  const currentManagerRelease = () => loadManagerHistory().filter((r) => r.status === "applied").at(-1) ?? null;
+  const managerStage = (): ReleaseStage => readSetting("release_stage") === "launch" ? "launch" : "dev";
+  const clearManagerJournal = () => writeSetting("release_inflight", "");
+  const beginManagerJournal = (j: { from: string; to: string; subjects: string[] }) =>
+    writeSetting("release_inflight", JSON.stringify({ ...j, ts: now() }));
+
+  const snapshotStatus = (before: string, target: string) => {
+    const cleanResult = managerGit("status", "--porcelain", "--untracked-files=no");
+    const ff = managerGit("merge-base", "--is-ancestor", before, target).ok;
+    const pending: PendingCommit[] = managerGit("log", "--format=%h\t%s\t%cI", `${before}..${target}`).out
+      .split("\n").filter(Boolean)
+      .map((line) => { const [sha, subject, date] = line.split("\t"); return { sha, subject, date }; });
+    const files = pending.length
+      ? managerGit("diff", "--name-only", before, target).out.split("\n").filter(Boolean)
+      : [];
+    const tier = pending.length ? classifyTier(pending.map((p) => p.subject), files) : null;
+    const oldest = pending.length ? Date.parse(pending[pending.length - 1].date) : 0;
+    const newest = pending.length ? Date.parse(pending[0].date) : 0;
+    return {
+      pending, files, tier,
+      ...evaluateRelease({
+        hasChannel: true,
+        pending: pending.length,
+        clean: cleanResult.ok && !cleanResult.out,
+        ff,
+        tier: tier ?? undefined,
+        oldestAgeMs: oldest ? now() - oldest : 0,
+        newestAgeMs: newest ? now() - newest : 0,
+        stage: managerStage(),
+      }),
+    };
+  };
+
+  const applyRelease = async (gates?: Gate[]): Promise<{ ok: true; version: number; sha: string; release: string; tier: ReleaseTier } | Fail> => {
+    if (readSetting("release_inflight")) return fail("점검", "이전 적용이 아직 끝나지 않았습니다 — 잠시 후 다시 시도하세요");
+
+    const beforeResult = managerGit("rev-parse", "--verify", "HEAD^{commit}");
+    if (!beforeResult.ok || !beforeResult.out.trim()) return fail("점검", tail(beforeResult.out || "현재 커밋을 확인할 수 없습니다"));
+    const targetResult = managerGit("rev-parse", "--verify", `refs/heads/${CHANNEL}^{commit}`);
+    if (!targetResult.ok || !targetResult.out.trim()) return fail("점검", `${CHANNEL} 브랜치가 아직 없습니다 — 개발 인스턴스에서 먼저 밀어 주세요`);
+    const before = beforeResult.out.trim();
+    const target = targetResult.out.trim();
+    const status = snapshotStatus(before, target);
+    if (!status.canApply) return fail("점검", status.reason);
+
+    const subjects = status.pending.map((p) => p.subject);
+    beginManagerJournal({ from: before, to: target, subjects });
+
+    let stageDir: string;
+    try { stageDir = makeStageDir(); }
+    catch (e) {
+      clearManagerJournal();
+      return fail("준비", `스테이징 폴더를 만들 수 없습니다 — ${(e as Error).message}`);
+    }
+
+    let worktreeAdded = false;
+    const cleanupStage = () => {
+      // 활성화 결과보다 임시 폴더 정리가 더 중요할 수는 없다. 정리 실패가 성공 응답을
+      // 500으로 뒤집으면 새 코드가 반영되고도 재시작이 예약되지 않는 더 위험한 상태가 된다.
+      try { if (worktreeAdded) managerGit("worktree", "remove", "--force", stageDir); } catch { /* best effort */ }
+      try { removeStageDir(stageDir); } catch { /* best effort */ }
+    };
+    const rejectWithNote = (stage: string, detail: string, note: string): Fail => {
+      clearManagerJournal();
+      recordReceipt({ ts: now(), from: before, to: target, subjects, gates: [], result: "rejected", error: `${stage}: ${tail(detail, 800)}` });
+      return fail(stage, `${tail(detail)}\n\n${note}`);
+    };
+    const reject = (stage: string, detail: string): Fail => rejectWithNote(
+      stage,
+      detail,
+      "서비스 코드는 바뀌지 않았습니다. 일시적인 환경 문제일 수 있으니 다시 시도할 수 있습니다.",
+    );
+    const rejectPreservingExternal = (stage: string, detail: string): Fail => rejectWithNote(
+      stage,
+      detail,
+      "이 적용 작업은 활성화하지 않았으며 감지한 외부 변경을 그대로 보존했습니다.",
+    );
+    const activationMismatch = (detail: string): Fail => {
+      // merge 성공 뒤 HEAD가 또 움직였다면 다른 작업이 개입했을 수 있다. 여기서 reset하면
+      // 방금 생긴 외부 커밋/수정을 지우므로 상태를 보존하고 저널을 남겨 수동 확인을 강제한다.
+      recordReceipt({
+        ts: now(), from: before, to: target, subjects, gates: [], result: "interrupted",
+        error: `병합 검증: ${tail(detail, 800)} — 외부 상태를 보존했으며 수동 확인이 필요합니다.`,
+      });
+      return fail("병합 검증", `${tail(detail)}\n\n외부 변경 가능성이 있어 현재 상태를 보존했습니다. 적용 저널을 지우지 말고 수동으로 확인하세요.`);
+    };
+    const rollback = (stage: string, detail: string): Fail => {
+      managerGit("reset", "--hard", before);
+      install(root);
+      install(join(root, "web"));
+      runner([BUN, "run", "build"], { cwd: join(root, "web") });
+      clearManagerJournal();
+      recordReceipt({ ts: now(), from: before, to: target, subjects, gates: [], result: "rolled-back", error: `${stage}: ${tail(detail, 800)}` });
+      return fail(stage, `${tail(detail)}\n\n받기 전 상태(${before.slice(0, 7)})로 되돌렸습니다.`);
+    };
+
+    let list: Gate[] = [];
+    try {
+      managerGit("worktree", "prune");
+      const wt = managerGit("worktree", "add", "--detach", stageDir, target);
+      if (!wt.ok) return reject("준비", tail(wt.out));
+      worktreeAdded = true;
+
+      try {
+        list = gates ?? stageGates(stageDir);
+        for (const dir of [stageDir, join(stageDir, "web")]) {
+          const inst = install(dir);
+          if (!inst.ok) return reject("의존성 설치", inst.out);
+        }
+        const result = await runGates(list);
+        if (!result.ok) return reject(result.stage, result.out);
+      } catch (e) {
+        return reject("검증", `예기치 못한 오류 — ${(e as Error).message}`);
+      }
+
+      // 비동기 검증 중 서비스 체크아웃이 바뀌었으면 외부 변경을 보존하고 활성화를 거부한다.
+      const liveHead = managerGit("rev-parse", "--verify", "HEAD^{commit}");
+      if (!liveHead.ok || liveHead.out.trim() !== before)
+        return rejectPreservingExternal("활성화 점검", `검증 중 현재 커밋이 바뀌었습니다 (${before.slice(0, 7)} → ${(liveHead.out || "unknown").trim().slice(0, 7)})`);
+      const liveStatus = managerGit("status", "--porcelain", "--untracked-files=no");
+      if (!liveStatus.ok || liveStatus.out)
+        return rejectPreservingExternal("활성화 점검", "검증 중 서비스 폴더에 추적 변경이 생겼습니다");
+      const targetStillExists = managerGit("rev-parse", "--verify", `${target}^{commit}`);
+      if (!targetStillExists.ok || targetStillExists.out.trim() !== target)
+        return reject("활성화 점검", "검증한 대상 커밋을 더 이상 확인할 수 없습니다");
+      if (!managerGit("merge-base", "--is-ancestor", before, target).ok)
+        return reject("활성화 점검", "검증한 대상이 현재 기준의 fast-forward 후속 커밋이 아닙니다");
+
+      // 브랜치 이름은 검증 중 움직일 수 있다. 캡처하고 검증한 정확한 커밋만 활성화한다.
+      const merged = managerGit("merge", "--ff-only", target);
+      if (!merged.ok) return reject("병합", tail(merged.out));
+      const activatedHead = managerGit("rev-parse", "--verify", "HEAD^{commit}");
+      if (!activatedHead.ok || activatedHead.out.trim() !== target)
+        return activationMismatch(`활성화된 커밋이 검증 대상과 다릅니다 (${(activatedHead.out || "unknown").trim().slice(0, 7)} ≠ ${target.slice(0, 7)})`);
+
+      try {
+        for (const dir of [root, join(root, "web")]) {
+          const inst = install(dir);
+          if (!inst.ok) return rollback("의존성 설치", inst.out);
+        }
+        for (const gate of liveGates()) {
+          const result = await gate.run();
+          if (!result.ok) return rollback(gate.name, result.out);
+        }
+      } catch (e) {
+        return rollback("검증", `예기치 못한 오류 — ${(e as Error).message}`);
+      }
+
+      writeSetting("release_prev_sha", before);
+      writeSetting("release_applied_at", String(now()));
+      const appVersion = (Number(readSetting("app_version")) || 0) + 1;
+      writeSetting("app_version", String(appVersion));
+
+      const tier = status.tier as ReleaseTier;
+      const version = nextVersion(currentManagerRelease()?.version ?? null, tier, managerStage());
+      managerGit("tag", `v${version}`, target);
+      const history = loadManagerHistory();
+      history.push({ version, tier, sha: target, prevSha: before, appliedAt: now(), subjects, status: "applied" });
+      saveManagerHistory(history);
+
+      clearManagerJournal();
+      recordReceipt({ ts: now(), from: before, to: target, subjects, gates: list.map((g) => g.name), result: "applied", version, tier });
+      const shortTarget = managerGit("rev-parse", "--short", target);
+      return { ok: true, version: appVersion, sha: shortTarget.ok ? shortTarget.out.trim() : target.slice(0, 7), release: version, tier };
+    } finally {
+      cleanupStage();
+    }
+  };
+
+  return { applyRelease };
+}
+
+const productionReleaseManager = createReleaseManager();
+
 // 검증은 반영 "전에", 대상 커밋의 트리를 임시 worktree에서 돌린다.
 // 서비스 트리를 merge로 바꾼 뒤 무거운 스위트를 돌리면 실행 중인 서비스와 외장 디스크의
 // I/O 경합 속에서 샌드박스·서브프로세스 계열 테스트가 일시적으로 실패해, 멀쩡한
 // 업데이트가 롤백되고 트리가 두 번 뒤집히는 사고가 있었다(2026-09-20).
 // 스테이징은 빠른 로컬 디스크(tmpdir)에서 돌고, 실패해도 서비스 코드는 한 줄도 안 바뀐다.
 export async function applyRelease(gates?: Gate[]): Promise<{ ok: true; version: number; sha: string; release: string; tier: ReleaseTier } | Fail> {
-  // 진행 중인 적용이 남아 있으면 겹쳐 돌리지 않는다 — 저널은 다음 기동 때 회수된다
-  if (getSetting("release_inflight")) return fail("점검", "이전 적용이 아직 끝나지 않았습니다 — 잠시 후 다시 시도하세요");
-  const st = releaseStatus();
-  if (!st.canApply) return fail("점검", st.reason);
-
-  const before = git("rev-parse", "HEAD").out;
-  const target = git("rev-parse", CHANNEL).out;
-  const subjects = st.pending.map((p) => p.subject);
-  beginJournal({ from: before, to: target, subjects }); // 손대기 전에 의도를 먼저 남긴다
-
-  // 1단계: 스테이징 검증 — 대상 커밋 그대로의 트리에서 의존성 설치부터 전체 검사를 돌린다.
-  const stageDir = mkdtempSync(join(tmpdir(), "mybot-stage-"));
-  git("worktree", "prune"); // 이전에 죽은 적용이 남긴 관리 항목을 미리 치운다
-  const wt = git("worktree", "add", "--detach", stageDir, target);
-  if (!wt.ok) {
-    rmSync(stageDir, { recursive: true, force: true });
-    clearJournal();
-    return fail("준비", tail(wt.out));
-  }
-  const reject = (stage: string, detail: string): Fail => {
-    // 스테이징 거부는 종결 상태다 — inflight 마커를 지우지 않으면 이후 적용이 영구 차단된다
-    clearJournal();
-    writeReceipt({ ts: Date.now(), from: before, to: target, subjects, gates: [], result: "rejected", error: `${stage}: ${tail(detail, 800)}` });
-    return fail(stage, `${tail(detail)}\n\n서비스 코드는 바뀌지 않았습니다. 일시적인 환경 문제일 수 있으니 다시 시도할 수 있습니다.`);
-  };
-  const list = gates ?? defaultGates(stageDir);
-  try {
-    for (const dir of [stageDir, join(stageDir, "web")]) {
-      const inst = installDeps(dir);
-      if (!inst.ok) return reject("의존성 설치", inst.out);
-    }
-    const result = await runGates(list);
-    if (!result.ok) return reject(result.stage, result.out);
-  } catch (e) {
-    return reject("검증", `예기치 못한 오류 — ${(e as Error).message}`);
-  } finally {
-    git("worktree", "remove", "--force", stageDir);
-    rmSync(stageDir, { recursive: true, force: true });
-  }
-
-  // 2단계: 반영 — 검증을 통과한 바로 그 트리를 받는다.
-  const merged = git("merge", "--ff-only", CHANNEL);
-  if (!merged.ok) {
-    clearJournal();
-    return fail("병합", tail(merged.out));
-  }
-
-  // 병합한 뒤로는 어떤 경로로 빠져나가든 되돌려야 한다.
-  // 예외가 그냥 올라가면 반영만 된 채 재시작도 롤백도 없이 남는다(실제로 겪은 사고다).
-  const rollback = (stage: string, detail: string): Fail => {
-    git("reset", "--hard", before);
-    installDeps(ROOT);
-    installDeps(join(ROOT, "web"));
-    run([BUN, "run", "build"], { cwd: join(ROOT, "web") }); // 되돌린 소스로 화면도 원상복구
-    clearJournal();
-    writeReceipt({ ts: Date.now(), from: before, to: target, subjects, gates: [], result: "rolled-back", error: `${stage}: ${tail(detail, 800)}` });
-    return fail(stage, `${tail(detail)}\n\n받기 전 상태(${before.slice(0, 7)})로 되돌렸습니다.`);
-  };
-
-  try {
-    // 의존성 동기화 — 릴리스가 패키지를 바꿨으면 테스트·기동 전에 맞춰야 한다
-    for (const dir of [ROOT, join(ROOT, "web")]) {
-      const inst = installDeps(dir);
-      if (!inst.ok) return rollback("의존성 설치", inst.out);
-    }
-    for (const g of deployGates()) {
-      const r = await g.run();
-      if (!r.ok) return rollback(g.name, r.out);
-    }
-  } catch (e) {
-    return rollback("검증", `예기치 못한 오류 — ${(e as Error).message}`);
-  }
-
-  setSetting("release_prev_sha", before);
-  setSetting("release_applied_at", String(Date.now()));
-  const appV = (Number(getSetting("app_version")) || 0) + 1;
-  setSetting("app_version", String(appV));
-
-  // 버전 원장 — 대기 묶음의 등급으로 버전을 매기고, 태그·원장·영수증에 같은 번호를 남긴다
-  const files = git("diff", "--name-only", before, target).out.split("\n").filter(Boolean);
-  const tier = classifyTier(subjects, files);
-  const version = nextVersion(currentRelease()?.version ?? null, tier);
-  git("tag", `v${version}`, target);
-  const history = loadHistory();
-  history.push({ version, tier, sha: target, prevSha: before, appliedAt: Date.now(), subjects, status: "applied" });
-  saveHistory(history);
-
-  clearJournal();
-  writeReceipt({ ts: Date.now(), from: before, to: target, subjects, gates: list.map((g) => g.name), result: "applied", version, tier });
-  return { ok: true, version: appV, sha: git("rev-parse", "--short", "HEAD").out, release: version, tier };
+  return productionReleaseManager.applyRelease(gates);
 }
 
 // 윈백 대상 결정 — 기록된 버전 지점(sha·prevSha)만 허용한다.

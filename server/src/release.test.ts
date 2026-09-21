@@ -1,12 +1,12 @@
 import { test, expect } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { db, setSetting } from "./db";
 import {
   evaluateRelease, runGates, defaultGates, bootCheck, run, BUN,
   writeReceipt, readReceipts, interruptedReceipt, type Gate,
-  classifyTier, nextVersion, pickWinbackTarget, applyRelease, type ReleaseRecord,
+  classifyTier, nextVersion, pickWinbackTarget, applyRelease, createReleaseManager, type Receipt, type ReleaseRecord,
 } from "./release";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
@@ -130,6 +130,231 @@ test("이전 적용이 끝나지 않았으면 새 적용을 겹쳐 돌리지 않
     if (!r.ok) expect(r.error).toContain("끝나지 않았습니다");
   } finally { setSetting("release_inflight", ""); }
 });
+
+// --- 불변 대상 SHA·활성화 펜스 ---
+// 실제 체크아웃과 DB를 절대 건드리지 않는다. 각 사례는 폐기 가능한 git 저장소와
+// 메모리 settings/receipts만 사용해 비동기 검증 중 외부 변화까지 재현한다.
+
+function gitAt(root: string, ...args: string[]) {
+  return run(["git", ...args], { cwd: root });
+}
+
+function mustGit(root: string, ...args: string[]): string {
+  const result = gitAt(root, ...args);
+  if (!result.ok) throw new Error(`git ${args.join(" ")} 실패: ${result.out}`);
+  return result.out.trim();
+}
+
+function releaseRepo() {
+  const root = mkdtempSync(join(tmpdir(), "mybot-release-repo-"));
+  mustGit(root, "init", "-b", "main");
+  mustGit(root, "config", "user.email", "release-test@example.invalid");
+  mustGit(root, "config", "user.name", "Release Test");
+  writeFileSync(join(root, "state.txt"), "A\n");
+  mustGit(root, "add", "state.txt");
+  mustGit(root, "commit", "-m", "기준 A");
+  const before = mustGit(root, "rev-parse", "HEAD");
+
+  mustGit(root, "checkout", "-b", "release");
+  writeFileSync(join(root, "state.txt"), "B\n");
+  mustGit(root, "commit", "-am", "긴급: 대상 B");
+  const target = mustGit(root, "rev-parse", "HEAD");
+  writeFileSync(join(root, "state.txt"), "C\n");
+  mustGit(root, "commit", "-am", "긴급: 다음 C");
+  const next = mustGit(root, "rev-parse", "HEAD");
+  mustGit(root, "checkout", "main");
+  mustGit(root, "update-ref", "refs/heads/release", target);
+  return { root, before, target, next };
+}
+
+function isolatedManager(root: string, overrides: Parameters<typeof createReleaseManager>[0] = {}) {
+  const settings = new Map<string, string>();
+  const receipts: Receipt[] = [];
+  const manager = createReleaseManager({
+    root,
+    git: (...args) => gitAt(root, ...args),
+    // Git 이외의 실제 명령은 허용하지 않는다. install/build/boot는 아래의 기록 가능한
+    // 스텁으로만 실행돼 폐기 저장소 밖 프로세스나 네트워크에 닿지 않는다.
+    run: () => ({ ok: true, out: "" }),
+    getSetting: (key) => settings.get(key) ?? null,
+    setSetting: (key, value) => { settings.set(key, value); },
+    writeReceipt: (receipt) => { receipts.push(receipt); },
+    installDeps: () => ({ ok: true, out: "" }),
+    defaultGates: () => [],
+    deployGates: () => [],
+    ...overrides,
+  });
+  return { manager, settings, receipts };
+}
+
+test("검증 중 release가 B에서 C로 움직여도 캡처한 B만 적용하고 C는 대기로 남긴다", async () => {
+  const repo = releaseRepo();
+  try {
+    let stageDir = "";
+    let stagedHead = "";
+    let stagedState = "";
+    let journalTarget = "";
+    const gitCalls: string[][] = [];
+    const { manager, settings, receipts } = isolatedManager(repo.root, {
+      git: (...args) => { gitCalls.push(args); return gitAt(repo.root, ...args); },
+      makeStageDir: () => {
+        stageDir = mkdtempSync(join(tmpdir(), "mybot-release-stage-test-"));
+        return stageDir;
+      },
+    });
+    const result = await manager.applyRelease([{
+      name: "경쟁 조건 주입",
+      run: async () => {
+        stagedHead = mustGit(stageDir, "rev-parse", "HEAD");
+        stagedState = readFileSync(join(stageDir, "state.txt"), "utf8");
+        journalTarget = JSON.parse(settings.get("release_inflight") || "{}").to ?? "";
+        mustGit(repo.root, "update-ref", "refs/heads/release", repo.next);
+        return { ok: true, out: "" };
+      },
+    }]);
+
+    expect(result.ok).toBe(true);
+    expect(mustGit(repo.root, "rev-parse", "HEAD")).toBe(repo.target);
+    expect(mustGit(repo.root, "rev-parse", "refs/heads/release")).toBe(repo.next);
+    expect(stagedHead).toBe(repo.target);
+    expect(stagedState).toBe("B\n");
+    expect(journalTarget).toBe(repo.target);
+    expect(gitCalls).toContainEqual(["worktree", "add", "--detach", stageDir, repo.target]);
+    expect(gitCalls).toContainEqual(["merge", "--ff-only", repo.target]);
+    expect(mustGit(repo.root, "rev-parse", "v0.0.1")).toBe(repo.target);
+    const history = JSON.parse(settings.get("release_history") || "[]") as ReleaseRecord[];
+    expect(history.at(-1)?.sha).toBe(repo.target);
+    expect(history.at(-1)?.subjects).toEqual(["긴급: 대상 B"]);
+    expect(receipts.at(-1)).toEqual(expect.objectContaining({ result: "applied", to: repo.target }));
+    expect(receipts.at(-1)?.subjects).toEqual(["긴급: 대상 B"]);
+    expect(mustGit(repo.root, "log", "--format=%s", "HEAD..release")).toBe("긴급: 다음 C");
+  } finally { rmSync(repo.root, { recursive: true, force: true }); }
+}, 30000);
+
+test("검증 중 live HEAD가 바뀌면 외부 커밋을 보존하고 활성화를 거부한다", async () => {
+  const repo = releaseRepo();
+  try {
+    const { manager, settings, receipts } = isolatedManager(repo.root);
+    let external = "";
+    const result = await manager.applyRelease([{
+      name: "HEAD 변경 주입",
+      run: async () => {
+        writeFileSync(join(repo.root, "external.txt"), "외부 변경\n");
+        mustGit(repo.root, "add", "external.txt");
+        mustGit(repo.root, "commit", "-m", "외부 커밋");
+        external = mustGit(repo.root, "rev-parse", "HEAD");
+        return { ok: true, out: "" };
+      },
+    }]);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("현재 커밋이 바뀌었습니다");
+      expect(result.error).toContain("외부 변경을 그대로 보존");
+    }
+    expect(mustGit(repo.root, "rev-parse", "HEAD")).toBe(external);
+    expect(readFileSync(join(repo.root, "external.txt"), "utf8")).toBe("외부 변경\n");
+    expect(settings.get("release_inflight")).toBe("");
+    expect(receipts.at(-1)?.result).toBe("rejected");
+  } finally { rmSync(repo.root, { recursive: true, force: true }); }
+}, 30000);
+
+test("검증 중 추적 파일이 바뀌면 내용을 보존하고 활성화를 거부한다", async () => {
+  const repo = releaseRepo();
+  try {
+    const { manager, settings, receipts } = isolatedManager(repo.root);
+    const result = await manager.applyRelease([{
+      name: "dirty 변경 주입",
+      run: async () => {
+        writeFileSync(join(repo.root, "state.txt"), "외부 dirty 변경\n");
+        return { ok: true, out: "" };
+      },
+    }]);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("추적 변경이 생겼습니다");
+      expect(result.error).toContain("외부 변경을 그대로 보존");
+    }
+    expect(mustGit(repo.root, "rev-parse", "HEAD")).toBe(repo.before);
+    expect(readFileSync(join(repo.root, "state.txt"), "utf8")).toBe("외부 dirty 변경\n");
+    expect(settings.get("release_inflight")).toBe("");
+    expect(receipts.at(-1)?.result).toBe("rejected");
+  } finally { rmSync(repo.root, { recursive: true, force: true }); }
+}, 30000);
+
+test("merge 뒤 외부 커밋과 dirty 변경이 생기면 지우지 않고 수동 확인 상태로 남긴다", async () => {
+  const repo = releaseRepo();
+  try {
+    let externalHead = "";
+    const injectedGit = (...args: string[]) => {
+      const result = gitAt(repo.root, ...args);
+      if (args[0] === "merge" && result.ok) {
+        writeFileSync(join(repo.root, "external.txt"), "외부 커밋\n");
+        mustGit(repo.root, "add", "external.txt");
+        mustGit(repo.root, "commit", "-m", "병합 뒤 외부 커밋");
+        externalHead = mustGit(repo.root, "rev-parse", "HEAD");
+        writeFileSync(join(repo.root, "state.txt"), "병합 뒤 dirty 변경\n");
+      }
+      return result;
+    };
+    const { manager, settings, receipts } = isolatedManager(repo.root, { git: injectedGit });
+    const result = await manager.applyRelease([]);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("활성화된 커밋이 검증 대상과 다릅니다");
+      expect(result.error).toContain("현재 상태를 보존");
+    }
+    expect(mustGit(repo.root, "rev-parse", "HEAD")).toBe(externalHead);
+    expect(readFileSync(join(repo.root, "external.txt"), "utf8")).toBe("외부 커밋\n");
+    expect(readFileSync(join(repo.root, "state.txt"), "utf8")).toBe("병합 뒤 dirty 변경\n");
+    expect(settings.get("release_inflight")).toContain(repo.target);
+    expect(settings.get("release_history")).toBeUndefined();
+    expect(receipts.at(-1)?.result).toBe("interrupted");
+  } finally { rmSync(repo.root, { recursive: true, force: true }); }
+}, 30000);
+
+test("활성화 성공 뒤 스테이지 정리 예외가 성공 결과와 재시작 경로를 뒤집지 않는다", async () => {
+  const repo = releaseRepo();
+  try {
+    const { manager, settings, receipts } = isolatedManager(repo.root, {
+      removeStageDir: () => { throw new Error("정리 실패 주입"); },
+    });
+    const result = await manager.applyRelease([]);
+
+    expect(result.ok).toBe(true);
+    expect(mustGit(repo.root, "rev-parse", "HEAD")).toBe(repo.target);
+    expect(settings.get("release_inflight")).toBe("");
+    expect(settings.get("release_history")).toContain(repo.target);
+    expect(receipts.at(-1)?.result).toBe("applied");
+  } finally { rmSync(repo.root, { recursive: true, force: true }); }
+}, 30000);
+
+test("게이트 팩토리 예외도 스테이지와 저널을 정리하고 거부 영수증을 남긴다", async () => {
+  const repo = releaseRepo();
+  let stageDir = "";
+  try {
+    const { manager, settings, receipts } = isolatedManager(repo.root, {
+      makeStageDir: () => {
+        stageDir = mkdtempSync(join(tmpdir(), "mybot-release-stage-throw-"));
+        return stageDir;
+      },
+      defaultGates: () => { throw new Error("게이트 팩토리 실패 주입"); },
+    });
+    const result = await manager.applyRelease();
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("게이트 팩토리 실패 주입");
+    expect(mustGit(repo.root, "rev-parse", "HEAD")).toBe(repo.before);
+    expect(settings.get("release_inflight")).toBe("");
+    expect(receipts.at(-1)?.result).toBe("rejected");
+    expect(existsSync(stageDir)).toBe(false);
+  } finally {
+    if (stageDir) rmSync(stageDir, { recursive: true, force: true });
+    rmSync(repo.root, { recursive: true, force: true });
+  }
+}, 30000);
 
 // --- 영수증·저널 (개선지침서 R1·R3) ---
 
