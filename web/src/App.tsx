@@ -543,7 +543,7 @@ export default function App() {
           <button
             className="relative grid size-10 shrink-0 place-items-center rounded-xl text-stone-500 hover:bg-stone-200/60 hover:text-stone-800 md:size-9"
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            aria-label={`${sidebarOpen ? "사이드바 닫기" : "사이드바 열기"}${pendingUpdates + pendingReleases ? ` — 적용할 업데이트 ${pendingUpdates + pendingReleases}건` : ""}`}
+            aria-label={`${sidebarOpen ? "사이드바 닫기" : "사이드바 열기"}${pendingUpdates + pendingReleases ? " — 적용할 업데이트가 있습니다" : ""}`}
           >
             <Menu size={20} strokeWidth={1.8} />
             {/* 사이드바를 닫아둬도 업데이트가 온 것은 알 수 있게 한다 */}

@@ -367,7 +367,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
               <Icon size={14} className="shrink-0" />
               <span className="truncate">{label}</span>
               {id === "providers" && authed.length > 0 && <span className="ml-auto rounded bg-emerald-50 px-1 text-micro text-emerald-600">{authed.length}</span>}
-              {id === "updates" && updBadge > 0 && <span className="ml-auto grid size-4 place-items-center rounded-full bg-amber-500 text-micro font-bold text-white">{updBadge}</span>}
+              {id === "updates" && updBadge > 0 && <span className="ml-auto size-1.5 rounded-full bg-amber-500" />}
             </button>
           ))}
           <div className="mt-auto hidden px-2 pb-1 text-2xs text-stone-300 md:block">MyBot 로컬 설정</div>
@@ -1064,14 +1064,13 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                       <div className="flex items-start gap-2">
                         <div className="min-w-0 flex-1">
                           <div className="text-xs font-medium text-stone-800">
-                            {/* 대기분이 없는 이유는 "최신"만이 아니다 — 채널이 없을 수도 있어 사유를 그대로 보여준다 */}
-                            {rel.pending.length ? `v${rel.nextVersion} ${rel.pendingTierLabel} 대기 중 — ${rel.pending.length}건` : rel.reason || "최신 상태입니다"}
+                            {rel.canApply ? `v${rel.nextVersion} ${rel.pendingTierLabel} — 지금 적용할 수 있습니다` : "최신 상태입니다"}
                           </div>
                           <div className="mt-0.5 truncate font-mono text-2xs text-stone-500">
                             {rel.version ? `v${rel.version}` : rel.current} · {rel.currentSubject}
                           </div>
                         </div>
-                        {!!rel.pendingTier && (
+                        {rel.canApply && !!rel.pendingTier && (
                           <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${rel.pendingTier === "patch" ? "bg-red-100 text-red-700" : rel.pendingTier === "major" ? "bg-indigo-100 text-indigo-700" : "bg-stone-100 text-stone-600"}`}>
                             {rel.pendingTierLabel}
                           </span>
@@ -1081,19 +1080,6 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                           {relBusy === "적용" ? "적용 중…" : "적용"}
                         </button>
                       </div>
-                      {!!rel.pending.length && (
-                        <ul className="mt-2.5 space-y-1 border-t border-stone-100 pt-2.5">
-                          {rel.pending.map((p) => (
-                            <li key={p.sha} className="flex gap-2 text-2xs">
-                              <span className="min-w-0 flex-1 truncate text-stone-700">{p.subject}</span>
-                              <span className="shrink-0 text-stone-400">{new Date(p.date).toLocaleDateString("ko-KR", { month: "numeric", day: "numeric" })}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                      {!rel.canApply && rel.reason && rel.pending.length > 0 && (
-                        <p className="mt-2.5 text-caption text-amber-700">{rel.reason}</p>
-                      )}
                       {relBusy && relBusy !== "적용" && <p className="mt-2.5 text-caption text-stone-600">{relBusy}</p>}
                       {relErr && <p className="mt-2.5 whitespace-pre-wrap break-words text-caption text-red-700">{relErr}</p>}
                       {rel.canRevert && (
