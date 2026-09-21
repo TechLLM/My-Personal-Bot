@@ -314,7 +314,17 @@ function cleanResult(content: string): { text: string; heading: boolean }[] {
     .replace(/&nbsp;/gi, " ");
   const source = plain.split("\n")
     .map((line) => {
-      const flat = line.replace(/[ \t]+/g, " ").trim();
+      let flat = line.replace(/[ \t]+/g, " ").trim();
+      // 오류 원문에 섞인 원시 JSON 덩어리를 사람이 읽을 수 있게 정리한다 —
+      // 파싱되면 message 필드만 남기고, 중간에 잘린 JSON은 덩어리째 지운다.
+      flat = flat.replace(/\s*\{[\s\S]*$/, (blob, offset) => {
+        try {
+          const j = JSON.parse(blob);
+          const msg = j?.error?.message ?? j?.message;
+          const sep = /[:—\-]\s*$/.test(flat.slice(0, offset)) ? " " : " — ";
+          return msg ? `${sep}${String(msg).slice(0, 140)}` : blob;
+        } catch { return /오류|에러|실패|error|fail/i.test(flat) ? "" : blob; }
+      }).replace(/[: ]+$/, "");
       // 마크다운 제목이던 줄을 표시해 둔다 — 제목은 내용이 아니라 섹션 라벨이라
       // 단독으로 전송되면 "미확인·한계" 같은 빈 껍데기만 나가는 사고가 된다.
       return { text: flat.replace(/^#{1,6}\s*/, ""), heading: /^#{1,6}\s*/.test(flat) };

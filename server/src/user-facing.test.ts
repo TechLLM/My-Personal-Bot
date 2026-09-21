@@ -243,4 +243,18 @@ describe("결과 축약", () => {
     expect(result).toContain("확인하지 못했습니다");
     expect(result).not.toContain("완료했습니다");
   });
+
+  test("오류의 원시 JSON 덩어리는 읽을 수 있는 문구로 정리한다", () => {
+    // 잘린 JSON — 덩어리째 제거
+    const truncated = compactResult("- 하위 작업 실패: 에이전트 오류: 오류 400: {\"contentFilter\":[{\"level\":1,\"role\":\"assistant\"}],\"error\":{\"code\":\"1301\",\"message\":\"System detected potenti", 500);
+    expect(truncated).not.toContain("{");
+    expect(truncated).toContain("하위 작업 실패");
+    // 완전한 JSON — error.message만 남긴다
+    const complete = compactResult("- 작업 실패: 오류 500: {\"error\":{\"code\":\"500\",\"message\":\"internal timeout\"}}", 500);
+    expect(complete).toContain("internal timeout");
+    expect(complete).not.toContain("code");
+    // 오류가 아닌 줄의 JSON 콘텐츠는 보존한다
+    const normal = compactResult("설정값 {\"retry\": 3} 적용했습니다", 500);
+    expect(normal).toContain("{\"retry\": 3}");
+  });
 });
