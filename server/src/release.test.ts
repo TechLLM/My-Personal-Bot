@@ -180,6 +180,8 @@ function isolatedManager(root: string, overrides: Parameters<typeof createReleas
     setSetting: (key, value) => { settings.set(key, value); },
     writeReceipt: (receipt) => { receipts.push(receipt); },
     installDeps: () => ({ ok: true, out: "" }),
+    buildWeb: () => ({ ok: true, out: "" }),
+    bootCheck: async () => ({ ok: true, out: "" }),
     defaultGates: () => [],
     deployGates: () => [],
     ...overrides,
@@ -311,7 +313,7 @@ test("merge 뒤 외부 커밋과 dirty 변경이 생기면 지우지 않고 수�
     expect(readFileSync(join(repo.root, "state.txt"), "utf8")).toBe("병합 뒤 dirty 변경\n");
     expect(settings.get("release_inflight")).toContain(repo.target);
     expect(settings.get("release_history")).toBeUndefined();
-    expect(receipts.at(-1)?.result).toBe("interrupted");
+    expect(receipts.at(-1)?.result).toBe("recovery-failed");
   } finally { rmSync(repo.root, { recursive: true, force: true }); }
 }, 30000);
 
@@ -355,6 +357,382 @@ test("게이트 팩토리 예외도 스테이지와 저널을 정리하고 거�
     rmSync(repo.root, { recursive: true, force: true });
   }
 }, 30000);
+
+// --- 소유권 저널·검증된 복구·윈백 보상 ---
+
+test("반영 뒤 실패는 이전 SHA의 의존성·빌드·기동·clean까지 확인해야 rolled-back이다", async () => {
+  const repo = releaseRepo();
+  try {
+    const { manager, settings, receipts } = isolatedManager(repo.root, {
+      deployGates: () => [{ name: "반영 실패 주입", run: async () => ({ ok: false, out: "반영 실패" }) }],
+    });
+    const result = await manager.applyRelease([]);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("의존성·빌드·기동·작업 폴더까지 검증");
+    expect(mustGit(repo.root, "rev-parse", "HEAD")).toBe(repo.before);
+    expect(mustGit(repo.root, "status", "--porcelain", "--untracked-files=no")).toBe("");
+    expect(settings.get("release_inflight")).toBe("");
+    expect(receipts.at(-1)?.result).toBe("rolled-back");
+    expect(receipts.at(-1)?.error).toContain("복구를 모두 검증");
+  } finally { rmSync(repo.root, { recursive: true, force: true }); }
+}, 30000);
+
+test("복구 reset·루트 install·웹 install·build·boot 중 하나라도 실패하면 recovery-required를 유지한다", async () => {
+  const cases = ["reset", "root-install", "web-install", "build", "boot"] as const;
+  for (const failure of cases) {
+    const repo = releaseRepo();
+    try {
+      let rootInstalls = 0;
+      let webInstalls = 0;
+      const overrides: Parameters<typeof createReleaseManager>[0] = {
+        deployGates: () => [{ name: "반영 실패 주입", run: async () => ({ ok: false, out: "반영 실패" }) }],
+        git: (...args) => {
+          if (failure === "reset" && args[0] === "reset" && args[1] === "--hard" && args[2] === repo.before)
+            return { ok: false, out: "reset 실패 주입" };
+          return gitAt(repo.root, ...args);
+        },
+        installDeps: (dir) => {
+          if (dir === repo.root && ++rootInstalls === 2 && failure === "root-install") return { ok: false, out: "root install 실패 주입" };
+          if (dir === join(repo.root, "web") && ++webInstalls === 2 && failure === "web-install") return { ok: false, out: "web install 실패 주입" };
+          return { ok: true, out: "" };
+        },
+        buildWeb: () => failure === "build" ? { ok: false, out: "build 실패 주입" } : { ok: true, out: "" },
+        bootCheck: async () => failure === "boot" ? { ok: false, out: "boot 실패 주입" } : { ok: true, out: "" },
+      };
+      const { manager, settings, receipts } = isolatedManager(repo.root, overrides);
+      const result = await manager.applyRelease([]);
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toContain("서비스 파일 상태는 확인되지 않았");
+        expect(result.error).not.toContain("상태로 되돌린 뒤");
+      }
+      const journal = JSON.parse(settings.get("release_inflight") || "{}") as { phase?: string; owner?: string };
+      expect(journal.phase).toBe("recovery-required");
+      expect(journal.owner).toBeTruthy();
+      expect(receipts.at(-1)?.result).toBe("recovery-failed");
+      expect(receipts.at(-1)?.error).toContain("실패");
+    } finally { rmSync(repo.root, { recursive: true, force: true }); }
+  }
+}, 60000);
+
+test("복구 install·build·boot가 예외를 던져도 recovery-failed로 닫힌다", async () => {
+  const cases = ["install", "build", "boot"] as const;
+  for (const failure of cases) {
+    const repo = releaseRepo();
+    try {
+      let rootInstalls = 0;
+      const { manager, settings, receipts } = isolatedManager(repo.root, {
+        deployGates: () => [{ name: "반영 실패 주입", run: async () => ({ ok: false, out: "반영 실패" }) }],
+        installDeps: (dir) => {
+          if (failure === "install" && dir === repo.root && ++rootInstalls === 2) throw new Error("install throw 주입");
+          return { ok: true, out: "" };
+        },
+        buildWeb: () => { if (failure === "build") throw new Error("build throw 주입"); return { ok: true, out: "" }; },
+        bootCheck: async () => { if (failure === "boot") throw new Error("boot throw 주입"); return { ok: true, out: "" }; },
+      });
+      const result = await manager.applyRelease([]);
+      expect(result.ok).toBe(false);
+      expect(JSON.parse(settings.get("release_inflight") || "{}").phase).toBe("recovery-required");
+      expect(receipts.at(-1)?.result).toBe("recovery-failed");
+    } finally { rmSync(repo.root, { recursive: true, force: true }); }
+  }
+}, 60000);
+
+test("오래된 콜백은 새 소유자의 저널을 지우거나 갱신하지 못한다", async () => {
+  const repo = releaseRepo();
+  try {
+    const { manager, settings, receipts } = isolatedManager(repo.root, { makeOwner: () => "owner-a" });
+    const newer = {
+      schema: 2, owner: "owner-b", operation: "winback", from: repo.target, to: repo.before,
+      phase: "staging", startedAt: 2,
+    };
+    const result = await manager.applyRelease([{
+      name: "소유권 교체 주입",
+      run: async () => {
+        settings.set("release_inflight", JSON.stringify(newer));
+        return { ok: false, out: "이전 작업 실패" };
+      },
+    }]);
+
+    expect(result.ok).toBe(false);
+    expect(JSON.parse(settings.get("release_inflight") || "{}")).toEqual(newer);
+    expect(receipts.at(-1)?.result).toBe("rejected");
+  } finally { rmSync(repo.root, { recursive: true, force: true }); }
+}, 30000);
+
+test("마지막 live 검증 중 소유권을 잃은 apply는 설정·태그·이력을 쓰지 않는다", async () => {
+  const repo = releaseRepo();
+  try {
+    let settingsRef!: Map<string, string>;
+    const newer = {
+      schema: 2, owner: "owner-b", operation: "winback", from: repo.target, to: repo.before,
+      phase: "verifying", startedAt: 2,
+    };
+    const ctx = isolatedManager(repo.root, {
+      makeOwner: () => "owner-a",
+      deployGates: () => [{
+        name: "소유권 교체 live 게이트",
+        run: async () => {
+          settingsRef.set("release_inflight", JSON.stringify(newer));
+          return { ok: true, out: "" };
+        },
+      }],
+    });
+    settingsRef = ctx.settings;
+    const result = await ctx.manager.applyRelease([]);
+
+    expect(result.ok).toBe(false);
+    expect(JSON.parse(ctx.settings.get("release_inflight") || "{}")).toEqual(newer);
+    expect(ctx.settings.get("release_prev_sha")).toBeUndefined();
+    expect(ctx.settings.get("release_applied_at")).toBeUndefined();
+    expect(ctx.settings.get("app_version")).toBeUndefined();
+    expect(ctx.settings.get("release_history")).toBeUndefined();
+    expect(gitAt(repo.root, "rev-parse", "--verify", "refs/tags/v0.0.1").ok).toBe(false);
+    expect(ctx.receipts.at(-1)?.result).toBe("recovery-failed");
+  } finally { rmSync(repo.root, { recursive: true, force: true }); }
+}, 30000);
+
+test("apply가 게이트에서 대기 중이면 winback과 revert는 Git mutation 없이 거부된다", async () => {
+  const repo = releaseRepo();
+  try {
+    let releaseGate!: (result: { ok: boolean; out: string }) => void;
+    let resets = 0;
+    const { manager, settings } = isolatedManager(repo.root, {
+      git: (...args) => {
+        if (args[0] === "reset") resets++;
+        return gitAt(repo.root, ...args);
+      },
+    });
+    const applying = manager.applyRelease([{
+      name: "대기 게이트",
+      run: () => new Promise((resolve) => { releaseGate = resolve; }),
+    }]);
+    expect(settings.get("release_inflight")).toContain('"operation":"apply"');
+
+    const winback = await manager.winbackRelease();
+    const revert = await manager.revertRelease();
+    expect(winback.ok).toBe(false);
+    expect(revert.ok).toBe(false);
+    if (!winback.ok) expect(winback.error).toContain("다른 릴리스 작업");
+    if (!revert.ok) expect(revert.error).toContain("다른 릴리스 작업");
+    expect(resets).toBe(0);
+
+    releaseGate({ ok: false, out: "대기 종료" });
+    await applying;
+    expect(settings.get("release_inflight")).toBe("");
+  } finally { rmSync(repo.root, { recursive: true, force: true }); }
+}, 30000);
+
+test("winback이나 revert가 boot에서 대기 중이어도 다른 릴리스 mutation은 모두 거부된다", async () => {
+  const winbackRepo = releaseRepo();
+  const revertRepo = releaseRepo();
+  try {
+    mustGit(winbackRepo.root, "merge", "--ff-only", winbackRepo.target);
+    let releaseWinbackBoot!: (result: { ok: boolean; out: string }) => void;
+    let winbackResets = 0;
+    const winbackCtx = isolatedManager(winbackRepo.root, {
+      git: (...args) => {
+        if (args[0] === "reset") winbackResets++;
+        return gitAt(winbackRepo.root, ...args);
+      },
+      bootCheck: () => new Promise((resolve) => { releaseWinbackBoot = resolve; }),
+    });
+    winbackCtx.settings.set("release_history", JSON.stringify(appliedHistory(winbackRepo)));
+    const runningWinback = winbackCtx.manager.winbackRelease();
+    expect(winbackCtx.settings.get("release_inflight")).toContain('"operation":"winback"');
+    const blockedApply = await winbackCtx.manager.applyRelease([]);
+    const blockedRevert = await winbackCtx.manager.revertRelease();
+    expect(blockedApply.ok).toBe(false);
+    expect(blockedRevert.ok).toBe(false);
+    expect(winbackResets).toBe(1);
+    releaseWinbackBoot({ ok: true, out: "" });
+    expect((await runningWinback).ok).toBe(true);
+
+    mustGit(revertRepo.root, "merge", "--ff-only", revertRepo.target);
+    let releaseRevertBoot!: (result: { ok: boolean; out: string }) => void;
+    let revertResets = 0;
+    const revertCtx = isolatedManager(revertRepo.root, {
+      git: (...args) => {
+        if (args[0] === "reset") revertResets++;
+        return gitAt(revertRepo.root, ...args);
+      },
+      bootCheck: () => new Promise((resolve) => { releaseRevertBoot = resolve; }),
+    });
+    revertCtx.settings.set("release_prev_sha", revertRepo.before);
+    const runningRevert = revertCtx.manager.revertRelease();
+    expect(revertCtx.settings.get("release_inflight")).toContain('"operation":"revert"');
+    const revertBlockedApply = await revertCtx.manager.applyRelease([]);
+    const revertBlockedWinback = await revertCtx.manager.winbackRelease();
+    expect(revertBlockedApply.ok).toBe(false);
+    expect(revertBlockedWinback.ok).toBe(false);
+    expect(revertResets).toBe(1);
+    releaseRevertBoot({ ok: true, out: "" });
+    expect((await runningRevert).ok).toBe(true);
+  } finally {
+    rmSync(winbackRepo.root, { recursive: true, force: true });
+    rmSync(revertRepo.root, { recursive: true, force: true });
+  }
+}, 30000);
+
+function appliedHistory(repo: ReturnType<typeof releaseRepo>): ReleaseRecord[] {
+  return [{
+    version: "0.0.1", tier: "patch", sha: repo.target, prevSha: repo.before,
+    appliedAt: 1, subjects: ["긴급: 대상 B"], status: "applied",
+  }];
+}
+
+test("윈백 대상 검증 실패 뒤 원래 HEAD 보상이 성공하면 이력을 바꾸지 않는다", async () => {
+  const repo = releaseRepo();
+  try {
+    mustGit(repo.root, "merge", "--ff-only", repo.target);
+    let boots = 0;
+    const { manager, settings, receipts } = isolatedManager(repo.root, {
+      bootCheck: async () => ++boots === 1 ? { ok: false, out: "대상 boot 실패" } : { ok: true, out: "" },
+    });
+    const history = appliedHistory(repo);
+    settings.set("release_history", JSON.stringify(history));
+    const result = await manager.winbackRelease();
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("원래 상태");
+    expect(mustGit(repo.root, "rev-parse", "HEAD")).toBe(repo.target);
+    expect(JSON.parse(settings.get("release_history") || "[]")).toEqual(history);
+    expect(settings.get("release_inflight")).toBe("");
+    expect(receipts.at(-1)?.result).toBe("rolled-back");
+  } finally { rmSync(repo.root, { recursive: true, force: true }); }
+}, 30000);
+
+test("윈백 boot 중 clean 외부 HEAD가 생기면 성공이나 보상으로 오인하지 않고 보존한다", async () => {
+  const repo = releaseRepo();
+  try {
+    mustGit(repo.root, "merge", "--ff-only", repo.target);
+    const { manager, settings, receipts } = isolatedManager(repo.root, {
+      bootCheck: async () => {
+        mustGit(repo.root, "reset", "--hard", repo.next);
+        return { ok: true, out: "" };
+      },
+    });
+    const history = appliedHistory(repo);
+    settings.set("release_history", JSON.stringify(history));
+    const result = await manager.winbackRelease();
+
+    expect(result.ok).toBe(false);
+    expect(mustGit(repo.root, "rev-parse", "HEAD")).toBe(repo.next);
+    expect(mustGit(repo.root, "status", "--porcelain", "--untracked-files=no")).toBe("");
+    expect(JSON.parse(settings.get("release_history") || "[]")).toEqual(history);
+    expect(JSON.parse(settings.get("release_inflight") || "{}").phase).toBe("recovery-required");
+    expect(receipts.at(-1)?.result).toBe("recovery-failed");
+  } finally { rmSync(repo.root, { recursive: true, force: true }); }
+}, 30000);
+
+test("윈백 boot 중 외부 dirty 변경이 있으면 최종 검증이 잡고 보상 reset으로 지우지 않는다", async () => {
+  const repo = releaseRepo();
+  try {
+    mustGit(repo.root, "merge", "--ff-only", repo.target);
+    const { manager, settings, receipts } = isolatedManager(repo.root, {
+      bootCheck: async () => {
+        writeFileSync(join(repo.root, "state.txt"), "윈백 중 외부 dirty 변경\n");
+        return { ok: true, out: "" };
+      },
+    });
+    const history = appliedHistory(repo);
+    settings.set("release_history", JSON.stringify(history));
+    const result = await manager.winbackRelease();
+
+    expect(result.ok).toBe(false);
+    expect(mustGit(repo.root, "rev-parse", "HEAD")).toBe(repo.before);
+    expect(readFileSync(join(repo.root, "state.txt"), "utf8")).toBe("윈백 중 외부 dirty 변경\n");
+    expect(JSON.parse(settings.get("release_history") || "[]")).toEqual(history);
+    expect(JSON.parse(settings.get("release_inflight") || "{}").phase).toBe("recovery-required");
+    expect(receipts.at(-1)?.result).toBe("recovery-failed");
+  } finally { rmSync(repo.root, { recursive: true, force: true }); }
+}, 30000);
+
+test("윈백 실패 뒤 원래 HEAD 보상도 실패하면 이력은 그대로이고 recovery-required다", async () => {
+  const repo = releaseRepo();
+  try {
+    mustGit(repo.root, "merge", "--ff-only", repo.target);
+    let resets = 0;
+    const { manager, settings, receipts } = isolatedManager(repo.root, {
+      git: (...args) => {
+        if (args[0] === "reset" && ++resets === 2) return { ok: false, out: "보상 reset 실패" };
+        return gitAt(repo.root, ...args);
+      },
+      bootCheck: async () => ({ ok: false, out: "대상 boot 실패" }),
+    });
+    const history = appliedHistory(repo);
+    settings.set("release_history", JSON.stringify(history));
+    const result = await manager.winbackRelease();
+
+    expect(result.ok).toBe(false);
+    expect(JSON.parse(settings.get("release_history") || "[]")).toEqual(history);
+    expect(JSON.parse(settings.get("release_inflight") || "{}").phase).toBe("recovery-required");
+    expect(receipts.at(-1)?.result).toBe("recovery-failed");
+  } finally { rmSync(repo.root, { recursive: true, force: true }); }
+}, 30000);
+
+test("윈백과 레거시 revert는 성공 검증 뒤에만 원장과 설정을 갱신한다", async () => {
+  const winbackRepo = releaseRepo();
+  const revertRepo = releaseRepo();
+  try {
+    mustGit(winbackRepo.root, "merge", "--ff-only", winbackRepo.target);
+    const winbackCtx = isolatedManager(winbackRepo.root);
+    winbackCtx.settings.set("release_history", JSON.stringify(appliedHistory(winbackRepo)));
+    const winback = await winbackCtx.manager.winbackRelease();
+    expect(winback.ok).toBe(true);
+    expect(mustGit(winbackRepo.root, "rev-parse", "HEAD")).toBe(winbackRepo.before);
+    const winbackHistory = JSON.parse(winbackCtx.settings.get("release_history") || "[]") as ReleaseRecord[];
+    expect(winbackHistory).toHaveLength(2);
+    expect(winbackHistory[0].status).toBe("reverted");
+    expect(winbackHistory[1]).toEqual(expect.objectContaining({ sha: winbackRepo.before, prevSha: winbackRepo.target, status: "applied" }));
+    expect(winbackCtx.settings.get("release_prev_sha")).toBe(winbackRepo.target);
+    expect(winbackCtx.settings.get("release_inflight")).toBe("");
+    expect(winbackCtx.receipts.at(-1)?.result).toBe("winback");
+
+    mustGit(revertRepo.root, "merge", "--ff-only", revertRepo.target);
+    const revertCtx = isolatedManager(revertRepo.root);
+    revertCtx.settings.set("release_prev_sha", revertRepo.before);
+    const reverted = await revertCtx.manager.revertRelease();
+    expect(reverted.ok).toBe(true);
+    expect(mustGit(revertRepo.root, "rev-parse", "HEAD")).toBe(revertRepo.before);
+    expect(revertCtx.settings.get("release_prev_sha")).toBe("");
+    expect(revertCtx.settings.get("release_inflight")).toBe("");
+    expect(revertCtx.receipts.at(-1)?.result).toBe("revert");
+  } finally {
+    rmSync(winbackRepo.root, { recursive: true, force: true });
+    rmSync(revertRepo.root, { recursive: true, force: true });
+  }
+}, 30000);
+
+test("재기동 복구는 recovery-required를 지우지 않고 레거시 저널도 보존 형식으로 승격한다", () => {
+  const repo = releaseRepo();
+  try {
+    const current = isolatedManager(repo.root, { makeOwner: () => "recovery-owner" });
+    const journal = {
+      schema: 2, owner: "owner-a", operation: "apply", from: repo.before, to: repo.target,
+      phase: "recovery-required", startedAt: 1, error: "이미 복구 필요",
+    };
+    current.settings.set("release_inflight", JSON.stringify(journal));
+    expect(current.manager.recoverJournal()?.result).toBe("interrupted");
+    expect(JSON.parse(current.settings.get("release_inflight") || "{}")).toEqual(journal);
+
+    const legacy = isolatedManager(repo.root, { makeOwner: () => "legacy-owner" });
+    legacy.settings.set("release_inflight", JSON.stringify({ from: repo.before, to: repo.target, subjects: [], ts: 7 }));
+    expect(legacy.manager.recoverJournal()?.result).toBe("interrupted");
+    const converted = JSON.parse(legacy.settings.get("release_inflight") || "{}") as { schema?: number; owner?: string; phase?: string };
+    expect(converted).toEqual(expect.objectContaining({ schema: 2, owner: "recovery-legacy-owner", phase: "recovery-required" }));
+    expect(legacy.receipts.at(-1)?.result).toBe("interrupted");
+
+    const active = isolatedManager(repo.root);
+    active.settings.set("release_inflight", JSON.stringify({ ...journal, owner: "active-owner", phase: "verifying" }));
+    expect(active.manager.recoverJournal()?.result).toBe("interrupted");
+    expect(JSON.parse(active.settings.get("release_inflight") || "{}")).toEqual(expect.objectContaining({
+      owner: "active-owner", phase: "recovery-required",
+    }));
+  } finally { rmSync(repo.root, { recursive: true, force: true }); }
+});
 
 // --- 영수증·저널 (개선지침서 R1·R3) ---
 

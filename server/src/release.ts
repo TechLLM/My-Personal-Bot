@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -168,7 +169,7 @@ export interface Receipt {
   to: string;                // 적용 대상 커밋
   subjects: string[];        // 적용하려는 커밋 제목
   gates: string[];           // 통과한 검사
-  result: "applied" | "rolled-back" | "interrupted" | "winback" | "rejected";
+  result: "applied" | "rolled-back" | "recovery-failed" | "interrupted" | "winback" | "revert" | "rejected";
   version?: string;          // 부여된 버전 (예: 1.2.0)
   tier?: ReleaseTier;
   error?: string;
@@ -199,24 +200,6 @@ export function interruptedReceipt(raw: string, now = Date.now()): Receipt {
     result: "interrupted",
     error: "적용이 끝나기 전에 프로세스가 종료됐습니다. 현재 코드와 실행 버전을 확인하세요.",
   };
-}
-
-// 적용을 시작할 때 "무엇을 하려는지"를 먼저 남긴다.
-// 재시작 뒤 프로세스가 돌아오지 못하거나 도중에 죽으면 이 기록만 남아,
-// 다음 기동에서 완료되지 못한 적용이 있었음을 알 수 있다.
-const beginJournal = (j: Omit<Receipt, "ts" | "result" | "gates">) =>
-  setSetting("release_inflight", JSON.stringify({ ...j, ts: Date.now() }));
-const clearJournal = () => setSetting("release_inflight", "");
-
-// 서버가 뜰 때 한 번 부른다. 끝나지 못한 적용이 있으면 영수증에 남기고 지운다.
-export function recoverJournal(): Receipt | null {
-  const raw = getSetting("release_inflight");
-  if (!raw) return null;
-  clearJournal();
-  const r = interruptedReceipt(raw);
-  writeReceipt(r);
-  console.warn(`[mybot] 완료되지 못한 릴리스 적용을 발견했습니다 (${r.from.slice(0, 7)} → ${r.to.slice(0, 7)})`);
-  return r;
 }
 
 export interface Gate { name: string; run: () => Promise<{ ok: boolean; out: string }> }
@@ -278,6 +261,20 @@ const installDeps = (dir: string) => run([BUN, "install"], { cwd: dir });
 
 type CommandResult = { ok: boolean; out: string };
 
+export type ReleaseOperation = "apply" | "winback" | "revert";
+export type ReleasePhase = "staging" | "activating" | "verifying" | "recovering" | "recovery-required";
+
+export interface ReleaseJournal {
+  schema: 2;
+  owner: string;
+  operation: ReleaseOperation;
+  from: string;
+  to: string;
+  phase: ReleasePhase;
+  startedAt: number;
+  error?: string;
+}
+
 export interface ReleaseManagerDeps {
   root?: string;
   run?: (cmd: string[], opts?: { cwd?: string; env?: Record<string, string> }) => CommandResult;
@@ -286,15 +283,21 @@ export interface ReleaseManagerDeps {
   setSetting?: (key: string, value: string) => void;
   writeReceipt?: (receipt: Receipt) => void;
   now?: () => number;
+  makeOwner?: () => string;
   makeStageDir?: () => string;
   removeStageDir?: (path: string) => void;
   installDeps?: (dir: string) => CommandResult;
+  buildWeb?: (root: string) => CommandResult;
+  bootCheck?: (serverDir: string) => Promise<CommandResult>;
   defaultGates?: (root: string) => Gate[];
   deployGates?: () => Gate[];
 }
 
 export interface ReleaseManager {
   applyRelease(gates?: Gate[]): Promise<{ ok: true; version: number; sha: string; release: string; tier: ReleaseTier } | Fail>;
+  winbackRelease(targetSha?: string): Promise<{ ok: true; sha: string; release: string } | Fail>;
+  revertRelease(): Promise<{ ok: true; sha: string; release?: string } | Fail>;
+  recoverJournal(): Receipt | null;
 }
 
 // 릴리스 트랜잭션의 부수효과 경계를 한곳에 모은다. 운영 래퍼는 기존 API를 유지하고,
@@ -308,13 +311,16 @@ export function createReleaseManager(overrides: ReleaseManagerDeps = {}): Releas
   const recordReceipt = overrides.writeReceipt
     ?? ((receipt: Receipt) => writeReceipt(receipt, join(root, "server", "data", "release-log.jsonl")));
   const now = overrides.now ?? Date.now;
+  const makeOwner = overrides.makeOwner ?? randomUUID;
   const makeStageDir = overrides.makeStageDir ?? (() => mkdtempSync(join(tmpdir(), "mybot-stage-")));
   const removeStageDir = overrides.removeStageDir ?? ((path: string) => rmSync(path, { recursive: true, force: true }));
   const install = overrides.installDeps ?? ((dir: string) => runner([BUN, "install"], { cwd: dir }));
+  const buildWeb = overrides.buildWeb ?? ((atRoot: string) => runner([BUN, "run", "build"], { cwd: join(atRoot, "web") }));
+  const checkBoot = overrides.bootCheck ?? ((serverDir: string) => bootCheck(serverDir));
   const stageGates = overrides.defaultGates ?? defaultGates;
   const liveGates = overrides.deployGates ?? (() => [
-    { name: "웹 빌드", run: async () => runner([BUN, "run", "build"], { cwd: join(root, "web") }) },
-    { name: "기동 시험", run: () => bootCheck(join(root, "server")) },
+    { name: "웹 빌드", run: async () => buildWeb(root) },
+    { name: "기동 시험", run: () => checkBoot(join(root, "server")) },
   ]);
 
   const loadManagerHistory = (): ReleaseRecord[] => {
@@ -324,9 +330,88 @@ export function createReleaseManager(overrides: ReleaseManagerDeps = {}): Releas
     writeSetting("release_history", JSON.stringify(history.slice(-50)));
   const currentManagerRelease = () => loadManagerHistory().filter((r) => r.status === "applied").at(-1) ?? null;
   const managerStage = (): ReleaseStage => readSetting("release_stage") === "launch" ? "launch" : "dev";
-  const clearManagerJournal = () => writeSetting("release_inflight", "");
-  const beginManagerJournal = (j: { from: string; to: string; subjects: string[] }) =>
-    writeSetting("release_inflight", JSON.stringify({ ...j, ts: now() }));
+
+  const parseJournal = (raw = readSetting("release_inflight")): ReleaseJournal | null => {
+    if (!raw) return null;
+    try {
+      const value = JSON.parse(raw) as Partial<ReleaseJournal>;
+      if (value.schema !== 2 || typeof value.owner !== "string" || !value.owner
+        || !["apply", "winback", "revert"].includes(value.operation ?? "")
+        || typeof value.from !== "string" || typeof value.to !== "string"
+        || !["staging", "activating", "verifying", "recovering", "recovery-required"].includes(value.phase ?? "")
+        || typeof value.startedAt !== "number") return null;
+      return value as ReleaseJournal;
+    } catch { return null; }
+  };
+  const acquireJournal = (intent: Omit<ReleaseJournal, "schema" | "owner" | "startedAt">): ReleaseJournal | Fail => {
+    if (readSetting("release_inflight"))
+      return fail("점검", "다른 릴리스 작업이 아직 끝나지 않았습니다 — 복구 상태를 확인하세요");
+    const journal: ReleaseJournal = { schema: 2, owner: makeOwner(), startedAt: now(), ...intent };
+    writeSetting("release_inflight", JSON.stringify(journal));
+    const confirmed = parseJournal();
+    if (!confirmed || confirmed.owner !== journal.owner)
+      return fail("점검", "릴리스 작업 소유권을 확보하지 못했습니다");
+    return journal;
+  };
+  const updateJournal = (owner: string, patch: Partial<Pick<ReleaseJournal, "phase" | "error">>): boolean => {
+    const current = parseJournal();
+    if (!current || current.owner !== owner) return false;
+    writeSetting("release_inflight", JSON.stringify({ ...current, ...patch }));
+    return parseJournal()?.owner === owner;
+  };
+  const clearJournal = (owner: string): boolean => {
+    const current = parseJournal();
+    if (!current || current.owner !== owner) return false;
+    writeSetting("release_inflight", "");
+    return !readSetting("release_inflight");
+  };
+  const markRecoveryRequired = (owner: string, detail: string): boolean =>
+    updateJournal(owner, { phase: "recovery-required", error: tail(detail, 1200) });
+
+  const inspectExpectedCleanState = (expectedHeads: string[]): CommandResult => {
+    const head = managerGit("rev-parse", "--verify", "HEAD^{commit}");
+    if (!head.ok || !expectedHeads.includes(head.out.trim())) {
+      return {
+        ok: false,
+        out: `예상하지 못한 HEAD입니다 (${(head.out || "unknown").trim().slice(0, 12)}; expected ${expectedHeads.map((sha) => sha.slice(0, 12)).join(" 또는 ")})`,
+      };
+    }
+    const status = managerGit("status", "--porcelain", "--untracked-files=no");
+    if (!status.ok) return { ok: false, out: status.out || "작업 폴더 상태를 확인할 수 없습니다" };
+    if (status.out) return { ok: false, out: `추적 변경이 있습니다: ${tail(status.out, 500)}` };
+    return { ok: true, out: "" };
+  };
+
+  type RestoreResult = { ok: true } | { ok: false; step: string; out: string };
+  const restoreExactSha = async (sha: string): Promise<RestoreResult> => {
+    const commandStep = (step: string, fn: () => CommandResult): RestoreResult => {
+      try {
+        const result = fn();
+        return result.ok ? { ok: true } : { ok: false, step, out: result.out };
+      } catch (e) { return { ok: false, step, out: (e as Error).message }; }
+    };
+    let result = commandStep("reset", () => managerGit("reset", "--hard", sha));
+    if (!result.ok) return result;
+    result = commandStep("HEAD 확인", () => {
+      const head = managerGit("rev-parse", "--verify", "HEAD^{commit}");
+      return { ok: head.ok && head.out.trim() === sha, out: head.out || "HEAD를 확인할 수 없습니다" };
+    });
+    if (!result.ok) return result;
+    result = commandStep("루트 의존성 설치", () => install(root));
+    if (!result.ok) return result;
+    result = commandStep("웹 의존성 설치", () => install(join(root, "web")));
+    if (!result.ok) return result;
+    result = commandStep("웹 빌드", () => buildWeb(root));
+    if (!result.ok) return result;
+    try {
+      const boot = await checkBoot(join(root, "server"));
+      if (!boot.ok) return { ok: false, step: "기동 시험", out: boot.out };
+    } catch (e) { return { ok: false, step: "기동 시험", out: (e as Error).message }; }
+    // bootCheck는 await 경계다. 그 사이 다른 작업이 clean 커밋으로 HEAD를 움직여도
+    // status만 보면 정상으로 오인하므로 exact SHA와 clean을 함께 다시 확인한다.
+    result = commandStep("최종 HEAD·작업 폴더 확인", () => inspectExpectedCleanState([sha]));
+    return result;
+  };
 
   const snapshotStatus = (before: string, target: string) => {
     const cleanResult = managerGit("status", "--porcelain", "--untracked-files=no");
@@ -356,8 +441,7 @@ export function createReleaseManager(overrides: ReleaseManagerDeps = {}): Releas
   };
 
   const applyRelease = async (gates?: Gate[]): Promise<{ ok: true; version: number; sha: string; release: string; tier: ReleaseTier } | Fail> => {
-    if (readSetting("release_inflight")) return fail("점검", "이전 적용이 아직 끝나지 않았습니다 — 잠시 후 다시 시도하세요");
-
+    if (readSetting("release_inflight")) return fail("점검", "이전 릴리스 작업이 아직 끝나지 않았습니다 — 복구 상태를 확인하세요");
     const beforeResult = managerGit("rev-parse", "--verify", "HEAD^{commit}");
     if (!beforeResult.ok || !beforeResult.out.trim()) return fail("점검", tail(beforeResult.out || "현재 커밋을 확인할 수 없습니다"));
     const targetResult = managerGit("rev-parse", "--verify", `refs/heads/${CHANNEL}^{commit}`);
@@ -368,12 +452,14 @@ export function createReleaseManager(overrides: ReleaseManagerDeps = {}): Releas
     if (!status.canApply) return fail("점검", status.reason);
 
     const subjects = status.pending.map((p) => p.subject);
-    beginManagerJournal({ from: before, to: target, subjects });
+    const acquired = acquireJournal({ operation: "apply", from: before, to: target, phase: "staging" });
+    if (!("owner" in acquired)) return acquired;
+    const owner = acquired.owner;
 
     let stageDir: string;
     try { stageDir = makeStageDir(); }
     catch (e) {
-      clearManagerJournal();
+      clearJournal(owner);
       return fail("준비", `스테이징 폴더를 만들 수 없습니다 — ${(e as Error).message}`);
     }
 
@@ -385,7 +471,7 @@ export function createReleaseManager(overrides: ReleaseManagerDeps = {}): Releas
       try { removeStageDir(stageDir); } catch { /* best effort */ }
     };
     const rejectWithNote = (stage: string, detail: string, note: string): Fail => {
-      clearManagerJournal();
+      clearJournal(owner); // 소유권이 바뀌었으면 새 작업의 저널은 절대 지우지 않는다
       recordReceipt({ ts: now(), from: before, to: target, subjects, gates: [], result: "rejected", error: `${stage}: ${tail(detail, 800)}` });
       return fail(stage, `${tail(detail)}\n\n${note}`);
     };
@@ -402,20 +488,39 @@ export function createReleaseManager(overrides: ReleaseManagerDeps = {}): Releas
     const activationMismatch = (detail: string): Fail => {
       // merge 성공 뒤 HEAD가 또 움직였다면 다른 작업이 개입했을 수 있다. 여기서 reset하면
       // 방금 생긴 외부 커밋/수정을 지우므로 상태를 보존하고 저널을 남겨 수동 확인을 강제한다.
-      recordReceipt({
-        ts: now(), from: before, to: target, subjects, gates: [], result: "interrupted",
-        error: `병합 검증: ${tail(detail, 800)} — 외부 상태를 보존했으며 수동 확인이 필요합니다.`,
-      });
+      markRecoveryRequired(owner, `병합 검증: ${detail}`);
+      recordReceipt({ ts: now(), from: before, to: target, subjects, gates: [], result: "recovery-failed",
+        error: `병합 검증: ${tail(detail, 800)} — 외부 상태를 보존했으며 수동 확인이 필요합니다.` });
       return fail("병합 검증", `${tail(detail)}\n\n외부 변경 가능성이 있어 현재 상태를 보존했습니다. 적용 저널을 지우지 말고 수동으로 확인하세요.`);
     };
-    const rollback = (stage: string, detail: string): Fail => {
-      managerGit("reset", "--hard", before);
-      install(root);
-      install(join(root, "web"));
-      runner([BUN, "run", "build"], { cwd: join(root, "web") });
-      clearManagerJournal();
-      recordReceipt({ ts: now(), from: before, to: target, subjects, gates: [], result: "rolled-back", error: `${stage}: ${tail(detail, 800)}` });
-      return fail(stage, `${tail(detail)}\n\n받기 전 상태(${before.slice(0, 7)})로 되돌렸습니다.`);
+    const rollback = async (stage: string, detail: string): Promise<Fail> => {
+      if (!updateJournal(owner, { phase: "recovering", error: `${stage}: ${tail(detail, 800)}` })) {
+        recordReceipt({ ts: now(), from: before, to: target, subjects, gates: [], result: "recovery-failed",
+          error: `${stage}: 저널 소유권을 잃어 자동 복구하지 않았습니다 — ${tail(detail, 800)}` });
+        return fail(stage, `${tail(detail)}\n\n릴리스 저널 소유권이 바뀌어 자동 복구하지 않았습니다. 현재 상태를 수동으로 확인하세요.`);
+      }
+      const safeToRestore = inspectExpectedCleanState([target]);
+      if (!safeToRestore.ok) {
+        const recoveryError = `${stage} 실패 뒤 외부 변경 가능성을 감지해 자동 복구하지 않았습니다: ${safeToRestore.out}`;
+        markRecoveryRequired(owner, recoveryError);
+        recordReceipt({ ts: now(), from: before, to: target, subjects, gates: [], result: "recovery-failed", error: recoveryError });
+        return fail(stage, `${tail(detail)}\n\n${safeToRestore.out} 자동 복구로 덮어쓰지 않고 현재 상태와 복구 저널을 유지합니다.`);
+      }
+      const restored = await restoreExactSha(before);
+      if (!restored.ok) {
+        const recoveryError = `${stage} 실패 뒤 복구 ${restored.step} 실패: ${tail(restored.out, 800)}`;
+        markRecoveryRequired(owner, recoveryError);
+        recordReceipt({ ts: now(), from: before, to: target, subjects, gates: [], result: "recovery-failed", error: recoveryError });
+        return fail(stage, `${tail(detail)}\n\n복구의 ${restored.step} 단계도 실패했습니다. 서비스 파일 상태는 확인되지 않았으며 복구 저널을 유지합니다.`);
+      }
+      if (!clearJournal(owner)) {
+        recordReceipt({ ts: now(), from: before, to: target, subjects, gates: [], result: "recovery-failed",
+          error: `${stage} 실패 뒤 코드는 복원했지만 저널 소유권이 바뀌어 완료하지 못했습니다.` });
+        return fail(stage, `${tail(detail)}\n\n코드는 복원했지만 릴리스 저널 상태를 확정하지 못했습니다. 수동 확인이 필요합니다.`);
+      }
+      recordReceipt({ ts: now(), from: before, to: target, subjects, gates: [], result: "rolled-back",
+        error: `${stage}: ${tail(detail, 800)} — ${before.slice(0, 7)} 복구를 모두 검증했습니다.` });
+      return fail(stage, `${tail(detail)}\n\n받기 전 상태(${before.slice(0, 7)})로 되돌린 뒤 의존성·빌드·기동·작업 폴더까지 검증했습니다.`);
     };
 
     let list: Gate[] = [];
@@ -449,6 +554,8 @@ export function createReleaseManager(overrides: ReleaseManagerDeps = {}): Releas
         return reject("활성화 점검", "검증한 대상 커밋을 더 이상 확인할 수 없습니다");
       if (!managerGit("merge-base", "--is-ancestor", before, target).ok)
         return reject("활성화 점검", "검증한 대상이 현재 기준의 fast-forward 후속 커밋이 아닙니다");
+      if (!updateJournal(owner, { phase: "activating", error: undefined }))
+        return fail("활성화 점검", "릴리스 저널 소유권이 바뀌어 활성화하지 않았습니다");
 
       // 브랜치 이름은 검증 중 움직일 수 있다. 캡처하고 검증한 정확한 커밋만 활성화한다.
       const merged = managerGit("merge", "--ff-only", target);
@@ -456,19 +563,29 @@ export function createReleaseManager(overrides: ReleaseManagerDeps = {}): Releas
       const activatedHead = managerGit("rev-parse", "--verify", "HEAD^{commit}");
       if (!activatedHead.ok || activatedHead.out.trim() !== target)
         return activationMismatch(`활성화된 커밋이 검증 대상과 다릅니다 (${(activatedHead.out || "unknown").trim().slice(0, 7)} ≠ ${target.slice(0, 7)})`);
+      if (!updateJournal(owner, { phase: "verifying" }))
+        return activationMismatch("활성화 뒤 릴리스 저널 소유권이 바뀌었습니다");
 
       try {
         for (const dir of [root, join(root, "web")]) {
           const inst = install(dir);
-          if (!inst.ok) return rollback("의존성 설치", inst.out);
+          if (!inst.ok) return await rollback("의존성 설치", inst.out);
         }
         for (const gate of liveGates()) {
           const result = await gate.run();
-          if (!result.ok) return rollback(gate.name, result.out);
+          if (!result.ok) return await rollback(gate.name, result.out);
         }
       } catch (e) {
-        return rollback("검증", `예기치 못한 오류 — ${(e as Error).message}`);
+        return await rollback("검증", `예기치 못한 오류 — ${(e as Error).message}`);
       }
+
+      // 마지막 await 뒤 소유권과 실제 트리를 다시 묶는다. 이 펜스보다 앞에서 설정·태그·
+      // 이력을 쓰면 stale 콜백이 새 소유자의 저널을 남긴 채 원장만 변경할 수 있다.
+      if (!updateJournal(owner, { phase: "verifying" }))
+        return activationMismatch("최종 검증 뒤 릴리스 저널 소유권이 바뀌었습니다");
+      const finalLiveState = inspectExpectedCleanState([target]);
+      if (!finalLiveState.ok)
+        return activationMismatch(`최종 검증 중 외부 변경을 감지했습니다: ${finalLiveState.out}`);
 
       writeSetting("release_prev_sha", before);
       writeSetting("release_applied_at", String(now()));
@@ -482,7 +599,8 @@ export function createReleaseManager(overrides: ReleaseManagerDeps = {}): Releas
       history.push({ version, tier, sha: target, prevSha: before, appliedAt: now(), subjects, status: "applied" });
       saveManagerHistory(history);
 
-      clearManagerJournal();
+      if (!clearJournal(owner))
+        return fail("완료", "적용은 검증됐지만 릴리스 저널 소유권이 바뀌어 완료 상태를 확정하지 못했습니다");
       recordReceipt({ ts: now(), from: before, to: target, subjects, gates: list.map((g) => g.name), result: "applied", version, tier });
       const shortTarget = managerGit("rev-parse", "--short", target);
       return { ok: true, version: appVersion, sha: shortTarget.ok ? shortTarget.out.trim() : target.slice(0, 7), release: version, tier };
@@ -491,7 +609,149 @@ export function createReleaseManager(overrides: ReleaseManagerDeps = {}): Releas
     }
   };
 
-  return { applyRelease };
+  const resolveCommit = (ref: string): string | null => {
+    const resolved = managerGit("rev-parse", "--verify", `${ref}^{commit}`);
+    return resolved.ok && resolved.out.trim() ? resolved.out.trim() : null;
+  };
+
+  const restoreTargetOrCompensate = async (x: {
+    owner: string;
+    operationLabel: string;
+    from: string;
+    to: string;
+    subjects: string[];
+  }): Promise<{ ok: true } | Fail> => {
+    const targetResult = await restoreExactSha(x.to);
+    if (targetResult.ok) {
+      if (!updateJournal(x.owner, { phase: "verifying" })) {
+        recordReceipt({ ts: now(), from: x.from, to: x.to, subjects: x.subjects, gates: [], result: "recovery-failed",
+          error: `${x.operationLabel} 대상은 검증했지만 저널 소유권이 바뀌었습니다.` });
+        return fail(x.operationLabel, "대상 코드는 검증했지만 릴리스 저널 소유권이 바뀌어 완료하지 못했습니다");
+      }
+      return { ok: true };
+    }
+
+    const targetError = `${x.operationLabel} ${targetResult.step} 실패: ${tail(targetResult.out, 800)}`;
+    if (!updateJournal(x.owner, { phase: "recovering", error: targetError })) {
+      recordReceipt({ ts: now(), from: x.from, to: x.to, subjects: x.subjects, gates: [], result: "recovery-failed",
+        error: `${targetError} — 저널 소유권을 잃어 보상하지 않았습니다.` });
+      return fail(x.operationLabel, `${targetError}\n\n저널 소유권이 바뀌어 자동 보상하지 않았습니다. 현재 상태를 수동으로 확인하세요.`);
+    }
+
+    // 대상 검증의 await 구간에 외부 커밋/수정이 들어왔으면 원래 SHA로 reset하지 않는다.
+    // 대상 reset 자체가 실패해 원래 HEAD에 그대로 머문 경우만 함께 허용한다.
+    const safeToCompensate = inspectExpectedCleanState([x.to, x.from]);
+    if (!safeToCompensate.ok) {
+      const recoveryError = `${targetError}; 외부 변경 가능성을 감지해 원래 HEAD 보상을 중단했습니다: ${safeToCompensate.out}`;
+      markRecoveryRequired(x.owner, recoveryError);
+      recordReceipt({ ts: now(), from: x.from, to: x.to, subjects: x.subjects, gates: [], result: "recovery-failed", error: recoveryError });
+      return fail(x.operationLabel, `${targetError}\n\n${safeToCompensate.out} 자동 보상으로 덮어쓰지 않고 현재 상태와 복구 저널을 유지합니다.`);
+    }
+
+    const compensation = await restoreExactSha(x.from);
+    if (!compensation.ok) {
+      const recoveryError = `${targetError}; 원래 커밋 보상 ${compensation.step} 실패: ${tail(compensation.out, 800)}`;
+      markRecoveryRequired(x.owner, recoveryError);
+      recordReceipt({ ts: now(), from: x.from, to: x.to, subjects: x.subjects, gates: [], result: "recovery-failed", error: recoveryError });
+      return fail(x.operationLabel, `${targetError}\n\n원래 상태 보상의 ${compensation.step} 단계도 실패했습니다. 서비스 파일 상태는 확인되지 않았으며 복구 저널을 유지합니다.`);
+    }
+    if (!clearJournal(x.owner)) {
+      recordReceipt({ ts: now(), from: x.from, to: x.to, subjects: x.subjects, gates: [], result: "recovery-failed",
+        error: `${targetError}; 원래 코드는 검증했지만 저널 소유권이 바뀌었습니다.` });
+      return fail(x.operationLabel, `${targetError}\n\n원래 코드는 복원했지만 저널 상태를 확정하지 못했습니다.`);
+    }
+    recordReceipt({ ts: now(), from: x.from, to: x.to, subjects: x.subjects, gates: [], result: "rolled-back",
+      error: `${targetError}; 원래 커밋 ${x.from.slice(0, 7)} 보상을 모두 검증했습니다.` });
+    return fail(x.operationLabel, `${targetError}\n\n원래 상태(${x.from.slice(0, 7)})로 보상한 뒤 의존성·빌드·기동·작업 폴더까지 검증했습니다.`);
+  };
+
+  const winbackRelease = async (targetSha?: string): Promise<{ ok: true; sha: string; release: string } | Fail> => {
+    if (readSetting("release_inflight")) return fail("점검", "다른 릴리스 작업이 아직 끝나지 않았습니다 — 복구 상태를 확인하세요");
+    const clean = managerGit("status", "--porcelain", "--untracked-files=no");
+    if (!clean.ok || clean.out) return fail("점검", "커밋되지 않은 변경이 있어 되돌릴 수 없습니다");
+    const head = resolveCommit("HEAD");
+    if (!head) return fail("점검", "현재 커밋을 확인할 수 없습니다");
+    const history = loadManagerHistory();
+    const picked = pickWinbackTarget(history, head, targetSha);
+    if (!("sha" in picked)) return picked;
+    const target = resolveCommit(picked.sha);
+    if (!target) return fail("점검", "기록된 되돌림 커밋을 확인할 수 없습니다");
+    const subjects = [`윈백 → v${picked.label}`];
+    const acquired = acquireJournal({ operation: "winback", from: head, to: target, phase: "activating" });
+    if (!("owner" in acquired)) return acquired;
+
+    const restored = await restoreTargetOrCompensate({ owner: acquired.owner, operationLabel: "윈백", from: head, to: target, subjects });
+    if (!restored.ok) return restored;
+
+    const nextHistory = history.map((record) => ({ ...record }));
+    const from = [...nextHistory].reverse().find((record) => record.status === "applied") ?? null;
+    for (const record of nextHistory) {
+      if (record.status === "applied" && record.sha !== target
+        && !managerGit("merge-base", "--is-ancestor", record.sha, target).ok) record.status = "reverted";
+    }
+    const version = nextVersion(from?.version ?? null, "patch", managerStage());
+    nextHistory.push({
+      version, tier: "patch", sha: target, prevSha: head, appliedAt: now(),
+      subjects: [`윈백: ${from?.version ? `v${from.version}` : head.slice(0, 7)} → v${picked.label} 복귀`], status: "applied",
+    });
+    saveManagerHistory(nextHistory);
+    writeSetting("release_prev_sha", head);
+    if (!clearJournal(acquired.owner))
+      return fail("완료", "윈백은 검증됐지만 릴리스 저널 소유권이 바뀌어 완료 상태를 확정하지 못했습니다");
+    recordReceipt({ ts: now(), from: head, to: target, subjects, gates: ["복구 검증"], result: "winback", version, tier: "patch" });
+    const short = managerGit("rev-parse", "--short", target);
+    return { ok: true, sha: short.ok ? short.out.trim() : target.slice(0, 7), release: version };
+  };
+
+  const revertRelease = async (): Promise<{ ok: true; sha: string; release?: string } | Fail> => {
+    if (readSetting("release_inflight")) return fail("점검", "다른 릴리스 작업이 아직 끝나지 않았습니다 — 복구 상태를 확인하세요");
+    if (loadManagerHistory().length) return winbackRelease();
+    const prev = readSetting("release_prev_sha");
+    if (!prev) return fail("점검", "되돌릴 지점이 없습니다");
+    const clean = managerGit("status", "--porcelain", "--untracked-files=no");
+    if (!clean.ok || clean.out) return fail("점검", "커밋되지 않은 변경이 있어 되돌릴 수 없습니다");
+    const head = resolveCommit("HEAD");
+    const target = resolveCommit(prev);
+    if (!head || !target) return fail("점검", "되돌림 커밋을 확인할 수 없습니다");
+    const subjects = ["직전 릴리스 되돌리기"];
+    const acquired = acquireJournal({ operation: "revert", from: head, to: target, phase: "activating" });
+    if (!("owner" in acquired)) return acquired;
+    const restored = await restoreTargetOrCompensate({ owner: acquired.owner, operationLabel: "되돌리기", from: head, to: target, subjects });
+    if (!restored.ok) return restored;
+    writeSetting("release_prev_sha", "");
+    if (!clearJournal(acquired.owner))
+      return fail("완료", "되돌리기는 검증됐지만 릴리스 저널 소유권이 바뀌어 완료 상태를 확정하지 못했습니다");
+    recordReceipt({ ts: now(), from: head, to: target, subjects, gates: ["복구 검증"], result: "revert" });
+    const short = managerGit("rev-parse", "--short", target);
+    return { ok: true, sha: short.ok ? short.out.trim() : target.slice(0, 7) };
+  };
+
+  const recoverManagerJournal = (): Receipt | null => {
+    const raw = readSetting("release_inflight");
+    if (!raw) return null;
+    const receipt = interruptedReceipt(raw, now());
+    const journal = parseJournal(raw);
+    if (journal) {
+      if (journal.phase !== "recovery-required")
+        updateJournal(journal.owner, { phase: "recovery-required", error: "프로세스가 릴리스 작업 도중 종료됐습니다. 수동 복구가 필요합니다." });
+    } else {
+      let legacy: { from?: string; to?: string; ts?: number } = {};
+      try { legacy = JSON.parse(raw) as typeof legacy; } catch { /* 깨진 레거시도 보존한다 */ }
+      const converted: ReleaseJournal = {
+        schema: 2, owner: `recovery-${makeOwner()}`, operation: "apply",
+        from: typeof legacy.from === "string" ? legacy.from : "",
+        to: typeof legacy.to === "string" ? legacy.to : "",
+        phase: "recovery-required", startedAt: typeof legacy.ts === "number" ? legacy.ts : now(),
+        error: "레거시 또는 손상된 릴리스 저널을 발견했습니다. 수동 복구가 필요합니다.",
+      };
+      writeSetting("release_inflight", JSON.stringify(converted));
+    }
+    recordReceipt(receipt);
+    console.warn(`[mybot] 완료되지 못한 릴리스 작업을 발견했습니다 (${receipt.from.slice(0, 7)} → ${receipt.to.slice(0, 7)}); 복구 저널을 유지합니다`);
+    return receipt;
+  };
+
+  return { applyRelease, winbackRelease, revertRelease, recoverJournal: recoverManagerJournal };
 }
 
 const productionReleaseManager = createReleaseManager();
@@ -503,6 +763,10 @@ const productionReleaseManager = createReleaseManager();
 // 스테이징은 빠른 로컬 디스크(tmpdir)에서 돌고, 실패해도 서비스 코드는 한 줄도 안 바뀐다.
 export async function applyRelease(gates?: Gate[]): Promise<{ ok: true; version: number; sha: string; release: string; tier: ReleaseTier } | Fail> {
   return productionReleaseManager.applyRelease(gates);
+}
+
+export function recoverJournal(): Receipt | null {
+  return productionReleaseManager.recoverJournal();
 }
 
 // 윈백 대상 결정 — 기록된 버전 지점(sha·prevSha)만 허용한다.
@@ -518,54 +782,14 @@ export function pickWinbackTarget(history: ReleaseRecord[], head: string, sha?: 
   return { sha: target, label };
 }
 
-// 문제가 생기면 기록된 어느 버전으로든 되돌린다. 되돌리기도 새 이력으로 남겨
-// "지금 어떤 버전인가"가 항상 원장에 걸맞게 유지되게 한다.
-export function winbackRelease(targetSha?: string): { ok: true; sha: string; release: string } | Fail {
-  if (git("status", "--porcelain", "--untracked-files=no").out) return fail("점검", "커밋되지 않은 변경이 있어 되돌릴 수 없습니다");
-  const head = git("rev-parse", "HEAD").out;
-  const t = pickWinbackTarget(loadHistory(), head, targetSha);
-  if (!("sha" in t)) return t;
-
-  const r = git("reset", "--hard", t.sha);
-  if (!r.ok) return fail("되돌리기", tail(r.out));
-  installDeps(ROOT);
-  installDeps(join(ROOT, "web"));
-  const build = run([BUN, "run", "build"], { cwd: join(ROOT, "web") });
-  if (!build.ok) return fail("웹 빌드", `코드는 되돌렸지만 화면 빌드에 실패했습니다 — ${tail(build.out)}`);
-
-  const history = loadHistory();
-  const from = [...history].reverse().find((rec) => rec.status === "applied") ?? null; // 윈백 전 현재 버전
-  // 대상 지점 위에 올라갔던 버전들은 이력에서 벗어났으므로 reverted로 표시한다
-  for (const rec of history) {
-    if (rec.status === "applied" && rec.sha !== t.sha && !git("merge-base", "--is-ancestor", rec.sha, t.sha).ok) rec.status = "reverted";
-  }
-  const version = nextVersion(from?.version ?? null, "patch"); // 윈백도 새 버전 — 이력이 선형으로 남는다
-  history.push({
-    version, tier: "patch", sha: t.sha, prevSha: head, appliedAt: Date.now(),
-    subjects: [`윈백: ${from?.version ? `v${from.version}` : head.slice(0, 7)} → v${t.label} 복귀`], status: "applied",
-  });
-  saveHistory(history);
-  setSetting("release_prev_sha", head); // 윈백 직후 한 단계 되돌림 지점도 갱신
-  writeReceipt({ ts: Date.now(), from: head, to: t.sha, subjects: [`윈백 → v${t.label}`], gates: [], result: "winback", version, tier: "patch" });
-  return { ok: true, sha: git("rev-parse", "--short", t.sha).out, release: version };
+// 문제가 생기면 기록된 어느 버전으로든 되돌린다. 되돌리기도 공통 저널과 검증된
+// 복구 실행기를 사용해, 실패하면 원래 HEAD 보상까지 확인한 뒤에만 종료한다.
+export async function winbackRelease(targetSha?: string): Promise<{ ok: true; sha: string; release: string } | Fail> {
+  return productionReleaseManager.winbackRelease(targetSha);
 }
 
-export function revertRelease(): { ok: true; sha: string; release?: string } | Fail {
-  // 예전 방식(직전 커밋 한 단계)은 원장이 없을 때의 폴백 — 기록이 있으면 윈백으로 간다
-  if (loadHistory().length) return winbackRelease();
-  const prev = getSetting("release_prev_sha");
-  if (!prev) return fail("점검", "되돌릴 지점이 없습니다");
-  if (git("status", "--porcelain", "--untracked-files=no").out) return fail("점검", "커밋되지 않은 변경이 있어 되돌릴 수 없습니다");
-
-  const r = git("reset", "--hard", prev);
-  if (!r.ok) return fail("되돌리기", tail(r.out));
-  installDeps(ROOT);
-  installDeps(join(ROOT, "web"));
-  const build = run([BUN, "run", "build"], { cwd: join(ROOT, "web") });
-  if (!build.ok) return fail("웹 빌드", `코드는 되돌렸지만 화면 빌드에 실패했습니다 — ${tail(build.out)}`);
-
-  setSetting("release_prev_sha", "");
-  return { ok: true, sha: git("rev-parse", "--short", prev).out };
+export async function revertRelease(): Promise<{ ok: true; sha: string; release?: string } | Fail> {
+  return productionReleaseManager.revertRelease();
 }
 
 // 응답을 보낸 뒤 프로세스를 끝낸다 — launchd(KeepAlive)가 새 코드로 다시 띄운다
@@ -582,9 +806,9 @@ export const releaseRoute = new Hono()
       return c.json({ ...r, restarting: true });
     } catch (e) { return c.json({ ok: false, error: `적용 중 오류 — ${(e as Error).message}` }, 500); }
   })
-  .post("/revert", (c) => {
+  .post("/revert", async (c) => {
     try {
-      const r = revertRelease();
+      const r = await revertRelease();
       if (!r.ok) return c.json(r, 400);
       scheduleRestart();
       return c.json({ ...r, restarting: true });
@@ -594,7 +818,7 @@ export const releaseRoute = new Hono()
   .post("/winback", async (c) => {
     try {
       const body = await c.req.json().catch(() => ({}));
-      const r = winbackRelease(typeof body?.sha === "string" && body.sha ? body.sha : undefined);
+      const r = await winbackRelease(typeof body?.sha === "string" && body.sha ? body.sha : undefined);
       if (!r.ok) return c.json(r, 400);
       scheduleRestart();
       return c.json({ ...r, restarting: true });
