@@ -18,7 +18,7 @@ const EVOLVE_DIR = join(ROOT, "evolve");
 // 서비스 인스턴스는 검증된 개선 패키지를 받아 사용자의 버전 업데이트로만 적용한다.
 export const IS_DEV = process.env.MYBOT_ENV === "dev";
 const isDevRuntime = () => process.env.MYBOT_ENV === "dev";
-const AUTO_CYCLE_PAUSED = "auto-cycle-paused — 자동 사이클은 E3 동일 조건·E4 비용 계측까지 보류합니다 (수동 /evolve/cycle로 측정 가능)";
+const AUTO_CYCLE_DISABLED = "auto-cycle-disabled — 설정 evolve_auto=0으로 자동 사이클이 꺼져 있습니다 (수동 /evolve/cycle로 측정 가능)";
 const LEGACY_BENCH_UNAVAILABLE = "legacy-bench-unavailable — 격리되지 않은 골든 실행은 비활성화되었습니다";
 
 // ---------- 등록부·골든 과제 로더 ----------
@@ -842,7 +842,7 @@ async function publishUpdate(candidate: Candidate, expId: string, reason: string
 // ---------- S5: 능동 탐색 — 실패 분석 → 개선 후보 발굴 → 사이클 진입 ----------
 
 // 최근 24시간 실패·저품질 실행을 수집해 유형별로 묶는다
-export function analyzeFailures(): { failureCount: number; summary: string } {
+export function analyzeFailures(): { failureCount: number; signals: number; summary: string } {
   const since = now() - 86_400_000;
   const errs = db.prepare(`SELECT substr(r.task,1,80) t, a.name an, substr(r.result,1,120) res
     FROM agent_runs r LEFT JOIN agents a ON a.id = r.agent_id
@@ -858,7 +858,7 @@ export function analyzeFailures(): { failureCount: number; summary: string } {
     ...denied.map((d) => `[승인거부] ${d.tool} ×${d.n}`),
     ...lowSkills.map((s) => `[스킬 저성공률] ${s.name} ${s.ok}/${s.n}`),
   ];
-  return { failureCount: errs.length, summary: lines.join("\n") || "(최근 24시간 실패 없음)" };
+  return { failureCount: errs.length, signals: lines.length, summary: lines.join("\n") || "(최근 24시간 실패 없음)" };
 }
 
 interface Proposal { surface: string; target: string; column?: string; newValue?: string; filePath?: string; intent: string; summary: string }
@@ -1029,12 +1029,35 @@ export async function materializeCandidate(p: Proposal): Promise<Candidate | nul
 }
 
 // 매일 루틴 진입점 — 실패 분석 → 후보 탐색 → 구체화 → 사이클 (기준선은 하루 1회 측정해 재사용)
+// 자동 사이클은 실패·거부·저성공률 신호가 있을 때만 돈다 — 신호가 없으면 탐색할
+// 대상이 없어 모델 비용만 낭비한다. keep 판정 패키지는 runTournament가 서비스로 발송하고
+// 적용은 언제나 사용자의 버전 업데이트다. evolve_auto=0이면 자동 사이클만 끈다.
 export async function dailyEvolveTick(): Promise<string> {
   if (!isDevRuntime()) return "건너뜀 — 서비스 인스턴스는 사이클을 실행하지 않습니다 (개발 인스턴스 전용)";
   const surfaces = loadSurfaces();
   if (cycleLockHeld()) return "건너뜀 — 사이클 실행 중";
   if (todayCycleCount() >= surfaces.limits.cyclesPerDay) return `건너뜀 — 일일 상한(${surfaces.limits.cyclesPerDay})`;
-  return `건너뜀 — ${AUTO_CYCLE_PAUSED}`;
+  if (getSetting("evolve_auto") === "0") return `건너뜀 — ${AUTO_CYCLE_DISABLED}`;
+
+  const { signals, summary } = analyzeFailures();
+  if (!signals) return "건너뜀 — 최근 24시간 실패·거부·저성공률 신호 없음";
+  const proposals = await proposeCandidates(summary, surfaces.limits.variantsPerCycle ?? 3);
+  const candidates: Candidate[] = [];
+  for (const p of proposals) {
+    const c = await materializeCandidate(p).catch(() => null);
+    if (c) candidates.push(c);
+  }
+  if (!candidates.length) return "건너뜀 — 탐색 결과를 구체화하지 못했습니다";
+  const r = await runTournament(candidates);
+  if (r.verdict === "keep") {
+    const { notifyResult } = await import("./notify");
+    notifyResult({
+      title: "자기개선",
+      content: `검증을 통과한 개선안이 서비스 업데이트로 발송됐습니다. 적용은 버전 업데이트 화면에서 직접 진행하세요.\n\n${r.reason}`,
+      dedupeKey: `evolve:${r.experimentId}`,
+    });
+  }
+  return `${r.verdict} — ${r.reason}`;
 }
 
 // 매일 정해진 시각(기본 03:00)에 자기개선 틱 — maintenance와 같은 패턴
@@ -1043,7 +1066,8 @@ export function startEvolveLoop() {
   if (!isDevRuntime()) return;
   if (evolveTimer) return;
   const tick = async () => {
-    const hour = Number((db.prepare("SELECT value FROM settings WHERE key = 'evolve_hour'").get() as any)?.value ?? 3);
+    const rawHour = Number((db.prepare("SELECT value FROM settings WHERE key = 'evolve_hour'").get() as any)?.value ?? 3);
+    const hour = Number.isInteger(rawHour) && rawHour >= 0 && rawHour <= 23 ? rawHour : 3; // 잘못된 값이면 사이클이 영구 정지하므로 기본 시각으로
     if (new Date().getHours() !== hour) return;
     try {
       const msg = await dailyEvolveTick();

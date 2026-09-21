@@ -1153,6 +1153,18 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
 
                 <H>버전 업데이트 <span className="ml-1 text-xs font-normal text-stone-500">현재 v{appVersion}</span></H>
                 <p className="mb-3 text-caption text-stone-500">새 버전이 준비되면 여기에서 직접 적용합니다.</p>
+                <div className="mb-3 rounded-lg bg-white px-3 py-2.5">
+                  <label className="flex items-center gap-2 text-xs text-stone-600">
+                    <input type="checkbox" checked={(s.evolve_auto ?? "1") !== "0"} onChange={(e) => update({ evolve_auto: e.target.checked ? "1" : "0" })} />
+                    자동 개선 사이클 — 개발 인스턴스가 실패 신호를 분석해 매일 검증된 개선안을 이 목록으로 보냅니다
+                  </label>
+                  <label className="mt-1.5 flex items-center gap-2 text-xs text-stone-600">
+                    사이클 실행 시각
+                    <input className="w-16 rounded-md bg-stone-100 px-2 py-1 text-xs outline-none" inputMode="numeric" value={s.evolve_hour ?? "3"}
+                      onChange={(e) => update({ evolve_hour: e.target.value.replace(/[^0-9]/g, "").slice(0, 2) })} />
+                    시 (0~23)
+                  </label>
+                </div>
                 <div className="space-y-2">
                   {updates.map((u) => {
                     const m = u.payload?.measurement;

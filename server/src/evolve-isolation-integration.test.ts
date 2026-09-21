@@ -108,6 +108,26 @@ function parkExistingExperiments() {
   };
 }
 
+// 실패 분석의 신호원(실행 오류·승인 거부·스킬 저성공률)을 24시간 창 밖으로 옮긴다 —
+// 같은 메모리 DB를 쓰는 다른 테스트가 남긴 행이 있어도 "신호 없음" 경로가 결정적이다.
+function parkFailureSignals() {
+  const cutoff = Date.now() - 86_400_000;
+  const parked: { table: string; key: string; created_at: number }[] = [];
+  const park = (table: string, where: string) => {
+    const rows = db.prepare(`SELECT rowid, created_at FROM ${table} WHERE ${where} AND created_at > ?`).all(cutoff) as any[];
+    for (const r of rows) {
+      parked.push({ table, key: String(r.rowid), created_at: r.created_at });
+      db.prepare(`UPDATE ${table} SET created_at = 0 WHERE rowid = ?`).run(r.rowid);
+    }
+  };
+  park("agent_runs", "status = 'error'");
+  park("approval_requests", "status = 'denied'");
+  park("skill_runs", "1=1");
+  return () => {
+    for (const p of parked) db.prepare(`UPDATE ${p.table} SET created_at = ? WHERE rowid = ?`).run(p.created_at, p.key);
+  };
+}
+
 test("runCycle은 격리 결과를 승격하지 않고 원장을 마감하며 원본·외부 부작용을 보존한다", async () => {
   const previousEnv = process.env.MYBOT_ENV;
   const restoreExperiments = parkExistingExperiments();
@@ -171,9 +191,10 @@ test("runCycle은 격리 결과를 승격하지 않고 원장을 마감하며 �
   }
 });
 
-test("dailyEvolveTick은 모델·네트워크·상태 생성 없이 자동 사이클 보류를 반환한다", async () => {
+test("dailyEvolveTick은 실패 신호가 없으면 모델·네트워크·상태 생성 없이 건너뛴다", async () => {
   const previousEnv = process.env.MYBOT_ENV;
   const restoreExperiments = parkExistingExperiments();
+  const restoreSignals = parkFailureSignals();
   const before = {
     agents: tableCount("agents"),
     runs: tableCount("agent_runs"),
@@ -189,8 +210,9 @@ test("dailyEvolveTick은 모델·네트워크·상태 생성 없이 자동 사�
   );
   try {
     process.env.MYBOT_ENV = "dev";
+    db.prepare("DELETE FROM settings WHERE key = 'evolve_auto'").run();
     const result = await dailyEvolveTick();
-    expect(result).toContain("auto-cycle-paused");
+    expect(result).toContain("신호 없음");
     expect(fetchCount).toBe(0);
     expect({
       agents: tableCount("agents"),
@@ -200,6 +222,32 @@ test("dailyEvolveTick은 모델·네트워크·상태 생성 없이 자동 사�
     }).toEqual(before);
   } finally {
     fetchSpy.mockRestore();
+    restoreSignals();
+    restoreExperiments();
+    if (previousEnv === undefined) delete process.env.MYBOT_ENV;
+    else process.env.MYBOT_ENV = previousEnv;
+  }
+});
+
+test("dailyEvolveTick은 evolve_auto=0이면 탐색 전에 꺼진다", async () => {
+  const previousEnv = process.env.MYBOT_ENV;
+  const restoreExperiments = parkExistingExperiments();
+  let fetchCount = 0;
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+    (async () => {
+      fetchCount++;
+      throw new Error("network disabled in daily evolve fixture");
+    }) as unknown as typeof globalThis.fetch,
+  );
+  try {
+    process.env.MYBOT_ENV = "dev";
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('evolve_auto', '0')").run();
+    const result = await dailyEvolveTick();
+    expect(result).toContain("auto-cycle-disabled");
+    expect(fetchCount).toBe(0);
+  } finally {
+    fetchSpy.mockRestore();
+    db.prepare("DELETE FROM settings WHERE key = 'evolve_auto'").run();
     restoreExperiments();
     if (previousEnv === undefined) delete process.env.MYBOT_ENV;
     else process.env.MYBOT_ENV = previousEnv;

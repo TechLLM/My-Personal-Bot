@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect, beforeEach } from "bun:test";
 import { db } from "./db";
 import { ensureBossAgent } from "./team";
 import { systemPrompt } from "./routes/chat";
@@ -9,6 +9,9 @@ if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열�
 // CEO 봇을 직접 넣는다 — 시드 경로(defaultModelId)는 프로바이더 인증 조회를 하므로 타지 않게
 const BOSS_ID = "test-boss";
 db.prepare("INSERT INTO agents (id, name, is_boss, created_at) VALUES (?, 'CEO', 1, 0)").run(BOSS_ID);
+// 같은 메모리 DB를 쓰는 다른 테스트 파일(audit 등)이 is_boss 봇을 먼저 넣으면
+// ensureBossAgent의 LIMIT 1 선택이 그쪽을 잡는다 — 이 파일의 검증 대상은 항상 test-boss여야 한다
+beforeEach(() => db.prepare("UPDATE agents SET is_boss = 0 WHERE is_boss = 1 AND id != ?").run(BOSS_ID));
 const setRole = (role: string) => db.prepare("UPDATE agents SET role_prompt = ? WHERE id = ?").run(role, BOSS_ID);
 const getRole = () => (db.prepare("SELECT role_prompt FROM agents WHERE id = ?").get(BOSS_ID) as { role_prompt: string }).role_prompt;
 const count = (s: string, sub: string) => s.split(sub).length - 1;

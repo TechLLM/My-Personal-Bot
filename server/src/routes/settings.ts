@@ -5,7 +5,8 @@ const KNOWN = ["system_prompt", "search_provider", "searxng_url", "tavily_key", 
   "fallback_chain", "run_deadline_sec", "tool_rounds", "delegate_cap_sec", "run_total_cap_sec", "agent_cap_total",
   "notify_telegram", "telegram_bot_token", "telegram_chat_id", "telegram_listen",
   "notify_email", "smtp_host", "smtp_port", "smtp_user", "smtp_pass", "smtp_from", "email_to",
-  "imap_host", "imap_port", "imap_user", "imap_pass", "imap_tls", "mcp_servers", "memory_archive_days"];
+  "imap_host", "imap_port", "imap_user", "imap_pass", "imap_tls", "mcp_servers", "memory_archive_days",
+  "evolve_auto", "evolve_hour"];
 
 // 비밀값 키 — GET에서는 마스킹해 반환 (UI는 "설정됨" 상태만 알면 되고 원문은 볼 필요 없음)
 const SECRET = (k: string) => /(_key|_pass)$/.test(k) || k === "access_code" || k === "telegram_bot_token";
