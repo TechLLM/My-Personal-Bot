@@ -4,7 +4,7 @@ import { Hono } from "hono";
 import { db, uid, now, getSetting, setSetting } from "./db";
 import { emitUI } from "./events";
 import { readFileSync, readdirSync, statSync, existsSync, lstatSync, realpathSync, openSync, fstatSync, closeSync, constants, mkdirSync, writeFileSync } from "node:fs";
-import { join, resolve, relative, isAbsolute } from "node:path";
+import { join, resolve, relative, isAbsolute, posix } from "node:path";
 import { createHash } from "node:crypto";
 import type { EvalVerdict } from "./evaluate";
 import { evaluationCheck, evaluationGate, evaluationStatus } from "./evaluation-evidence";
@@ -60,7 +60,9 @@ export function loadGoldenTasks(includeHoldout = false): GoldenTask[] {
 
 export function isProtectedPath(path: string): boolean {
   const s = loadSurfaces();
-  const norm = path.replace(/\\/g, "/").replace(/^\.\//, "");
+  // 점 세그먼트·중복 구분자·백슬래시를 정규화한다 — `./`·`x/../`·`\` 별칭으로
+  // 보호 판정을 우회하는 길을 직접 호출에서도 막는다
+  const norm = posix.normalize(String(path).replace(/\\/g, "/")).replace(/\/+$/, "");
   return s.protected.some((p) => {
     if (p.endsWith("/**")) return norm.startsWith(p.slice(0, -3));
     if (p.includes("*")) {
@@ -256,6 +258,34 @@ function pathMatchesGlob(path: string, glob?: string): boolean {
   return path === normalizedGlob;
 }
 
+// 코드 표면 대상의 단일 해석·검증 경로 — 수령(/updates precheck)·적용(applyUpdateOps,
+// 구형 pending 적용·되돌리기 포함)·후보 preflight가 같은 규칙을 공유한다.
+// 모든 검사는 원시 target이 아니라 해석된 정규 루트 상대 경로에 대해 수행해
+// `./`·`x/../`·`\`·중복 구분자 별칭으로 보호 판정을 우회하지 못하게 한다 (fail-closed).
+// op 자체는 재작성하지 않는다 — 성공 시 파일시스템 접근용 정규 경로만 돌려준다.
+export function resolveCodeTarget(rawTarget: string, glob?: string):
+  { ok: true; abs: string; rel: string } | { ok: false; error: string } {
+  if (typeof rawTarget !== "string" || !rawTarget) return { ok: false, error: "대상 경로가 없습니다" };
+  const input = rawTarget.replace(/\\/g, "/"); // 백슬래시는 구분자로 정규화 — 검사가 플랫폼별로 갈리지 않게
+  const root = realpathSync(ROOT);
+  const abs = resolve(root, input);
+  const rel = relative(root, abs).replace(/\\/g, "/");
+  if (input.includes("\0") || isAbsolute(rawTarget) || isAbsolute(input)
+    || !rel || rel === ".." || rel.startsWith("../") || isAbsolute(rel))
+    return { ok: false, error: `루트 밖 경로 불가: ${rawTarget}` };
+  if (!pathMatchesGlob(rel, glob)) return { ok: false, error: `등록 표면 밖 경로: ${rawTarget}` };
+  if (isProtectedPath(rel)) return { ok: false, error: `보호 경로: ${rel}` };
+  try {
+    if (!existsSync(abs)) return { ok: false, error: `파일 없음: ${rel}` };
+    if (!lstatSync(abs).isFile()) return { ok: false, error: `일반 파일이 아님: ${rel}` };
+    // 최종 요소뿐 아니라 조상 디렉터리의 심볼릭 링크 탈출도 realpath 대조로 막는다
+    if (realpathSync(abs) !== abs) return { ok: false, error: `심볼릭 링크는 대상 불가: ${rel}` };
+  } catch {
+    return { ok: false, error: `파일 검사 실패: ${rel}` };
+  }
+  return { ok: true, abs, rel };
+}
+
 async function validateCandidateStatic(c: Candidate): Promise<string[]> {
   const fails: string[] = [];
   const surfaces = loadSurfaces();
@@ -276,36 +306,23 @@ async function validateCandidateStatic(c: Candidate): Promise<string[]> {
   }
 
   const rawPath = c.filePath ?? c.target;
-  const path = rawPath.replace(/\\/g, "/").replace(/^\.\//, "");
-  const root = realpathSync(ROOT);
-  const abs = resolve(root, path);
-  const rel = relative(root, abs).replace(/\\/g, "/");
-
   // 경로·등록부·보호 규칙을 모두 확인하기 전에는 후보 대상 파일을 읽지 않는다.
-  if (!path || path.includes("\0") || isAbsolute(rawPath) || rel === ".." || rel.startsWith("../") || isAbsolute(rel))
-    fails.push(`루트 밖 경로 불가: ${rawPath}`);
-  if (!pathMatchesGlob(rel, surf.glob)) fails.push(`등록 표면 밖 경로: ${rawPath}`);
-  if (isProtectedPath(rel)) fails.push(`보호 경로: ${rel}`);
-  if (rel === "server/src/db.ts") fails.push("DB 하네스는 후보 대상 불가");
-  if (/(^|\/)bun\.lock$|(^|\/)package\.json$|(^|\/)tsconfig\.json$/.test(rel)) fails.push(`하네스 파일은 후보 대상 불가: ${rel}`);
-  if (/(^|\/)[^/]+\.test\.[^/]+$/.test(rel)) fails.push("테스트 파일은 표면 불가 — 테스트 약화 방지");
-  if (!existsSync(abs)) fails.push(`파일 없음: ${rel}`);
-  if (!fails.length) {
-    try {
-      if (!lstatSync(abs).isFile()) fails.push(`일반 파일이 아님: ${rel}`);
-      else if (realpathSync(abs) !== abs) fails.push(`심볼릭 링크는 후보 대상 불가: ${rel}`);
-    } catch {
-      fails.push(`파일 검사 실패: ${rel}`);
-    }
+  const resolved = resolveCodeTarget(rawPath, surf.glob);
+  if (!resolved.ok) fails.push(resolved.error);
+  else {
+    const { rel } = resolved;
+    if (rel === "server/src/db.ts") fails.push("DB 하네스는 후보 대상 불가");
+    if (/(^|\/)bun\.lock$|(^|\/)package\.json$|(^|\/)tsconfig\.json$/.test(rel)) fails.push(`하네스 파일은 후보 대상 불가: ${rel}`);
+    if (/(^|\/)[^/]+\.test\.[^/]+$/.test(rel)) fails.push("테스트 파일은 표면 불가 — 테스트 약화 방지");
   }
 
   const content = c.newContent ?? "";
   if (!content.trim()) fails.push("newContent 비어 있음");
   const secretRe = /api[_-]?key\s*[=:]\s*["'][A-Za-z0-9_-]{16,}|BEGIN [A-Z ]*PRIVATE KEY|password\s*[=:]\s*["'][^"']{6,}/i;
   if (secretRe.test(content)) fails.push("비밀값 패턴 포함");
-  if (fails.length) return fails;
+  if (fails.length || !resolved.ok) return fails;
 
-  const oldLines = readFileSync(abs, "utf8").split("\n").length;
+  const oldLines = readFileSync(resolved.abs, "utf8").split("\n").length;
   const diffLines = Math.abs(content.split("\n").length - oldLines);
   if (diffLines > surfaces.limits.diffMaxLines) fails.push(`변경 ${diffLines}줄 > 상한 ${surfaces.limits.diffMaxLines}줄`);
   return fails;
@@ -733,16 +750,11 @@ export function applyUpdateOps(ops: UpdateOp[]): { revertOps: UpdateOp[]; restar
       return { op, surf, col, rowid: row.rowid as number, revert: { ...op, newValue: row[col] ?? "" } as UpdateOp };
     }
     if (surf.kind !== "code") throw new Error(`표면 종류 불일치: ${op.surface}`);
-    const path = op.target;
-    if (isProtectedPath(path)) throw new Error(`보호 경로는 업데이트 불가: ${path}`);
-    const root = realpathSync(ROOT);
-    const abs = resolve(root, path);
-    const rel = relative(root, abs).replace(/\\/g, "/");
-    if (isAbsolute(path) || rel === ".." || rel.startsWith("../") || isAbsolute(rel) || !pathMatchesGlob(rel, surf.glob))
-      throw new Error(`등록 표면 밖 경로: ${path}`);
-    if (!existsSync(abs)) throw new Error(`파일 없음: ${path}`);
-    if (!lstatSync(abs).isFile() || realpathSync(abs) !== abs) throw new Error(`심볼릭 링크 또는 일반 파일이 아닌 대상: ${path}`);
-    return { op, surf, abs, revert: { ...op, newContent: readFileSync(abs, "utf8") } as UpdateOp };
+    // 공유 검증기가 정규 경로로 보호·표면·존재·링크 검사를 한다 — 원시 target 별칭 우회 차단.
+    // op는 재작성하지 않는다 — 저장·서명(opsKey)·되돌림이 원본 op에 결속된다.
+    const target = resolveCodeTarget(op.target, surf.glob);
+    if (!target.ok) throw new Error(target.error);
+    return { op, surf, abs: target.abs, revert: { ...op, newContent: readFileSync(target.abs, "utf8") } as UpdateOp };
   });
   // 2단계: 검증을 통과한 op만 실제 반영한다
   const revertOps: UpdateOp[] = [];
@@ -1013,10 +1025,14 @@ export async function materializeCandidate(p: Proposal): Promise<Candidate | nul
     if (!newValue || newValue === String(row[col] ?? "").trim()) return null;
     return { surface: p.surface, target: p.target, column: col, newValue, summary: p.summary ?? p.intent };
   }
-  // code 표면 — 탐색 봇은 의도만 제안하고 실제 파일 재작성은 여기서 한다
+  // code 표면 — 탐색 봇은 의도만 제안하고 실제 파일 재작성은 여기서 한다.
+  // 수령·적용·preflight와 같은 공유 검증기로 읽기 전에 검증한다 — 대소문자·점 세그먼트
+  // 별칭·루트 밖·심볼릭 링크 대상은 모델 호출 없이 여기서 끝난다.
+  // Candidate의 target/filePath는 원본 path를 유지한다 — payload·opsKey 결속이 원본 op에 달렸다.
   const path = p.filePath ?? p.target;
-  if (isProtectedPath(path) || !existsSync(join(ROOT, path)) || !path.endsWith(".ts")) return null;
-  const src = readFileSync(join(ROOT, path), "utf8");
+  const resolved = resolveCodeTarget(path, surf.glob);
+  if (!resolved.ok || !resolved.rel.endsWith(".ts")) return null;
+  const src = readFileSync(resolved.abs, "utf8");
   const { chatOnce } = await import("./providers/openaiCompat");
   const { endpoint, model } = await evolveModel("codegen");
   const res = await chatOnce(endpoint, model, [{
@@ -1099,9 +1115,17 @@ export const evolveRoute = new Hono()
   .post("/updates", async (c) => {
     const pkg = await c.req.json().catch(() => null) as UpdatePackage | null;
     if (!pkg?.summary || !Array.isArray(pkg.ops) || !pkg.ops.length) return c.json({ error: "패키지 형식 오류 — {summary, ops[]} 필요" }, 400);
+    const surfaces = loadSurfaces();
     for (const op of pkg.ops) {
       if (op.kind !== "db" && op.kind !== "code") return c.json({ error: `op.kind 불가: ${op.kind}` }, 400);
-      if (op.kind === "code" && isProtectedPath(op.target)) return c.json({ error: `보호 경로는 업데이트 불가: ${op.target}` }, 400);
+      if (op.kind === "code") {
+        // 수령과 적용이 같은 검증기를 쓴다 — 정규 경로로 보호·표면·존재를 확인해
+        // `./`·`x/../`·`\` 별칭이 pending으로 들어오는 길을 막는다
+        const surf = surfaces.surfaces.find((s) => s.id === op.surface);
+        if (!surf || surf.kind !== "code") return c.json({ error: `등록된 코드 표면이 아닙니다: ${op.surface}` }, 400);
+        const target = resolveCodeTarget(op.target, surf.glob);
+        if (!target.ok) return c.json({ error: target.error }, 400);
+      }
     }
     // E7 — 측정 증거 검증: 영수증 없는 패키지·측정과 다른 ops·불완전한 벤치는 수령하지 않는다.
     // 거부 사실은 rejected로 남겨 사용자가 무엇이 걸렸는지 볼 수 있게 한다.

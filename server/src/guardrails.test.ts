@@ -43,6 +43,39 @@ test("보호는 목록에 없는 평범한 소스까지 막지는 않는다", ()
     expect(isProtectedPath(p)).toBe(false);
 });
 
+// 2026-09-22 회귀: 보호 판정이 원시 경로만 봐서 `./`·`x/../`·`\`·중복 구분자 별칭이
+// resolve 이후 보호 파일에 도달했다. 직접 호출도 같은 정규화를 거쳐야 한다.
+test("점 세그먼트·중복 구분자·백슬래시 별칭도 보호로 잡아낸다", () => {
+  for (const p of [
+    "server/src/./access.ts",
+    "./server/src/access.ts",
+    "././server/src/access.ts",
+    "server/src/x/../access.ts",
+    "server/src/evolve/../access.ts",   // 보호 디렉터리 안에서 상위로 빠져 나가는 별칭
+    "server//src///access.ts",
+    "server\\src\\access.ts",
+    "server\\src\\.\\access.ts",
+    "server/src/../data/access.key",    // 디렉터리 별칭으로 다른 보호 경로에 도달
+    "server/data/../data/mybot.db",
+    "server/src/./evolve/worker.ts",    // 보호 디렉터리 안 파일의 별칭
+    ".env", "./.env", "x/../.env",
+    "tasks/../tasks/self-improvement-contract.md",
+    "web/./dist/index.html",
+    "evolve/./surfaces.json",
+  ]) expect(isProtectedPath(p)).toBe(true);
+});
+
+test("정규화가 평범한 소스를 보호로 오인하지 않는다", () => {
+  for (const p of [
+    "server/src/./report.ts",
+    "server/src/x/../report.ts",
+    "server//src//report.ts",
+    "server\\src\\report.ts",
+    "./server/src/mail.ts",
+    "web/src/./components/MessageItem.tsx",
+  ]) expect(isProtectedPath(p)).toBe(false);
+});
+
 test("shell_run 자동 허용은 조회 명령에만 열려 있다", () => {
   expect(isReadOnlyShell("ls -la")).toBe(true);
   expect(approvalDecision("shell_run", { command: "cat notes.md" })).toBe("allow");
