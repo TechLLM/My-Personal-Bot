@@ -55,6 +55,8 @@ export interface ToolCtx {
   agentId: string | null;            // 승인 게이트·builtin에 넘길 봇 id
   context: string;                   // gateApproval의 조건 평가에 쓸 지시문
   browserKey: string;                // 브라우저 페이지 스택 키 (runId 또는 convId:msgId)
+  runKey?: string;                   // 감사·스킬 귀속 키 — 승인 재개에서는 browserKey와 다를 수 있다
+  conversationId?: string | null;    // 대화별 중단과 승인 재실행의 상관관계
   fileRoot?: string;                 // C19 — 프로젝트 파일 네임스페이스
   signal?: AbortSignal;
   depth?: number;
@@ -65,6 +67,33 @@ export interface ToolCtx {
   onGate?: (name: string) => void;   // 승인 큐로 반환됐을 때
   onDispatch?: (name: string) => void; // 게이트 통과 후 실제 실행 직전
   onEnd?: (name: string, out: string, ok: boolean, ms: number) => void; // 모든 경로의 종료 시점 (toolLog용)
+}
+
+// 승인 게이트를 다시 타지 않는 실제 도구 라우터. 즉시 실행과 승인 재실행이 반드시 이 경로를
+// 공유해야 timeout·오류 분류와 실행 문맥 전달이 서로 어긋나지 않는다.
+export async function dispatchToolCall(name: string, args: Record<string, unknown>, ctx: ToolCtx): Promise<{ out: string; ok: boolean }> {
+  ctx.onDispatch?.(name);
+  try {
+    if (ctx.signal?.aborted) throw ctx.signal.reason ?? new DOMException("작업이 취소되었습니다", "AbortError");
+    const { callBuiltin, withToolTimeout, BUILTIN_TOOLS, MANAGE_TOOLS } = await import("./team");
+    const isBuiltin = new Set([...BUILTIN_TOOLS, ...MANAGE_TOOLS].map((t) => t.function.name)).has(name);
+    const inner = isBuiltin
+      ? callBuiltin(name, args, ctx.agentId, ctx.signal, ctx.depth ?? 0, ctx.emit, ctx.runKey ?? ctx.browserKey, ctx.fileRoot, ctx.chain, ctx.rootJobId)
+      : isBrowserish(name)
+        ? (await import("./browser")).browserTool(ctx.browserKey, name, args)
+        : name.startsWith("computer_")
+          ? (await import("./computer")).computerTool(name, args)
+          : (await import("./mcp")).mcpCall(name, args);
+    const out = DELEGATION.has(name) ? await inner : await withToolTimeout(inner, LONG_RUNNING.test(name) ? 400_000 : undefined);
+    if (/^(도구 오류|알 수 없는 도구|브라우저 오류):/.test(out)) {
+      console.error(`[mybot] 도구 실패 — 도구:${name} ${out.slice(0, 120)}`);
+      return { out, ok: false };
+    }
+    return { out, ok: true };
+  } catch (e) {
+    console.error(`[mybot] 도구 예외 — 도구:${name} ${(e as Error).message}`);
+    return { out: `도구 오류: ${(e as Error).message}`, ok: false };
+  }
 }
 
 export async function execToolCall(tc: ToolCall, ctx: ToolCtx): Promise<{ out: string; ok: boolean }> {
@@ -86,30 +115,26 @@ export async function execToolCall(tc: ToolCall, ctx: ToolCtx): Promise<{ out: s
     if ((mode === "readonly" || mode === "guard") && !isReadOnlyCall(tc.name, args, isReadOnlyShell)) {
       if (mode === "readonly")
         return finish(`[읽기 전용 작업] ${tc.name} 도구는 이 작업에서 비활성입니다 — 조회·읽기 도구로만 진행하거나, 불가하면 그 사유를 보고하세요.`, true);
-      const g = gateApproval(tc.name, args, ctx.agentId, ctx.context, ctx.chain, ctx.rootJobId, true);
+      const g = gateApproval(tc.name, args, ctx.agentId, ctx.context, ctx.chain, ctx.rootJobId, {
+        browserKey: ctx.browserKey,
+        runKey: ctx.runKey ?? ctx.browserKey,
+        fileRoot: ctx.fileRoot ?? null,
+        depth: ctx.depth ?? 0,
+        conversationId: ctx.conversationId ?? null,
+      }, true);
       if (g) { ctx.onGate?.(tc.name); return finish(g, true); }
     }
   }
-  const gate = gateApproval(tc.name, args, ctx.agentId, ctx.context, ctx.chain, ctx.rootJobId);
+  const gate = gateApproval(tc.name, args, ctx.agentId, ctx.context, ctx.chain, ctx.rootJobId, {
+    browserKey: ctx.browserKey,
+    runKey: ctx.runKey ?? ctx.browserKey,
+    fileRoot: ctx.fileRoot ?? null,
+    depth: ctx.depth ?? 0,
+    conversationId: ctx.conversationId ?? null,
+  });
   if (gate) { ctx.onGate?.(tc.name); return finish(gate, true); }
-  ctx.onDispatch?.(tc.name);
-  try {
-    const { callBuiltin, withToolTimeout, BUILTIN_TOOLS, MANAGE_TOOLS } = await import("./team");
-    const isBuiltin = new Set([...BUILTIN_TOOLS, ...MANAGE_TOOLS].map((t) => t.function.name)).has(tc.name);
-    const inner = isBuiltin
-      ? callBuiltin(tc.name, args, ctx.agentId, ctx.signal, ctx.depth ?? 0, ctx.emit, ctx.browserKey, ctx.fileRoot, ctx.chain, ctx.rootJobId)
-      : isBrowserish(tc.name)
-        ? (await import("./browser")).browserTool(ctx.browserKey, tc.name, args)
-        : tc.name.startsWith("computer_")
-          ? (await import("./computer")).computerTool(tc.name, args)
-          : (await import("./mcp")).mcpCall(tc.name, args);
-    const out = DELEGATION.has(tc.name) ? await inner : await withToolTimeout(inner, LONG_RUNNING.test(tc.name) ? 400_000 : undefined);
-    if (/^(도구 오류|알 수 없는 도구|브라우저 오류):/.test(out)) { console.error(`[mybot] 도구 실패 — 도구:${tc.name} ${out.slice(0, 120)}`); return finish(out, false); }
-    return finish(out, true);
-  } catch (e) {
-    console.error(`[mybot] 도구 예외 — 도구:${tc.name} ${(e as Error).message}`);
-    return finish(`도구 오류: ${(e as Error).message}`, false);
-  }
+  const dispatched = await dispatchToolCall(tc.name, args, ctx);
+  return finish(dispatched.out, dispatched.ok);
 }
 
 // 한 배치의 도구 호출 실행 — 위임·읽기 전용 호출은 병렬, 나머지는 순차 유지 (페이지·경로 공유 충돌 방지)

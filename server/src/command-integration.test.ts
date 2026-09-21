@@ -1,12 +1,23 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { approvalsRoute, executeApproved, gateApproval } from "./approvals";
+import { approvalsRoute, executeApproved, gateApproval, resolveApprovalFileRoot, type ApprovalGateContext } from "./approvals";
 import { sitesRoute } from "./browser";
 import { db, now } from "./db";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { join } from "node:path";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
 
 const prefix = "contract-";
 const savedFetch = globalThis.fetch;
+const approvalCtx = (key: string): ApprovalGateContext => ({ browserKey: key, runKey: key, fileRoot: null, depth: 0, conversationId: null });
+
+function queueApproved(id: string, tool: string, args: Record<string, unknown>) {
+  const argsJson = JSON.stringify(args);
+  const out = gateApproval(tool, args, null, "contract resume", [], undefined, approvalCtx(id), true);
+  expect(out).toContain("사용자 승인이 필요합니다");
+  const row = db.prepare("SELECT id FROM approval_requests WHERE tool = ? AND args = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1").get(tool, argsJson) as { id: string };
+  db.prepare("UPDATE approval_requests SET id = ?, status = 'approved', resolved_at = ? WHERE id = ?").run(id, now(), row.id);
+}
 
 beforeEach(() => {
   db.prepare("DELETE FROM approval_rules WHERE id LIKE ?").run(`${prefix}%`);
@@ -31,11 +42,11 @@ afterEach(() => {
 });
 
 test("동일 승인은 서로 다른 root에서 각각 대기하고 같은 root의 대체만 격리된다", () => {
-  gateApproval("agent_update", { name: "contract-target", role: "v1" }, null, "작업", [], "contract-root-a");
-  gateApproval("agent_update", { name: "contract-target", role: "v1" }, null, "작업", [], "contract-root-b");
+  gateApproval("agent_update", { name: "contract-target", role: "v1" }, null, "작업", [], "contract-root-a", approvalCtx("contract-browser"));
+  gateApproval("agent_update", { name: "contract-target", role: "v1" }, null, "작업", [], "contract-root-b", approvalCtx("contract-browser"));
   expect((db.prepare("SELECT COUNT(*) n FROM approval_requests WHERE status = 'pending' AND root_job_id LIKE 'contract-root-%'").get() as any).n).toBe(2);
 
-  gateApproval("agent_update", { name: "contract-target", role: "v2" }, null, "작업", [], "contract-root-a");
+  gateApproval("agent_update", { name: "contract-target", role: "v2" }, null, "작업", [], "contract-root-a", approvalCtx("contract-browser"));
   expect((db.prepare("SELECT COUNT(*) n FROM approval_requests WHERE status = 'expired' AND root_job_id = 'contract-root-a'").get() as any).n).toBe(1);
   expect((db.prepare("SELECT COUNT(*) n FROM approval_requests WHERE status = 'pending' AND root_job_id = 'contract-root-b'").get() as any).n).toBe(1);
 });
@@ -100,17 +111,121 @@ test("봇 없는 승인 거부는 pending으로 남지 않고 자동 재개 불�
 });
 
 test("activity 응답은 실행 args와 민감한 기술 요약을 노출하지 않는다", async () => {
-  db.prepare("INSERT INTO approval_requests (id, tool, args, summary, status, created_at) VALUES (?, 'send_email', ?, ?, 'denied', ?)")
-    .run("contract-activity", JSON.stringify({ to: "secret@example.com", body: "TOP-SECRET-BODY" }), "raw_summary_TOP_SECRET", now());
+  db.prepare("INSERT INTO approval_requests (id, tool, args, summary, status, execution_context, created_at) VALUES (?, 'send_email', ?, ?, 'denied', ?, ?)")
+    .run("contract-activity", JSON.stringify({ to: "secret@example.com", body: "TOP-SECRET-BODY" }), "raw_summary_TOP_SECRET", '{"sentinel":"PRIVATE-CONTEXT"}', now());
   const res = await approvalsRoute.request("/activity?days=1");
   const text = await res.text();
   expect(text).not.toContain("TOP-SECRET-BODY");
   expect(text).not.toContain("raw_summary_TOP_SECRET");
+  expect(text).not.toContain("PRIVATE-CONTEXT");
+  expect(text).not.toContain("execution_context");
   expect(text).not.toContain('"args"');
   expect(JSON.parse(text).approvals.some((r: any) => r.id === "contract-activity")).toBe(true);
 });
 
-test("레거시 선승인 행은 저장된 원본 인자로 실행되고 결과가 기록된다", async () => {
+test("pending 승인 목록은 private execution context를 노출하지 않는다", async () => {
+  gateApproval("send_email", { to: "pending@example.com", subject: "pending" }, null, "resume", [], "contract-pending-private", {
+    browserKey: "PRIVATE-PENDING-BROWSER", runKey: "PRIVATE-PENDING-RUN", fileRoot: null, depth: 1, conversationId: "PRIVATE-PENDING-CONVERSATION",
+  });
+  const text = await (await approvalsRoute.request("/")).text();
+  expect(text).not.toContain("PRIVATE-PENDING");
+  expect(text).not.toContain("execution_context");
+  expect(text).not.toContain("fileRoot");
+});
+
+test("승인 재실행은 호출자가 위조한 값 대신 DB 원본과 저장된 실행 맥락을 공용 dispatcher에 전달한다", async () => {
+  const args = { content: "contract-original" };
+  const context: ApprovalGateContext = {
+    browserKey: "contract-browser-original", runKey: "contract-run-original", fileRoot: null,
+    depth: 2, conversationId: "contract-conversation",
+  };
+  gateApproval("memory_save", args, null, "contract original task", ["parent-a", "parent-b"], undefined, context, true);
+  const queued = db.prepare("SELECT id FROM approval_requests WHERE tool = 'memory_save' AND status = 'pending' AND args = ?").get(JSON.stringify(args)) as { id: string };
+  db.prepare("UPDATE approval_requests SET id = 'contract-exact-context', status = 'approved', resolved_at = ? WHERE id = ?").run(now(), queued.id);
+  let seen: any = null;
+  let resumed = 0;
+  await executeApproved({ id: "contract-exact-context", tool: "forged_tool", args: '{"content":"forged"}' }, {
+    dispatch: async (tool, dispatchedArgs, ctx) => {
+      seen = { tool, args: dispatchedArgs, ctx };
+      return { out: "contract dispatched", ok: true };
+    },
+    resume: async () => { resumed++; return { registered: true, note: "" }; },
+  });
+  expect(seen.tool).toBe("memory_save");
+  expect(seen.args).toEqual(args);
+  expect(seen.ctx).toMatchObject({
+    agentId: null,
+    browserKey: "contract-browser-original",
+    runKey: "contract-run-original",
+    conversationId: "contract-conversation",
+    depth: 2,
+    chain: ["parent-a", "parent-b"],
+  });
+  expect(seen.ctx.fileRoot).toBeUndefined();
+  expect(seen.ctx.signal).toBeInstanceOf(AbortSignal);
+  expect(resumed).toBe(1);
+  expect((db.prepare("SELECT status, result FROM approval_requests WHERE id = 'contract-exact-context'").get() as any).status).toBe("approved");
+});
+
+test("승인 당시 symlink fileRoot의 canonical 프로젝트를 고정해 alias 재지정이 실행 대상을 바꾸지 못한다", async () => {
+  const base = resolveApprovalFileRoot(null);
+  const projectA = mkdtempSync(join(base, "contract-project-a-"));
+  const projectB = mkdtempSync(join(base, "contract-project-b-"));
+  const alias = join(base, `contract-project-link-${Date.now()}`);
+  try {
+    symlinkSync(projectA, alias);
+    const context: ApprovalGateContext = { browserKey: "contract-link-browser", runKey: "contract-link-run", fileRoot: alias, depth: 0, conversationId: null };
+    gateApproval("memory_save", { content: "contract-link-target" }, null, "link target", [], undefined, context, true);
+    const queued = db.prepare("SELECT id, execution_context FROM approval_requests WHERE status = 'pending' AND args = ?").get('{"content":"contract-link-target"}') as any;
+    expect(JSON.parse(queued.execution_context).fileRoot).toBe(projectA);
+    db.prepare("UPDATE approval_requests SET id = 'contract-link-approved', status = 'approved', resolved_at = ? WHERE id = ?").run(now(), queued.id);
+    rmSync(alias, { force: true });
+    symlinkSync(projectB, alias);
+    let dispatchedRoot: string | undefined;
+    await executeApproved({ id: "contract-link-approved" }, {
+      dispatch: async (_tool, _args, ctx) => { dispatchedRoot = ctx.fileRoot; return { out: "ok", ok: true }; },
+      resume: async () => ({ registered: true, note: "" }),
+    });
+    expect(dispatchedRoot).toBe(projectA);
+    expect(dispatchedRoot).not.toBe(projectB);
+  } finally {
+    rmSync(alias, { force: true });
+    rmSync(projectA, { recursive: true, force: true });
+    rmSync(projectB, { recursive: true, force: true });
+  }
+});
+
+test("손상·소유권 불일치·workspace 밖 승인 맥락은 dispatch와 resume 없이 실패로 닫힌다", async () => {
+  const outside = import.meta.dir;
+  const cases = [
+    { id: "contract-bad-json", mutate: () => "{" },
+    { id: "contract-bad-owner", mutate: (raw: any) => JSON.stringify({ ...raw, agentId: "forged-agent" }) },
+    { id: "contract-bad-root", mutate: (raw: any) => {
+      const changed = { ...raw, fileRoot: outside };
+      changed.scope = JSON.stringify([changed.rootJobId, changed.browserKey, changed.fileRoot, changed.conversationId]);
+      return JSON.stringify(changed);
+    } },
+  ];
+  let dispatched = 0;
+  let resumed = 0;
+  for (const item of cases) {
+    queueApproved(item.id, "memory_save", { content: item.id });
+    const current = db.prepare("SELECT execution_context FROM approval_requests WHERE id = ?").get(item.id) as { execution_context: string };
+    const parsed = item.id === "contract-bad-json" ? null : JSON.parse(current.execution_context);
+    db.prepare("UPDATE approval_requests SET execution_context = ? WHERE id = ?").run(item.mutate(parsed), item.id);
+    await executeApproved({ id: item.id }, {
+      dispatch: async () => { dispatched++; return { out: "should-not-run", ok: true }; },
+      resume: async () => { resumed++; return { registered: true, note: "" }; },
+    });
+    const row = db.prepare("SELECT status, result FROM approval_requests WHERE id = ?").get(item.id) as any;
+    expect(row.status).toBe("failed");
+    expect(row.result).toMatch(/승인|fileRoot|소유자|workspace/);
+  }
+  expect(dispatched).toBe(0);
+  expect(resumed).toBe(0);
+});
+
+test("실행 맥락이 없는 레거시 선승인 행은 도구를 실행하지 않고 실패로 닫힌다", async () => {
   const args = JSON.stringify({ content: "contract-legacy-memory" });
   db.prepare("INSERT INTO approval_requests (id, tool, args, summary, status, created_at, resolved_at) VALUES (?, 'memory_save', ?, 'contract legacy', 'approved', ?, ?)")
     .run("contract-legacy-approved", args, now(), now());
@@ -122,33 +237,46 @@ test("레거시 선승인 행은 저장된 원본 인자로 실행되고 결과�
   });
 
   const row = db.prepare("SELECT status, result, args FROM approval_requests WHERE id = ?").get("contract-legacy-approved") as any;
-  expect(row.status).toBe("approved");
-  expect(row.result).toBeTruthy();
+  expect(row.status).toBe("failed");
+  expect(row.result).toContain("다시 승인 요청");
   expect(row.args).toBe(args);
-  expect((db.prepare("SELECT COUNT(*) n FROM memories WHERE content = ?").get("contract-legacy-memory") as any).n).toBe(1);
+  expect((db.prepare("SELECT COUNT(*) n FROM memories WHERE content = ?").get("contract-legacy-memory") as any).n).toBe(0);
   expect((db.prepare("SELECT COUNT(*) n FROM memories WHERE content = ?").get("contract-forged-memory") as any).n).toBe(0);
 });
 
-test("동일 승인 실행이 동시에 호출돼도 도구 효과는 한 번만 발생한다", async () => {
-  const args = JSON.stringify({ content: "contract-concurrent-memory" });
-  db.prepare("INSERT INTO approval_requests (id, tool, args, summary, status, created_at, resolved_at) VALUES (?, 'memory_save', ?, 'contract concurrent', 'approved', ?, ?)")
-    .run("contract-concurrent-approved", args, now(), now());
-
-  await Promise.all([
-    executeApproved({ id: "contract-concurrent-approved" }),
-    executeApproved({ id: "contract-concurrent-approved" }),
-  ]);
+test("동일 승인 실행의 동시 호출과 terminal 재호출은 dispatcher·resume을 한 번만 실행한다", async () => {
+  queueApproved("contract-concurrent-approved", "memory_save", { content: "contract-concurrent-memory" });
+  let entered!: () => void;
+  let release!: () => void;
+  const dispatchEntered = new Promise<void>((resolve) => { entered = resolve; });
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  let dispatches = 0;
+  let resumes = 0;
+  const deps = {
+    dispatch: async () => { dispatches++; entered(); await blocked; return { out: "contract effect", ok: true }; },
+    resume: async () => { resumes++; return { registered: true, note: "" }; },
+  };
+  const first = executeApproved({ id: "contract-concurrent-approved" }, deps);
+  await dispatchEntered;
+  const second = executeApproved({ id: "contract-concurrent-approved" }, deps);
+  await second;
+  expect(dispatches).toBe(1);
+  expect(resumes).toBe(0);
+  release();
+  await first;
 
   let row = db.prepare("SELECT status, result FROM approval_requests WHERE id = ?").get("contract-concurrent-approved") as any;
   expect(row.status).toBe("approved");
   expect(row.result).toBeTruthy();
-  expect((db.prepare("SELECT COUNT(*) n FROM memories WHERE content = ?").get("contract-concurrent-memory") as any).n).toBe(1);
+  expect(dispatches).toBe(1);
+  expect(resumes).toBe(1);
 
-  await executeApproved({ id: "contract-concurrent-approved" });
+  await executeApproved({ id: "contract-concurrent-approved" }, deps);
   row = db.prepare("SELECT status, result FROM approval_requests WHERE id = ?").get("contract-concurrent-approved") as any;
   expect(row.status).toBe("approved");
   expect(row.result).toBeTruthy();
-  expect((db.prepare("SELECT COUNT(*) n FROM memories WHERE content = ?").get("contract-concurrent-memory") as any).n).toBe(1);
+  expect(dispatches).toBe(1);
+  expect(resumes).toBe(1);
 });
 
 test("대기 및 거부 행은 executeApproved로 실행되지 않고 원본을 유지한다", async () => {

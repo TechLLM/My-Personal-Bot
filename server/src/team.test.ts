@@ -2,6 +2,7 @@ import { test, expect, beforeEach } from "bun:test";
 import { db } from "./db";
 import { ensureBossAgent } from "./team";
 import { systemPrompt } from "./routes/chat";
+import { gateApproval, type ApprovalGateContext } from "./approvals";
 
 // 아래 테스트는 CEO 봇의 역할문을 덮어쓴다 — 운영 DB가 열렸으면 즉시 중단
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
@@ -98,11 +99,12 @@ test("agent_direct — instructions 빈 배열과 지시 없음은 실행 없이
 });
 
 test("같은 대상의 승인 실행이 연속 실패하면 추가 팝업 없이 실패를 돌려준다", async () => {
-  const { gateApproval } = await import("./approvals");
-  const ins = db.prepare("INSERT INTO approval_requests (id, tool, args, summary, agent_id, status, result, created_at, resolved_at) VALUES (?, 'agent_create', ?, 's', ?, 'approved', '오류: 생성할 봇 이름이 없습니다', ?, ?)");
-  ins.run("e1", JSON.stringify({ name: "실패봇" }), BOSS_ID, 1, Date.now());
-  ins.run("e2", JSON.stringify({ name: "실패봇", role: "다른 문구" }), BOSS_ID, 2, Date.now());
-  const out = gateApproval("agent_create", { name: "실패봇", role: "또 다른 문구" }, BOSS_ID, "테스트");
+  const ctx: ApprovalGateContext = { browserKey: "team-failure", runKey: "team-failure", fileRoot: null, depth: 0, conversationId: null };
+  db.prepare("DELETE FROM approval_requests").run();
+  gateApproval("agent_create", { name: "실패봇", role: "문구 1" }, BOSS_ID, "테스트", [], undefined, ctx);
+  gateApproval("agent_create", { name: "실패봇", role: "문구 2" }, BOSS_ID, "테스트", [], undefined, ctx);
+  db.prepare("UPDATE approval_requests SET status = 'approved', result = '오류: 생성할 봇 이름이 없습니다', resolved_at = ? WHERE tool = 'agent_create'").run(Date.now());
+  const out = gateApproval("agent_create", { name: "실패봇", role: "또 다른 문구" }, BOSS_ID, "테스트", [], undefined, ctx);
   expect(out).toContain("연속 실패");
   const pend = db.prepare("SELECT COUNT(*) c FROM approval_requests WHERE status = 'pending'").get() as { c: number };
   expect(pend.c).toBe(0);

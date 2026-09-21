@@ -2,6 +2,9 @@ import { Hono } from "hono";
 import { db, uid, now, getSetting } from "./db";
 import { describeApproval } from "../../shared/user-facing";
 import { currentRootJobId, finalizeCommandIfReady } from "./command-delivery";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import type { ToolCtx } from "./toolloop";
 
 // ─── 승인 경계 (그록 Auto Review 대응) ───
 // 위험한 액션(외부 발신·삭제·결제 류)은 실행 전 사용자 승인을 받는다.
@@ -78,8 +81,109 @@ function prospectiveCreateCount(args: Record<string, unknown>): number {
 const TOOL_ERROR_RE = /^(오류|실행 오류|도구 오류|브라우저 오류|권한 없음|알 수 없는 도구|봇 없음|상위 봇 없음|라우팅 규칙|순환 차단|위임 깊이 제한|자기 자신|하위 봇 한도 초과|업무 트리)/;
 export const looksLikeToolError = (result: string) => TOOL_ERROR_RE.test(result.trim());
 
+export interface ApprovalGateContext {
+  browserKey: string;
+  runKey: string;
+  fileRoot: string | null;
+  depth: number;
+  conversationId: string | null;
+}
+
+export interface ApprovalExecutionContextV1 extends ApprovalGateContext {
+  v: 1;
+  agentId: string | null;
+  rootJobId: string | null;
+  scope: string;
+}
+
+export type DecodedApprovalContext = Omit<ApprovalExecutionContextV1, "fileRoot"> & {
+  fileRoot?: string; // null은 즉시 실행과 같은 "명시 루트 없음" 의미를 보존한다
+  chain: string[];
+};
+
+const WORKSPACE_ROOT = resolve(join(import.meta.dir, "..", "data", "workspace"));
+const contextScope = (c: Pick<ApprovalExecutionContextV1, "agentId" | "rootJobId" | "browserKey" | "fileRoot" | "conversationId">) =>
+  JSON.stringify([c.rootJobId, c.browserKey, c.fileRoot, c.conversationId]);
+
+function requiredContextString(value: unknown, field: string): string {
+  if (typeof value !== "string" || !value.trim() || value.length > 500) throw new Error(`${field}가 없거나 올바르지 않습니다`);
+  return value;
+}
+
+function nullableContextString(value: unknown, field: string): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string" || !value.trim() || value.length > 2000) throw new Error(`${field}가 올바르지 않습니다`);
+  return value;
+}
+
+export function resolveApprovalFileRoot(value: unknown): string {
+  const base = realpathSync(WORKSPACE_ROOT);
+  if (value === null) return base; // null은 누락이 아니라 승인 당시의 명시적 공유 workspace
+  if (typeof value !== "string" || !value.trim() || !isAbsolute(value)) throw new Error("fileRoot가 없거나 절대 경로가 아닙니다");
+  const candidate = realpathSync(value);
+  if (!statSync(candidate).isDirectory()) throw new Error("fileRoot가 디렉터리가 아닙니다");
+  const rel = relative(base, candidate);
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error("fileRoot가 허용 workspace 밖입니다");
+  return candidate;
+}
+
+function encodeApprovalContext(agentId: string | null, rootJobId: string | null, input: ApprovalGateContext): string {
+  const context: ApprovalExecutionContextV1 = {
+    v: 1,
+    agentId,
+    rootJobId,
+    browserKey: requiredContextString(input?.browserKey, "browserKey"),
+    runKey: requiredContextString(input?.runKey, "runKey"),
+    fileRoot: input?.fileRoot === null ? null : nullableContextString(input?.fileRoot, "fileRoot"),
+    depth: input?.depth,
+    conversationId: nullableContextString(input?.conversationId, "conversationId"),
+    scope: "",
+  };
+  if (!Number.isInteger(context.depth) || context.depth < 0 || context.depth > 64) throw new Error("depth가 올바르지 않습니다");
+  // alias 원문을 저장하면 승인 대기 중 symlink를 A→B로 바꿔 실행 대상을 바꿀 수 있다.
+  // null은 즉시 실행의 "명시 루트 없음" 의미로 남기고, 실제 경로만 canonical target으로 고정한다.
+  if (context.fileRoot === null) resolveApprovalFileRoot(null);
+  else context.fileRoot = resolveApprovalFileRoot(context.fileRoot);
+  context.scope = contextScope(context);
+  return JSON.stringify(context);
+}
+
+export function decodeApprovalContext(row: any): DecodedApprovalContext {
+  let raw: any;
+  try { raw = JSON.parse(row?.execution_context); }
+  catch { throw new Error("승인 실행 맥락이 없거나 손상됐습니다 — 원래 작업에서 다시 승인 요청하세요"); }
+  if (!raw || Array.isArray(raw) || raw.v !== 1) throw new Error("지원하지 않는 승인 실행 맥락입니다 — 원래 작업에서 다시 승인 요청하세요");
+  const context: ApprovalExecutionContextV1 = {
+    v: 1,
+    agentId: raw.agentId === null ? null : requiredContextString(raw.agentId, "agentId"),
+    rootJobId: raw.rootJobId === null ? null : requiredContextString(raw.rootJobId, "rootJobId"),
+    browserKey: requiredContextString(raw.browserKey, "browserKey"),
+    runKey: requiredContextString(raw.runKey, "runKey"),
+    fileRoot: raw.fileRoot === null ? null : nullableContextString(raw.fileRoot, "fileRoot"),
+    depth: raw.depth,
+    conversationId: nullableContextString(raw.conversationId, "conversationId"),
+    scope: requiredContextString(raw.scope, "scope"),
+  };
+  if (!Number.isInteger(context.depth) || context.depth < 0 || context.depth > 64) throw new Error("승인 실행 depth가 올바르지 않습니다");
+  const rowAgent = row?.agent_id ?? null;
+  const rowRoot = row?.root_job_id ?? null;
+  if (context.agentId !== rowAgent || context.rootJobId !== rowRoot) throw new Error("승인 행과 실행 맥락의 소유자가 일치하지 않습니다");
+  if (context.scope !== contextScope(context)) throw new Error("승인 실행 맥락의 범위가 손상됐습니다");
+  let chain: unknown;
+  try { chain = row?.chain ? JSON.parse(row.chain) : []; }
+  catch { throw new Error("승인 실행 위임 사슬이 손상됐습니다"); }
+  if (!Array.isArray(chain) || chain.some((id) => typeof id !== "string" || !id)) throw new Error("승인 실행 위임 사슬이 올바르지 않습니다");
+  let fileRoot: string | undefined;
+  if (context.fileRoot !== null) {
+    const canonical = resolveApprovalFileRoot(context.fileRoot);
+    if (resolve(context.fileRoot) !== canonical) throw new Error("승인 후 fileRoot 대상이 변경됐습니다 — 원래 작업에서 다시 승인 요청하세요");
+    fileRoot = canonical;
+  }
+  return { ...context, fileRoot, chain: [...chain] };
+}
+
 // 도구 실행 전 호출 — 승인 필요면 요청을 만들고 안내 문자열 반환, 아니면 null
-export function gateApproval(tool: string, args: Record<string, unknown>, agentId: string | null, resumeTask: string, chain?: string[], explicitRootJobId?: string, forceRequire = false): string | null {
+export function gateApproval(tool: string, args: Record<string, unknown>, agentId: string | null, resumeTask: string, chain?: string[], explicitRootJobId?: string, execution?: ApprovalGateContext, forceRequire = false): string | null {
   let required = forceRequire || approvalDecision(tool, args) === "require";
   // A6/C7 — 봇 생성은 정원 내면 승인 면제(팀장 포함). 전체 정원(agent_cap_total, 기본 20)
   // 초과분만 승인 대상. 팀장의 max_children 한도는 도구 내부에서 거부하므로 여기선 보지 않는다.
@@ -94,11 +198,22 @@ export function gateApproval(tool: string, args: Record<string, unknown>, agentI
   if (tool === "agent_create" && !prospectiveCreateCount(args))
     return '오류: 생성할 봇 이름이 없습니다 — {"name":"메일분석봇","role":"20년 경력의 메일 분석 시니어"} 형식 또는 {"bots":[{"name":"봇1","role":"..."},{"name":"봇2","role":"..."}]} 배치 형식으로 호출하세요';
   const argsJson = canonicalArgs(args);
-  const rootJobId = explicitRootJobId ?? currentRootJobId();
+  const rootJobId = explicitRootJobId ?? currentRootJobId() ?? null;
+  if (!execution) return "오류: 승인 실행 맥락이 없습니다 — 원래 작업에서 다시 요청하세요.";
+  if (chain !== undefined && (!Array.isArray(chain) || chain.some((id) => typeof id !== "string" || !id)))
+    return "오류: 승인 실행 위임 사슬이 올바르지 않습니다 — 원래 작업에서 다시 요청하세요.";
+  let executionJson: string;
+  let executionScope: string;
+  try {
+    executionJson = encodeApprovalContext(agentId ?? null, rootJobId, execution);
+    executionScope = (JSON.parse(executionJson) as ApprovalExecutionContextV1).scope;
+  } catch (e) {
+    return `오류: 승인 실행 맥락을 고정할 수 없습니다 — ${(e as Error).message}. 원래 작업에서 다시 요청하세요.`;
+  }
   // 최근에 이미 승인·실행된 동일 호출 — 승인 재개 봇의 재시도가 같은 팝업을 반복해 띄우는 것을 차단.
   // 재실행은 하지 않고 이전 실행 결과를 그대로 돌려준다 (비멱등 도구의 이중 실행 방지).
-  const done = db.prepare("SELECT result FROM approval_requests WHERE status = 'approved' AND result IS NOT NULL AND tool = ? AND agent_id IS ? AND args = ? AND resolved_at > ? ORDER BY resolved_at DESC LIMIT 1")
-    .get(tool, agentId ?? null, argsJson, now() - 10 * 60_000) as { result: string | null } | undefined;
+  const done = db.prepare("SELECT result FROM approval_requests WHERE status = 'approved' AND result IS NOT NULL AND tool = ? AND agent_id IS ? AND args = ? AND root_job_id IS ? AND CASE WHEN json_valid(execution_context) THEN json_extract(execution_context, '$.scope') END = ? AND resolved_at > ? ORDER BY resolved_at DESC LIMIT 1")
+    .get(tool, agentId ?? null, argsJson, rootJobId, executionScope, now() - 10 * 60_000) as { result: string | null } | undefined;
   if (done && !(done.result ?? "").startsWith("실행 오류") && !deleteTargetStillExists(tool, args)) {
     const res = done.result ?? "";
     return looksLikeToolError(res)
@@ -110,15 +225,15 @@ export function gateApproval(tool: string, args: Record<string, unknown>, agentI
   if (tool.startsWith("agent_")) {
     const targetName = String(args.name ?? args.bot_name ?? args.agent ?? args.to ?? args.target ?? "").trim();
     if (targetName) {
-      const prev = db.prepare("SELECT result FROM approval_requests WHERE status = 'approved' AND tool = ? AND resolved_at > ? AND COALESCE(json_extract(args,'$.name'), json_extract(args,'$.bot_name'), json_extract(args,'$.agent'), json_extract(args,'$.to'), json_extract(args,'$.target')) = ? ORDER BY resolved_at DESC LIMIT 2")
-        .all(tool, now() - 30 * 60_000, targetName) as { result: string | null }[];
+      const prev = db.prepare("SELECT result FROM approval_requests WHERE status = 'approved' AND tool = ? AND root_job_id IS ? AND CASE WHEN json_valid(execution_context) THEN json_extract(execution_context, '$.scope') END = ? AND resolved_at > ? AND COALESCE(json_extract(args,'$.name'), json_extract(args,'$.bot_name'), json_extract(args,'$.agent'), json_extract(args,'$.to'), json_extract(args,'$.target')) = ? ORDER BY resolved_at DESC LIMIT 2")
+        .all(tool, rootJobId, executionScope, now() - 30 * 60_000, targetName) as { result: string | null }[];
       if (prev.length >= 2 && prev.every((r) => looksLikeToolError(r.result ?? "")))
         return `같은 대상(${targetName})에 대한 승인 실행이 연속 실패했습니다 — 최근 실패: ${(prev[0].result ?? "").slice(0, 300)}\n같은 의도의 재요청을 반복하지 말고, 호출 형식을 바로잡거나 불가능하면 실패를 보고하세요.`;
     }
   }
   // 최근에 거부된 동일 호출 — 거부를 우회하는 재요청 팝업을 차단
-  const denied = db.prepare("SELECT id FROM approval_requests WHERE status = 'denied' AND tool = ? AND agent_id IS ? AND args = ? AND resolved_at > ? LIMIT 1")
-    .get(tool, agentId ?? null, argsJson, now() - 10 * 60_000);
+  const denied = db.prepare("SELECT id FROM approval_requests WHERE status = 'denied' AND tool = ? AND agent_id IS ? AND args = ? AND root_job_id IS ? AND CASE WHEN json_valid(execution_context) THEN json_extract(execution_context, '$.scope') END = ? AND resolved_at > ? LIMIT 1")
+    .get(tool, agentId ?? null, argsJson, rootJobId, executionScope, now() - 10 * 60_000);
   if (denied) {
     return `사용자가 이 호출(${tool})을 이미 거부했습니다 — 같은 호출을 다시 요청하지 말고, 다른 방법이 있으면 그것으로 진행하고 없으면 거부됐다고 보고하세요.`;
   }
@@ -126,14 +241,14 @@ export function gateApproval(tool: string, args: Record<string, unknown>, agentI
   // 봇마다 5~7건씩 팝업으로 쌓였던 사고(2026-09-18) 방지. 요청한 봇이 달라도 대상이 같으면 교체한다
   if (tool === "agent_update") {
     const target = String(args.name ?? args.to ?? args.agent ?? args.target ?? args.bot ?? "");
-    if (target) db.prepare("UPDATE approval_requests SET status = 'expired', result = '같은 봇에 대한 새 수정 요청으로 대체됨', resolved_at = ? WHERE status = 'pending' AND tool = 'agent_update' AND root_job_id IS ? AND args != ? AND COALESCE(json_extract(args, '$.name'), json_extract(args, '$.to'), json_extract(args, '$.agent'), json_extract(args, '$.target'), json_extract(args, '$.bot')) = ?")
-      .run(now(), rootJobId, argsJson, target);
+    if (target) db.prepare("UPDATE approval_requests SET status = 'expired', result = '같은 봇에 대한 새 수정 요청으로 대체됨', resolved_at = ? WHERE status = 'pending' AND tool = 'agent_update' AND root_job_id IS ? AND CASE WHEN json_valid(execution_context) THEN json_extract(execution_context, '$.scope') END = ? AND args != ? AND COALESCE(json_extract(args, '$.name'), json_extract(args, '$.to'), json_extract(args, '$.agent'), json_extract(args, '$.target'), json_extract(args, '$.bot')) = ?")
+      .run(now(), rootJobId, executionScope, argsJson, target);
   }
-  const dup = db.prepare("SELECT id FROM approval_requests WHERE status = 'pending' AND tool = ? AND agent_id IS ? AND args = ? AND root_job_id IS ?").get(tool, agentId ?? null, argsJson, rootJobId) as any;
+  const dup = db.prepare("SELECT id FROM approval_requests WHERE status = 'pending' AND tool = ? AND agent_id IS ? AND args = ? AND root_job_id IS ? AND CASE WHEN json_valid(execution_context) THEN json_extract(execution_context, '$.scope') END = ?").get(tool, agentId ?? null, argsJson, rootJobId, executionScope) as any;
   if (!dup) {
     const summary = summarizeArgs(tool, args);
-    db.prepare("INSERT INTO approval_requests (id, tool, args, summary, agent_id, resume, status, created_at, chain, root_job_id) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)")
-      .run(uid(), tool, argsJson, summary, agentId ?? null, resumeTask.slice(0, 500), now(), chain?.length ? JSON.stringify(chain) : null, rootJobId);
+    db.prepare("INSERT INTO approval_requests (id, tool, args, summary, agent_id, resume, status, created_at, chain, root_job_id, execution_context) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)")
+      .run(uid(), tool, argsJson, summary, agentId ?? null, resumeTask.slice(0, 500), now(), chain?.length ? JSON.stringify([...chain]) : null, rootJobId, executionJson);
     const root = rootJobId;
     if (root) void import("./command-delivery").then(({ deliverTelegramActionNeeded }) => deliverTelegramActionNeeded(root));
   }
@@ -366,8 +481,13 @@ export const approvalsRoute = new Hono()
 // 있으므로 status만으로 실행 소유권을 구분할 수 없다.
 const executingApprovalIds = new Set<string>();
 
+export interface ApprovalExecutionDeps {
+  dispatch?: (tool: string, args: Record<string, unknown>, ctx: ToolCtx) => Promise<{ out: string; ok: boolean }>;
+  resume?: (req: any, task: string) => Promise<{ registered: boolean; note: string }>;
+}
+
 // 승인된 도구를 실제 실행 → 결과 저장 → 봇 작업 재개
-export async function executeApproved(req: any) {
+export async function executeApproved(req: any, deps: ApprovalExecutionDeps = {}) {
   const id = String(req?.id ?? "");
   if (!id || executingApprovalIds.has(id)) return;
   executingApprovalIds.add(id);
@@ -387,24 +507,30 @@ export async function executeApproved(req: any) {
     if (!stored || stored.status !== "executing" || stored.result !== null) return;
     req = stored;
 
-    const { callBuiltin } = await import("./team");
-    const { browserTool, BROWSER_TOOLS } = await import("./browser");
-    const { mcpCall, mcpTools } = await import("./mcp");
-    let result: string;
-    const args = JSON.parse(req.args ?? "{}");
-    try {
-      if (req.tool.startsWith("computer_")) result = await (await import("./computer")).computerTool(req.tool, args);
-      else if (BROWSER_TOOLS.some((t: any) => t.function.name === req.tool)) result = await browserTool(req.id, req.tool, args);
-      else {
-        const mcpNames = (await mcpTools().catch(() => [] as any[])).map((t: any) => t.function?.name ?? t.name);
-        if (mcpNames.includes(req.tool)) result = await mcpCall(req.tool, args);
-        else result = await callBuiltin(req.tool, args, req.agent_id, undefined, 0, undefined, undefined, undefined, [], req.root_job_id);
-      }
-    } catch (e) { result = `실행 오류: ${(e as Error).message}`; }
+    const execution = decodeApprovalContext(req);
+    let args: unknown;
+    try { args = JSON.parse(req.args ?? "{}"); }
+    catch { throw new Error("승인된 도구 인자가 손상됐습니다 — 원래 작업에서 다시 승인 요청하세요"); }
+    if (!args || Array.isArray(args) || typeof args !== "object") throw new Error("승인된 도구 인자가 올바르지 않습니다 — 원래 작업에서 다시 승인 요청하세요");
+    const controller = new AbortController();
+    const dispatch = deps.dispatch ?? (await import("./toolloop")).dispatchToolCall;
+    const dispatched = await dispatch(req.tool, args as Record<string, unknown>, {
+      agentId: req.agent_id ?? null,
+      context: req.resume ?? "",
+      browserKey: execution.browserKey,
+      runKey: execution.runKey,
+      conversationId: execution.conversationId,
+      fileRoot: execution.fileRoot,
+      signal: controller.signal,
+      depth: execution.depth,
+      chain: execution.chain,
+      rootJobId: execution.rootJobId ?? undefined,
+    });
+    const result = dispatched.out;
 
     // executing을 유지한 채 재개 실행을 먼저 등록한다. terminal 상태가 먼저 공개되면 다른 하위
     // 작업이 루트 명령을 완료해 버려 승인 결과가 최종 메시지에서 빠질 수 있다.
-    const resume = await resumeAgent(req, looksLikeToolError(result)
+    const resume = await (deps.resume ?? resumeAgent)(req, looksLikeToolError(result)
       ? `사용자가 승인한 작업 "${req.summary}"을 실행했지만 실패했습니다.\n실패 결과:\n${result}\n\n같은 인자로 재요청하면 같은 실패가 발생합니다 — 인자를 수정하거나 다른 방법으로 진행하고, 불가능하면 실패를 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`
       : `사용자가 승인한 작업 "${req.summary}"을 실행했습니다. 실행 결과:\n${result}\n\n원래 작업을 이어서 진행하고 결과를 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`);
     const finalResult = `${result}${resume.note ? `\n${resume.note}` : ""}`.slice(0, 4000);

@@ -1,7 +1,7 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { db, now } from "./db";
 import { callBuiltin, runAgentDetached, stopAllRuns, getAgent, roundLimitFor, budgetWarnAt } from "./team";
-import { gateApproval, approvalDecision } from "./approvals";
+import { gateApproval, approvalDecision, type ApprovalGateContext } from "./approvals";
 import { systemPrompt } from "./routes/chat";
 
 // 봇 간 위임·메시지 연쇄 방지 테스트 — 2026-09-18 보고-회신 폭주(자정 이후 실행 64건·승인 대기 50건) 재발 방지
@@ -13,6 +13,7 @@ if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열�
 const realFetch = globalThis.fetch;
 
 const ids = { lead: "t-lead", a: "t-bot-a", b: "t-bot-b" };
+const orgApprovalCtx: ApprovalGateContext = { browserKey: "org-test", runKey: "org-test", fileRoot: null, depth: 0, conversationId: null };
 beforeAll(() => {
   globalThis.fetch = (async () => new Response('{"error":"test"}', { status: 400 })) as unknown as typeof fetch;
   const ins = db.prepare("INSERT INTO agents (id, name, role_prompt, model, is_lead, created_at) VALUES (?, ?, '', 'zai/glm-5.3-flash', ?, 0)");
@@ -62,14 +63,14 @@ test("봇 메시지는 보낸 쪽 사슬을 저장해 받는 봇에게 넘긴다
 test("같은 봇에 대한 설정 수정 승인 요청은 최신 1건만 대기로 남는다", () => {
   const pending = () => db.prepare("SELECT args FROM approval_requests WHERE status = 'pending' AND tool = 'agent_update' AND json_extract(args, '$.name') = '테스트봇B'").all() as { args: string }[];
   // 요청한 봇이 달라도(연쇄 실행 때 Eggbot·비서실장봇이 번갈아 제출) 대상이 같으면 교체
-  gateApproval("agent_update", { name: "테스트봇B", role: "역할 초안 1" }, ids.a, "역할 반영");
-  gateApproval("agent_update", { name: "테스트봇B", role: "역할 초안 2" }, ids.lead, "역할 반영");
-  gateApproval("agent_update", { role: "역할 초안 3", name: "테스트봇B" }, ids.a, "역할 반영");
+  gateApproval("agent_update", { name: "테스트봇B", role: "역할 초안 1" }, ids.a, "역할 반영", [], undefined, orgApprovalCtx);
+  gateApproval("agent_update", { name: "테스트봇B", role: "역할 초안 2" }, ids.lead, "역할 반영", [], undefined, orgApprovalCtx);
+  gateApproval("agent_update", { role: "역할 초안 3", name: "테스트봇B" }, ids.a, "역할 반영", [], undefined, orgApprovalCtx);
   const rows = pending();
   expect(rows.length).toBe(1);
   expect(JSON.parse(rows[0].args).role).toBe("역할 초안 3");
   // 다른 봇 대상 요청은 건드리지 않는다
-  gateApproval("agent_update", { name: "테스트봇A", role: "다른 봇" }, ids.a, "역할 반영");
+  gateApproval("agent_update", { name: "테스트봇A", role: "다른 봇" }, ids.a, "역할 반영", [], undefined, orgApprovalCtx);
   expect(pending().length).toBe(1);
   expect((db.prepare("SELECT COUNT(*) c FROM approval_requests WHERE status = 'expired' AND tool = 'agent_update'").get() as { c: number }).c).toBe(2);
 });

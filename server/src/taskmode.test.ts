@@ -2,6 +2,9 @@ import { test, expect } from "bun:test";
 import { db, uid, now } from "./db";
 import { execToolCall } from "./toolloop";
 import { createCommandJob } from "./command-delivery";
+import { WORK_DIR } from "./team";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
 
@@ -38,6 +41,38 @@ test("guard — allow 규칙이 있어도 읽기 외 도구는 승인 큐로 간
   const pending = db.prepare("SELECT id FROM approval_requests WHERE tool = 'write_file' AND status = 'pending'").all();
   expect(pending.length).toBeGreaterThan(0);
   expect(r.out).not.toContain("읽기 전용 작업");
+});
+
+test("guard 승인 요청은 브라우저·run·파일 루트·depth·chain·대화를 원자적으로 저장한다", async () => {
+  const project = mkdtempSync(join(WORK_DIR, "approval-context-"));
+  const job = createCommandJob({ source: "web", request: "컨텍스트 보존", taskMode: "guard", conversationId: "ctx-conversation" });
+  const chain = ["parent-a", "parent-b"];
+  try {
+    const r = await execToolCall({ id: "ctx", name: "write_file", arguments: '{"path":"only-a.txt","content":"x"}' }, {
+      agentId: "ctx-agent",
+      context: "컨텍스트 테스트",
+      browserKey: "ctx-browser",
+      runKey: "ctx-run",
+      fileRoot: project,
+      depth: 2,
+      chain,
+      rootJobId: job,
+      conversationId: "ctx-conversation",
+    });
+    expect(r.out).toContain("사용자 승인이 필요합니다");
+    chain.push("mutated-after-gate");
+    const row = db.prepare("SELECT execution_context, chain, root_job_id, agent_id FROM approval_requests WHERE root_job_id = ? AND tool = 'write_file'").get(job) as any;
+    const saved = JSON.parse(row.execution_context);
+    expect(saved).toMatchObject({
+      v: 1, agentId: "ctx-agent", rootJobId: job, browserKey: "ctx-browser", runKey: "ctx-run",
+      fileRoot: project, depth: 2, conversationId: "ctx-conversation",
+    });
+    expect(saved).not.toHaveProperty("signal");
+    expect(JSON.parse(row.chain)).toEqual(["parent-a", "parent-b"]);
+  } finally {
+    db.prepare("DELETE FROM approval_requests WHERE root_job_id = ?").run(job);
+    rmSync(project, { recursive: true, force: true });
+  }
 });
 
 test("모드 없음(기본) — 기존 게이트 동작 그대로", async () => {
