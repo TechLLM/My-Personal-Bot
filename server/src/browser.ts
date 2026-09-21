@@ -579,6 +579,14 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
         const siteName = String(args.site ?? "");
         const site = db.prepare("SELECT * FROM site_logins WHERE name LIKE ? ESCAPE '\\'").get(`%${siteName.replace(/[\\%_]/g, (c) => `\\${c}`)}%`) as any;
         if (!site) return `등록된 사이트 계정 없음: "${siteName}". request_credentials 도구로 사용자에게 계정 입력을 요청하거나, 설정 → 사이트 계정에서 먼저 등록하세요.`;
+        // 감사 — 어느 봇의 어떤 실행이 어떤 계정을 썼는지 결과와 함께 남긴다 (Aside식 credential-use 로그)
+        const audit = (outcome: string) => {
+          try {
+            const agentId = (db.prepare("SELECT agent_id FROM agent_runs WHERE id = ?").get(agentKey) as any)?.agent_id ?? null;
+            db.prepare("INSERT INTO credential_uses (id, site_name, url, agent_id, run_id, action, outcome, created_at) VALUES (?, ?, ?, ?, ?, 'autofill', ?, ?)")
+              .run(uid(), site.name, site.url, agentId, agentKey, outcome, now());
+          } catch {}
+        };
         await page.goto(site.url, { waitUntil: "domcontentloaded", timeout: 30000 });
         await page.waitForTimeout(1500);
         // 로그인 폼 탐색 — iframe 안 폼도 지원 (그룹웨어 다수)
@@ -590,6 +598,7 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
         }
         const pass = scope.locator('input[type="password"]').first();
         if (!(await pass.count().catch(() => 0))) {
+          audit("failed");
           return `로그인 폼을 찾지 못했습니다 — 이미 로그인된 상태일 수 있습니다.\n\n${await snapshot(page)}`;
         }
         const userSels = ['input[type="email"]', 'input[name*="user" i]', 'input[name*="login" i]', 'input[name*="mail" i]', 'input[id*="user" i]', 'input[name*="id" i]', 'input[id*="id" i]', 'input[type="text"]'];
@@ -599,7 +608,7 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
         }
         const { decryptSecret } = await import("./crypto");
         const password = decryptSecret(site.password);
-        if (!password) return "브라우저 오류: 저장된 비밀번호를 복호화할 수 없습니다 — 계정을 다시 등록하세요";
+        if (!password) { audit("failed"); return "브라우저 오류: 저장된 비밀번호를 복호화할 수 없습니다 — 계정을 다시 등록하세요"; }
         await pass.fill(password, { timeout: 5000 });
         const btn = scope.locator('button[type="submit"], input[type="submit"], button:has-text("로그인"), a:has-text("로그인"), button:has-text("Sign in"), button:has-text("Log in")').first();
         if (await btn.count().catch(() => 0)) await btn.click().catch(() => {});
@@ -618,8 +627,10 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
         }
         if (!ok) {
           // A2 승격 — 2FA·CAPTCHA·추가 인증이 필요한 화면은 사용자에게 넘긴다
+          audit("handoff");
           return await doHandoff(agentKey, `${site.name} 로그인 미완료 — 2FA·CAPTCHA 등 추가 인증이 필요할 수 있습니다`);
         }
+        audit("ok");
         return `로그인 완료.\n\n${await snapshot(page)}`;
       }
       case "browser_eval": {
@@ -692,9 +703,15 @@ export const sitesRoute = new Hono()
   .get("/", (c) => c.json({ sites: db.prepare("SELECT id, name, url, username, success_check, created_at FROM site_logins ORDER BY created_at").all() }))
   // 봇이 요청한 계정 입력 (팝업 대기 목록)
   .get("/requests", (c) => c.json({ requests: db.prepare("SELECT id, name, url, reason, created_at FROM credential_requests WHERE status = 'pending' ORDER BY created_at").all() }))
+  // 자격증명 사용 감사 — 누가 언제 어느 사이트 계정을 썼는지 (비밀번호는 절대 포함하지 않음)
+  .get("/uses", (c) => c.json({ uses: db.prepare("SELECT u.id, u.site_name, u.url, u.agent_id, u.run_id, u.action, u.outcome, u.created_at, a.name AS agent_name FROM credential_uses u LEFT JOIN agents a ON a.id = u.agent_id ORDER BY u.created_at DESC LIMIT 100").all() }))
   .post("/requests/:id/dismiss", async (c) => {
     const req = db.prepare("SELECT * FROM credential_requests WHERE id = ? AND status = 'pending'").get(c.req.param("id")) as any;
     if (!req) return c.json({ error: "요청 없음 또는 이미 처리됨" }, 404);
+    try {
+      db.prepare("INSERT INTO credential_uses (id, site_name, url, agent_id, run_id, action, outcome, created_at) VALUES (?, ?, ?, ?, ?, 'request_dismissed', 'dismissed', ?)")
+        .run(uid(), req.name, req.url, req.agent_id, null, now());
+    } catch {}
     const result = `계정 입력 거부: ${req.name}`.slice(0, 4000);
     // 모듈 로드 중에는 pending blocker를 유지한다.
     const delivery = req.root_job_id ? await import("./command-delivery") : null;
@@ -759,6 +776,8 @@ export const sitesRoute = new Hono()
             rootJobId: pendingReq.root_job_id,
           });
           db.prepare("UPDATE credential_requests SET status = 'done' WHERE id = ? AND status = 'processing'").run(pendingReq.id);
+          db.prepare("INSERT INTO credential_uses (id, site_name, url, agent_id, run_id, action, outcome, created_at) VALUES (?, ?, ?, ?, ?, 'request_fulfilled', 'done', ?)")
+            .run(uid(), pendingReq.name, pendingReq.url, pendingReq.agent_id, null, now());
         }
       })();
     } catch (e) {

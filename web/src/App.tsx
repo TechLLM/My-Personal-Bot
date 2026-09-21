@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AuthenticatedEventStream, api, streamChat, runTeam, mybotFetch, type Agent, type Conversation, type Message, type Model, type TeamPlanTask, type SiteRequest, type Group, type ApprovalRequest, type HandoffRequest } from "./api";
 import { Sidebar } from "./components/Sidebar";
-import { Composer, type Mode, type Persona } from "./components/Composer";
+import { Composer, type Mode, type Persona, type TaskMode } from "./components/Composer";
 import { MessageItem } from "./components/MessageItem";
 import { SearchTrace, type SearchEvent } from "./components/SearchTrace";
 import { TeamTrace, type TeamEvent } from "./components/TeamTrace";
@@ -60,7 +60,7 @@ export default function App() {
   const nearBottomRef = useRef(true); // 사용자가 하단 근처를 보고 있을 때만 자동 스크롤 — 위쪽 읽기 중엔 위치 고정
   const [showJump, setShowJump] = useState(false); // 위를 읽는 중 새 콘텐츠 도착 시 "최신으로" 버튼
   // 응답 스트리밍 중 전송된 명령 대기열 — 현재 응답이 끝나면 순서대로 자동 전송 ("1번→2번→3번" 연속 지시)
-  const [queued, setQueued] = useState<{ text: string; mode: Mode; attachments: { url: string; name: string; mime: string }[]; forConv: string | null }[]>([]);
+  const [queued, setQueued] = useState<{ text: string; mode: Mode; attachments: { url: string; name: string; mime: string }[]; forConv: string | null; taskMode?: TaskMode }[]>([]);
 
   const refreshConversations = useCallback(() => {
     api.conversations().then((d) => setConversations(d.conversations)).catch(() => {});
@@ -290,10 +290,10 @@ export default function App() {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
   }, []);
 
-  const send = useCallback(async (text: string, mode: Mode, attachments: { url: string; name: string; mime: string }[]) => {
+  const send = useCallback(async (text: string, mode: Mode, attachments: { url: string; name: string; mime: string }[], taskMode?: TaskMode) => {
     if (streaming) {
       // 응답 진행 중 보낸 명령은 대기열에 쌓음 — 응답 완료 후 순서대로 자동 전송
-      setQueued((prev) => [...prev, { text, mode, attachments, forConv: convId }]);
+      setQueued((prev) => [...prev, { text, mode, attachments, forConv: convId, taskMode }]);
       return;
     }
     // "/new" — 현재 봇의 새 세션 시작. 이전 세션은 삭제되지 않고 요약만 이어받아 맥락 유지 (계정·키값은 봇 장기기억이 보존)
@@ -331,7 +331,7 @@ export default function App() {
     abortRef.current = abort;
 
     streamChat(
-      { conversationId: sendConvId ?? undefined, content: text, model: effectiveModel, mode, attachments, personaId, workspaceId: workspaceId || undefined, agentId: sendConvId ? undefined : sendAgent?.id },
+      { conversationId: sendConvId ?? undefined, content: text, model: effectiveModel, mode, attachments, personaId, workspaceId: workspaceId || undefined, agentId: sendConvId ? undefined : sendAgent?.id, taskMode },
       {
         onConversation: (id) => {
           streamConvRef.current = id;
@@ -388,7 +388,7 @@ export default function App() {
     if (!streaming && queued.length && (queued[0].forConv == null || queued[0].forConv === convId)) {
       const [next, ...rest] = queued;
       setQueued(rest);
-      send(next.text, next.mode, next.attachments);
+      send(next.text, next.mode, next.attachments, next.taskMode);
     }
   }, [streaming, queued, send, convId]);
 

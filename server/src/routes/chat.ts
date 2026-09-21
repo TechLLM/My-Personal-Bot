@@ -429,7 +429,7 @@ export const chatRoute = new Hono()
 
           const asstMsg = insertMessage(convId!, userMsg ? userMsg.id : parentId, "assistant", "");
           asstMsgId = asstMsg.id;
-          rootJobId = createCommandJob({ source: "web", conversationId: convId, assistantMessageId: asstMsg.id, request: userMsg?.content ?? recallQuery, ownerAgentId: conv?.agent_id });
+          rootJobId = createCommandJob({ source: "web", conversationId: convId, assistantMessageId: asstMsg.id, request: userMsg?.content ?? recallQuery, ownerAgentId: conv?.agent_id, taskMode: body.taskMode });
           send("assistant_message", { message: withSiblings(asstMsg) });
 
           // 그룹채팅 모드 — 모든 멤버가 하나의 명령 자리표시와 root job을 공유한다.

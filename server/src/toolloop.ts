@@ -29,6 +29,19 @@ export function parseLeaked(text: string): LeakedCall[] {
 export interface ToolCall { id: string; name: string; arguments: string }
 
 const DELEGATION = new Set(["agent_direct", "agent_message"]); // 중첩 실행 — 자체 시간 상한으로 관리
+// 작업 권한 모드의 읽기 전용 집합 (Aside식: readonly=이 집합만, guard=집합 밖은 전부 승인).
+// 위임 도구는 허용 — 하위 봇 실행도 같은 rootJobId로 같은 모드를 물려받아 안전하다.
+// shell_run은 명령 내용이 조회용일 때만 읽기로 인정한다.
+const READONLY_TOOLS = new Set([
+  "web_search", "read_file", "list_files", "mail_list", "mail_read",
+  "agent_list", "routine_list", "skill_list", "org_audit", "memory_save",
+  "agent_direct", "agent_message",
+  "browser_open", "browser_read", "browser_scroll", "browser_wait", "browser_back", "browser_look",
+]);
+function isReadOnlyCall(name: string, args: Record<string, unknown>, isReadOnlyShell: (c: unknown) => boolean): boolean {
+  if (name === "shell_run") return isReadOnlyShell(args.command ?? args.cmd ?? args.script);
+  return READONLY_TOOLS.has(name);
+}
 // 병렬 안전 — 서로 상태를 공유하지 않는 읽기·독립 작업. 브라우저(페이지 공유)·쓰기(경로 공유)는 순차 유지
 const PARALLEL_SAFE = new Set(["agent_direct", "agent_message", "web_search", "read_file", "list_files", "agent_list", "routine_list", "skill_list"]);
 const LONG_RUNNING = /^browser_(handoff|login)$/; // 테이크오버·로그인 인계 — 사용자 완료까지 최대 5분 블로킹이 정상
@@ -61,7 +74,18 @@ export async function execToolCall(tc: ToolCall, ctx: ToolCtx): Promise<{ out: s
   for (const k of Object.keys(args)) if (Array.isArray(args[k]) && !(args[k] as unknown[]).length) delete args[k];
   ctx.onStart?.(tc.name);
   // 승인 경계 — 위험 액션은 실행하지 않고 사용자 승인 큐에 올림
-  const { gateApproval } = await import("./approvals");
+  const { gateApproval, isReadOnlyShell } = await import("./approvals");
+  // 작업 권한 모드 — 명령 루트(command_jobs.task_mode)에 저장돼 위임된 하위 봇에게도 상속된다
+  if (ctx.rootJobId) {
+    const { db } = await import("./db");
+    const mode = (db.prepare("SELECT task_mode FROM command_jobs WHERE id = ?").get(ctx.rootJobId) as { task_mode: string | null } | undefined)?.task_mode;
+    if ((mode === "readonly" || mode === "guard") && !isReadOnlyCall(tc.name, args, isReadOnlyShell)) {
+      if (mode === "readonly")
+        return finish(`[읽기 전용 작업] ${tc.name} 도구는 이 작업에서 비활성입니다 — 조회·읽기 도구로만 진행하거나, 불가하면 그 사유를 보고하세요.`, true);
+      const g = gateApproval(tc.name, args, ctx.agentId, ctx.context, ctx.chain, ctx.rootJobId, true);
+      if (g) { ctx.onGate?.(tc.name); return finish(g, true); }
+    }
+  }
   const gate = gateApproval(tc.name, args, ctx.agentId, ctx.context, ctx.chain, ctx.rootJobId);
   if (gate) { ctx.onGate?.(tc.name); return finish(gate, true); }
   ctx.onDispatch?.(tc.name);

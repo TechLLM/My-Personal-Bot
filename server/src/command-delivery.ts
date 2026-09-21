@@ -12,6 +12,7 @@ export interface CreateCommandJob {
   request: string;
   ownerAgentId?: string | null;
   dedupeKey?: string | null;
+  taskMode?: string | null;        // 작업별 권한 모드 — 'readonly'|'guard'|null(기본). 위임된 하위 봇에게도 상속된다
 }
 
 const jobs = new AsyncLocalStorage<string>();
@@ -37,12 +38,13 @@ export function createCommandJob(o: CreateCommandJob): string {
   try {
     db.prepare(`INSERT INTO command_jobs
       (id, source, conversation_id, assistant_message_id, request, owner_agent_id, dedupe_key,
-       target_snapshot, credential_fingerprint, email_target_snapshot, email_credential_fingerprint, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+       target_snapshot, credential_fingerprint, email_target_snapshot, email_credential_fingerprint, task_mode, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         id, o.source, o.conversationId ?? null, o.assistantMessageId ?? null,
         o.request, o.ownerAgentId ?? null, o.dedupeKey ?? null,
         getSetting("telegram_chat_id"), fingerprint(getSetting("telegram_bot_token")),
-        getSetting("email_to"), emailFingerprint(), now(),
+        getSetting("email_to"), emailFingerprint(),
+        ["readonly", "guard"].includes(String(o.taskMode)) ? String(o.taskMode) : null, now(),
       );
   } catch (e) {
     if (!o.dedupeKey) throw e;

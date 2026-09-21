@@ -350,7 +350,7 @@ async function ssePost(url: string, body: unknown, handlers: StreamHandlers, sig
 }
 
 export function streamChat(
-  body: { conversationId?: string; content?: string; model: string; mode?: string; regenerateMessageId?: string; parentMessageId?: string; attachments?: { url: string; name: string; mime: string }[]; personaId?: string; workspaceId?: string; agentId?: string },
+  body: { conversationId?: string; content?: string; model: string; mode?: string; regenerateMessageId?: string; parentMessageId?: string; attachments?: { url: string; name: string; mime: string }[]; personaId?: string; workspaceId?: string; agentId?: string; taskMode?: string },
   handlers: StreamHandlers,
   signal?: AbortSignal,
 ) {

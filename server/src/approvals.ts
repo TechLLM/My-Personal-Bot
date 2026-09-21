@@ -79,8 +79,8 @@ const TOOL_ERROR_RE = /^(오류|실행 오류|도구 오류|브라우저 오류|
 export const looksLikeToolError = (result: string) => TOOL_ERROR_RE.test(result.trim());
 
 // 도구 실행 전 호출 — 승인 필요면 요청을 만들고 안내 문자열 반환, 아니면 null
-export function gateApproval(tool: string, args: Record<string, unknown>, agentId: string | null, resumeTask: string, chain?: string[], explicitRootJobId?: string): string | null {
-  let required = approvalDecision(tool, args) === "require";
+export function gateApproval(tool: string, args: Record<string, unknown>, agentId: string | null, resumeTask: string, chain?: string[], explicitRootJobId?: string, forceRequire = false): string | null {
+  let required = forceRequire || approvalDecision(tool, args) === "require";
   // A6/C7 — 봇 생성은 정원 내면 승인 면제(팀장 포함). 전체 정원(agent_cap_total, 기본 20)
   // 초과분만 승인 대상. 팀장의 max_children 한도는 도구 내부에서 거부하므로 여기선 보지 않는다.
   if (!required && tool === "agent_create") {

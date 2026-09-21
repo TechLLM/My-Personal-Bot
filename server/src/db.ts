@@ -122,6 +122,19 @@ CREATE TABLE IF NOT EXISTS site_logins (
   created_at INTEGER NOT NULL
 );
 
+-- 자격증명 사용 감사 — 어느 봇이 언제 어떤 사이트 계정을 썼는지 결과와 함께 남긴다.
+-- 비밀번호 값은 절대 기록하지 않는다 (사이트명·URL·봇·결과만).
+CREATE TABLE IF NOT EXISTS credential_uses (
+  id TEXT PRIMARY KEY,
+  site_name TEXT NOT NULL,
+  url TEXT,
+  agent_id TEXT,
+  run_id TEXT,
+  action TEXT NOT NULL,          -- autofill | request_fulfilled | request_dismissed
+  outcome TEXT NOT NULL,         -- ok | failed | handoff | done | dismissed
+  created_at INTEGER NOT NULL
+);
+
 -- 봇이 사용자에게 요청한 계정 입력 — 팝업으로 수집, 완료/거절 시 상태 변경
 CREATE TABLE IF NOT EXISTS credential_requests (
   id TEXT PRIMARY KEY,
@@ -386,3 +399,4 @@ export function setSetting(key: string, value: string) {
 
 export const uid = () => crypto.randomUUID().replaceAll("-", "").slice(0, 16);
 export const now = () => Date.now();
+try { db.exec("ALTER TABLE command_jobs ADD COLUMN task_mode TEXT"); } catch {} // 작업별 권한 모드 (readonly|guard|null=기본)
