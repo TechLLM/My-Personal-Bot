@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { compactResult } from "../../../shared/user-facing";
 import { completeCommand, createCommandJob, recordCommandResult, withRootJob } from "../command-delivery";
+import { abortConversationControllers } from "../run-control";
 
 const FILES_DIR = join(import.meta.dir, "..", "..", "data", "files");
 mkdirSync(FILES_DIR, { recursive: true });
@@ -625,7 +626,8 @@ export const chatRoute = new Hono()
             };
             const { workspaceRoot } = await import("../team");
             const toolCtx: ToolCtx = {
-              agentId: conv?.agent_id ?? null, context: userMsg?.content ?? "", browserKey, signal, emit: teamEmit,
+              agentId: conv?.agent_id ?? null, context: userMsg?.content ?? "", browserKey, runKey,
+              conversationId: convId, signal, emit: teamEmit,
               rootJobId,
               fileRoot: workspaceRoot(conv?.workspace_id), // C19 — 프로젝트 대화는 파일 도구가 프로젝트 네임스페이스를 쓴다
               onStart: (n) => { calledTools.add(n); emitTool(n); },
@@ -869,7 +871,10 @@ export const chatRoute = new Hono()
   // 실행 중단 — 실행은 HTTP 연결과 분리돼 있으므로 명시적 신호로 멈춘다. body: {conversationId}
   .post("/stop", async (c) => {
     const { conversationId } = await c.req.json().catch(() => ({} as any));
-    if (conversationId) activeRuns.get(conversationId)?.abort();
+    if (conversationId) {
+      activeRuns.get(conversationId)?.abort();
+      abortConversationControllers(conversationId);
+    }
     return c.json({ ok: true });
   })
   // 파일 업로드 (이미지 분석용)

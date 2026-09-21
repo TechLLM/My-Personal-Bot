@@ -8,14 +8,15 @@ import { notifyResult } from "./notify";
 import { skillTally } from "./audit";
 import { webSearch } from "./search";
 import { mcpConfigured, mcpTools, mcpCall } from "./mcp";
-import { BROWSER_TOOLS, browserTool, closeAgentPage, closeAgentEgoSpace } from "./browser";
+import { BROWSER_TOOLS, browserTool, closeAgentPage, closeAgentEgoSpace, releaseBrowserLease } from "./browser";
 import { COMPUTER_TOOLS } from "./computer";
-import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, relative, sep } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { parseLeaked, execToolBatch, isBrowserish, parallelQueryHint } from "./toolloop";
 import { emitUI } from "./events";
 import type { Intent } from "./intent";
 import { createCommandJob, completeCommand, finalizeCommandIfReady, recordCommandResult } from "./command-delivery";
+import { abortAllRunControllers, registerRunController } from "./run-control";
 
 // 에이전트 공용 작업 디렉터리 — 파일 도구는 여기로 샌드박스
 export const WORK_DIR = join(import.meta.dir, "..", "data", "workspace");
@@ -114,6 +115,8 @@ export interface TeamAgentState {
   verifyIntent?: boolean; // false면 지시-실측 검증 생략 — 봇 간 메시지(보고·알림)는 지시가 아니라서 의도 파싱이 오독됨
   internal?: boolean;     // true면 결과가 기계 소비 — 사람에게 갈 보고서가 아니므로 재작성·품질 평가를 건너뛴다 (자기개선 탐색 등)
   fileRoot?: string;      // C19 — 프로젝트 파일 네임스페이스 (없으면 공유 WORK_DIR)
+  browserKey?: string;    // 승인 재개는 새 runId를 쓰되 원래 페이지 스택을 이어받는다
+  conversationId?: string | null;
   chain?: string[];       // 이 실행을 일으킨 상위 봇 id — 이 봇들에게 되돌아가는 지시·메시지는 순환이라 차단
   rootJobId?: string;
 }
@@ -123,6 +126,7 @@ type Emit = (ev: object) => void;
 // 봇 삭제 시 뒤에 남는 고아 참조 정리 — 도구 경로·API 경로 모두 이 함수를 거침
 // (대화·기억·실행 이력은 같은 ID로 복원될 때 다시 연결되도록 보존한다)
 export function deleteAgentRow(id: string) {
+  const browserApprovalIds = (db.prepare("SELECT id FROM approval_requests WHERE status = 'pending' AND agent_id = ? AND tool LIKE 'browser\\_%' ESCAPE '\\'").all(id) as { id: string }[]).map((r) => r.id);
   db.prepare("UPDATE agents SET parent_id = NULL WHERE parent_id = ?").run(id); // 팀원은 최상위로 올림
   db.prepare("UPDATE agent_messages SET status = 'failed', reply = '봇이 삭제됨', done_at = ? WHERE status IN ('pending', 'processing') AND (from_agent_id = ? OR to_agent_id = ?)").run(now(), id, id);
   db.prepare("UPDATE approval_requests SET status = 'denied', result = '대상 봇이 삭제됨', resolved_at = ? WHERE status = 'pending' AND agent_id = ?").run(now(), id);
@@ -134,6 +138,7 @@ export function deleteAgentRow(id: string) {
   }
   db.prepare("DELETE FROM conversations WHERE agent_id = ?").run(id); // 봇 세션 정리 — messages는 FK cascade로 함께 삭제됨
   db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+  for (const approvalId of browserApprovalIds) void releaseBrowserLease(approvalId);
   invalidateListCache();
 }
 
@@ -203,6 +208,13 @@ function safePath(p: string, root = WORK_DIR): string {
   if (existsSync(nfc)) return nfc;
   const nfd = join(root, clean.normalize("NFD"));
   return existsSync(nfd) ? nfd : nfc; // 신규 생성은 항상 NFC
+}
+
+function killProcessTree(proc: Bun.Subprocess) {
+  // detached spawn의 PID는 process-group ID이기도 하다. 셸이 먼저 끝나 PPID가
+  // init으로 바뀐 background child도 같은 group에 남으므로 음수 PID로 함께 끊는다.
+  try { process.kill(-proc.pid, "SIGKILL"); }
+  catch { try { proc.kill("SIGKILL"); } catch {} }
 }
 
 // C19 — 프로젝트(워크스페이스) 파일 네임스페이스: WORK_DIR/projects/<워크스페이스명>
@@ -317,6 +329,9 @@ const cycleNotice = (target: Agent) => `순환 차단: ${target.name}은(는) �
 
 export async function callBuiltin(name: string, args: Record<string, unknown>, agentId?: string | null, signal?: AbortSignal, depth = 0, emit?: (ev: any) => void, runKey?: string, fileRoot?: string, chain: string[] = [], explicitRootJobId?: string): Promise<string> {
   const { currentRootJobId } = await import("./command-delivery");
+  // agent_direct는 이미 중지된 상위 신호를 자체 검사해 running 행 없이
+  // 사용자용 취소 결과를 돌려준다. 나머지 builtin은 부수효과 전에 즉시 중단한다.
+  if (signal?.aborted && name !== "agent_direct") throw signal.reason ?? new DOMException("작업이 취소되었습니다", "AbortError");
   const rootJobId = explicitRootJobId ?? currentRootJobId();
   const ROOT = fileRoot ?? WORK_DIR; // C19 — 프로젝트 대화면 파일 도구가 그 네임스페이스를 쓴다
   // --- 봇 협업·관리 도구 ---
@@ -768,14 +783,43 @@ export async function callBuiltin(name: string, args: Record<string, unknown>, a
     if (!/^(bun|python3|cat|ls|grep|head|tail|sort|uniq|wc|find|awk|sed|jq|tr|cut|date|echo|printf|pwd|basename|dirname|xargs|tee|mkdir|cp|mv|rm|touch|chmod|diff|tar|cd|test|true|false|column|paste|comm|nl|strings|file|which|env)$/.test(first))
       return `허용되지 않은 명령입니다 — 첫 명령은 화이트리스트(bun·python3·유닉스 유틸) 안이어야 합니다: ${first}`;
     if (!existsSync("/usr/bin/sandbox-exec")) return "도구 오류: sandbox-exec 없음 — shell_run을 사용할 수 없습니다";
-    // macOS 샌드박스: 네트워크 전면 차단 + 작업 디렉터리·tmp 외 파일 쓰기 금지
-    const profile = `(version 1)(allow default)(deny network*)(deny file-write*)(allow file-write* (subpath "${WORK_DIR}") (subpath "/tmp") (subpath "/private/tmp") (subpath "/dev"))`;
-    const proc = Bun.spawn(["/usr/bin/sandbox-exec", "-p", profile, "/bin/sh", "-c", cmd], { cwd: WORK_DIR, stdout: "pipe", stderr: "pipe" });
+    // macOS 샌드박스: 네트워크 전면 차단 + 승인/대화에 고정된 프로젝트 루트·tmp 외 쓰기 금지
+    let canonicalWorkspace: string;
+    let canonicalRoot: string;
+    try {
+      canonicalWorkspace = realpathSync(WORK_DIR);
+      canonicalRoot = realpathSync(ROOT);
+    } catch {
+      return "도구 오류: shell_run 작업 루트가 없거나 읽을 수 없습니다";
+    }
+    const rootRel = relative(canonicalWorkspace, canonicalRoot);
+    if (!statSync(canonicalRoot).isDirectory() || rootRel === ".." || rootRel.startsWith(`..${sep}`) || isAbsolute(rootRel))
+      return "도구 오류: shell_run 작업 루트가 허용 workspace 밖입니다";
+    if (/[\0\r\n]/.test(canonicalRoot)) return "도구 오류: shell_run 작업 루트에 허용하지 않는 문자가 있습니다";
+    const sandboxRoot = canonicalRoot.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const profile = `(version 1)(allow default)(deny network*)(deny file-write*)(allow file-write* (subpath "${sandboxRoot}") (subpath "/tmp") (subpath "/private/tmp") (subpath "/dev"))`;
+    const proc = Bun.spawn(["/usr/bin/sandbox-exec", "-p", profile, "/bin/sh", "-c", cmd], {
+      cwd: canonicalRoot,
+      stdout: "pipe",
+      stderr: "pipe",
+      detached: true,
+    });
     let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; try { proc.kill(); } catch {} }, 30_000);
-    const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-    const code = await proc.exited;
-    clearTimeout(timer);
+    let cancelled = false;
+    const cancelProc = () => { cancelled = true; killProcessTree(proc); };
+    signal?.addEventListener("abort", cancelProc, { once: true });
+    const timer = setTimeout(() => { timedOut = true; killProcessTree(proc); }, 30_000);
+    let stdout = "";
+    let stderr = "";
+    let code = -1;
+    try {
+      [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+      code = await proc.exited;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", cancelProc);
+    }
+    if (cancelled) throw signal?.reason ?? new DOMException("사용자 중지", "AbortError");
     const raw = (stdout + (stderr.trim() ? `\n[stderr] ${stderr.trim()}` : "")).trim();
     return `${timedOut ? "⏱ 30초 상한으로 중단됐습니다.\n" : ""}${raw.slice(0, 8000) || "(출력 없음)"}${raw.length > 8000 ? "\n… (8,000자 상한으로 잘림)" : ""}\n(exit ${code})`;
   }
@@ -808,13 +852,9 @@ export const runningAgents = new Set<string>();
 export const agentActivity = new Map<string, string>();
 // 봇별 실행 꼬리 — 같은 봇의 run이 동시에 겹쳐 세션 메시지가 뒤섞이지 않게 직렬화
 const runTails = new Map<string, Promise<void>>();
-// 진행 중인 모든 봇 실행의 중지 스위치 — 위임·메시지·루틴·승인 재개가 연쇄로 번질 때 한 번에 끊는다
-const runStops = new Set<AbortController>();
-
 // 전체 중지 — 봇 실행과 대화 스트림을 모두 끊고, 아직 시작 안 한 봇 간 메시지도 취소한다
 export function stopAllRuns(): { runs: number; chats: number; messages: number } {
-  const runs = runStops.size;
-  for (const ctl of [...runStops]) ctl.abort(new DOMException("사용자 전체 중지", "AbortError"));
+  const runs = abortAllRunControllers();
   const chats = activeRuns.size;
   for (const ctl of activeRuns.values()) ctl.abort();
   const messages = db.prepare("UPDATE agent_messages SET status = 'failed', reply = '사용자 전체 중지', done_at = ? WHERE status IN ('pending', 'processing')").run(now()).changes;
@@ -873,9 +913,12 @@ function persistAgentRunTerminal(state: TeamAgentState) {
 }
 
 export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, signal?: AbortSignal): Promise<void> {
+  if (!state.conversationId && state.rootJobId) {
+    state.conversationId = (db.prepare("SELECT conversation_id FROM command_jobs WHERE id = ?").get(state.rootJobId) as { conversation_id: string | null } | undefined)?.conversation_id ?? null;
+  }
   const prev = runTails.get(state.id);
   const stop = new AbortController();
-  runStops.add(stop);
+  const unregisterStop = registerRunController(stop, state.conversationId);
   const runSignal = signal ? AbortSignal.any([signal, stop.signal]) : stop.signal;
   const p = (async () => {
     // 이전 run이 끝날 때까지 대기 — 상한을 두어 위임 사슬이 얽혀도 영구 교착은 안 생김
@@ -896,7 +939,7 @@ export async function runAgent(state: TeamAgentState, agent: Agent, emit: Emit, 
     // runAgentInner의 자체 finally 전에 실패한 경우에도 전역 실행 표시를 반드시 정리한다.
     runningAgents.delete(state.id);
     agentActivity.delete(state.id);
-    runStops.delete(stop);
+    unregisterStop();
     if (runTails.get(state.id) === p) runTails.delete(state.id);
   }
 }
@@ -1138,7 +1181,8 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
       // 위임 호출이 여러 개면 병렬로 실행하고 나머지는 순차 유지 (페이지·경로 공유 충돌 방지).
       const tcs = res.toolCalls;
       const outs = await execToolBatch(tcs, {
-        agentId: agent.id, context: state.task, browserKey: state.runId, signal, depth: state.depth, chain: state.chain, emit: trackEmit, fileRoot: state.fileRoot, rootJobId: state.rootJobId,
+        agentId: agent.id, context: state.task, browserKey: state.browserKey ?? state.runId, runKey: state.runId,
+        conversationId: state.conversationId, signal, depth: state.depth, chain: state.chain, emit: trackEmit, fileRoot: state.fileRoot, rootJobId: state.rootJobId,
         onStart: (n) => { calledTools.add(n); trackEmit({ type: "agent_step", agentId: state.id, runId: state.runId, tool: n }); },
         onGate: (n) => gatedTools.add(n),
         onEnd: (n, out, ok, ms) => {
@@ -1181,8 +1225,8 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
     runningAgents.delete(state.id);
     agentActivity.delete(state.id);
     closeSkillRuns(state.runId, state.status === "done", state.status === "error" ? state.result : undefined);
-    closeAgentPage(state.runId).catch(() => {});
-    closeAgentEgoSpace(state.runId).catch(() => {}); // 작업이 끝나면 ego Task Space(탭 포함)를 닫는다
+    closeAgentPage(state.browserKey ?? state.runId).catch(() => {});
+    closeAgentEgoSpace(state.browserKey ?? state.runId).catch(() => {}); // 작업이 끝나면 ego Task Space(탭 포함)를 닫는다
   }
 }
 
@@ -1352,7 +1396,12 @@ export interface DetachedRunOpts {
   verifyIntent?: boolean;              // false면 지시-실측 검증 생략 (보고 메시지 등)
   internal?: boolean;                  // true면 재작성·품질 평가 생략 — 결과를 기계가 소비하는 내부 실행
   runId?: string;                      // 기존 run 이어달리기 (resumeAgentRun)
-  fileRoot?: string;                   // C19 — 프로젝트 파일 네임스페이스 (없으면 봇 배정 프로젝트 → 그래도 없으면 WORK_DIR)
+  fileRoot?: string | null;            // null+preserveFileRoot면 승인 당시의 "명시 루트 없음"을 보존
+  preserveFileRoot?: boolean;
+  browserKey?: string;
+  depth?: number;
+  conversationId?: string | null;
+  signal?: AbortSignal;
   chain?: string[];                    // 이 실행을 일으킨 상위 봇 id (봇 메시지·회신) — 되돌아가는 지시·메시지 차단
   rootJobId?: string | null;
   onDone?: (state: TeamAgentState) => void | Promise<void>; // agent_messages 갱신 같은 후처리
@@ -1362,9 +1411,10 @@ export function runAgentDetached(agent: Agent, o: DetachedRunOpts): { runId: str
   const runId = o.runId ?? uid();
   // 기본 모델 부팅 실패 시 running 이력이나 독립 루트 명령을 먼저 만들지 않는다.
   const selectedModel = o.model ?? agent.model ?? defaultModel();
-  const storedRoot = o.runId
-    ? (db.prepare("SELECT root_job_id FROM agent_runs WHERE id = ?").get(runId) as { root_job_id: string | null } | undefined)?.root_job_id
-    : null;
+  const storedRun = o.runId
+    ? db.prepare("SELECT root_job_id, conversation_id FROM agent_runs WHERE id = ?").get(runId) as { root_job_id: string | null; conversation_id: string | null } | undefined
+    : undefined;
+  const storedRoot = storedRun?.root_job_id ?? null;
   let inheritedRoot = o.rootJobId ?? storedRoot ?? null;
   let ownsRoot = false;
   // 명시적 독립 알림 실행만 자체 전달 단위를 만든다. 이미 루트에 속한 하위 실행은
@@ -1378,20 +1428,30 @@ export function runAgentDetached(agent: Agent, o: DetachedRunOpts): { runId: str
     });
     ownsRoot = true;
   }
-  if (o.runId) db.prepare("UPDATE agent_runs SET status = 'running' WHERE id = ?").run(runId);
-  else db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, routine_id, root_job_id, created_at) VALUES (?, ?, NULL, ?, 'running', ?, ?, ?)")
-    .run(runId, agent.id, o.label.slice(0, 300), o.routineId ?? null, inheritedRoot, now());
+  const inheritedConversation = o.conversationId
+    ?? storedRun?.conversation_id
+    ?? (inheritedRoot ? (db.prepare("SELECT conversation_id FROM command_jobs WHERE id = ?").get(inheritedRoot) as { conversation_id: string | null } | undefined)?.conversation_id : null)
+    ?? null;
+  if (o.runId) db.prepare("UPDATE agent_runs SET status = 'running', conversation_id = COALESCE(conversation_id, ?) WHERE id = ?").run(inheritedConversation, runId);
+  else db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, routine_id, root_job_id, created_at) VALUES (?, ?, ?, ?, 'running', ?, ?, ?)")
+    .run(runId, agent.id, inheritedConversation, o.label.slice(0, 300), o.routineId ?? null, inheritedRoot, now());
   const state: TeamAgentState = {
     id: agent.id, runId, name: agent.name, avatar: agent.avatar ?? "🤖", role: agent.role_prompt,
-    task: o.task, model: selectedModel, status: "running", steps: 0, toolLog: [], depth: 0,
+    task: o.task, model: selectedModel, status: "running", steps: 0, toolLog: [], depth: o.depth ?? 0,
     verifyIntent: o.verifyIntent,
     internal: o.internal,
-    fileRoot: o.fileRoot ?? workspaceRoot(agent.workspace_id),
+    fileRoot: o.preserveFileRoot ? (o.fileRoot ?? undefined) : (o.fileRoot ?? workspaceRoot(agent.workspace_id)),
+    browserKey: o.browserKey,
+    conversationId: inheritedConversation,
     chain: o.chain,
     rootJobId: inheritedRoot ?? undefined,
   };
   const done = (async () => {
-    try { await runAgent(state, agent, () => {}, delegateTimeout()!); }
+    try {
+      const detachedSignal = delegateTimeout(o.signal);
+      if (!detachedSignal) throw new DOMException("사용자 중지로 작업이 취소되었습니다", "AbortError");
+      await runAgent(state, agent, () => {}, detachedSignal);
+    }
     catch (e) { state.status = "error"; state.result = agentFailureResult(e); }
     // 후처리가 새 하위 실행을 등록하기 전에 현재 run을 done으로 바꾸면 루트가 잠깐
     // blocker 0개로 관측된다. 콜백 등록이 끝날 때까지 DB 상태는 running으로 유지한다.

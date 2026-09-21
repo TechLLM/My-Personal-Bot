@@ -65,7 +65,7 @@ export async function getBrowser(headless = true): Promise<BrowserContext> {
   if (ctx) {
     try { await ctx.close(); } catch {}
     ctx = null;
-    pages.clear();
+    clearAllPageStacks();
   }
   if (launching) return launching;
   launching = launchContext(headless)
@@ -77,7 +77,7 @@ export async function getBrowser(headless = true): Promise<BrowserContext> {
     })
     .then(async (c) => {
       await c.addInitScript(STEALTH_INIT);
-      c.on("close", () => { ctx = null; pages.clear(); pendingEvents.clear(); });
+      c.on("close", () => { ctx = null; clearAllPageStacks(); pendingEvents.clear(); });
       ctx = c;
       ctxHeadless = headless;
       return c;
@@ -91,6 +91,147 @@ export async function getBrowser(headless = true): Promise<BrowserContext> {
 // 붙들고 있어 봇이 새 창을 전혀 보지 못했다 — "클릭은 됐는데 화면이 그대로"인 실패의 큰 몫.
 // 이제 팝업이 열리면 스택에 쌓아 자동으로 따라가고, browser_back으로 이전 창에 돌아온다.
 const pages = new Map<string, Page[]>();
+const pageIds = new WeakMap<Page, string>();
+const pageGenerations = new Map<string, number>();
+const browserEpoch = uid();
+
+export interface BrowserApprovalSnapshot {
+  epoch: string;
+  generation: number;
+  pageId: string | null;
+  hasLivePage: boolean;
+}
+
+const leaseOwners = new Map<string, string>(); // approval id → browser key
+const leasesByKey = new Map<string, Set<string>>();
+const deferredPageClose = new Set<string>();
+const deferredEgoClose = new Set<string>();
+const browserTails = new Map<string, Promise<void>>();
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) throw signal.reason ?? new DOMException("작업이 취소되었습니다", "AbortError");
+}
+
+function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal, disposeLate?: (value: T) => void | Promise<void>): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    void promise.then((value) => disposeLate?.(value), () => {});
+    return Promise.reject(signal.reason ?? new DOMException("작업이 취소되었습니다", "AbortError"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      void promise.then((value) => disposeLate?.(value), () => {});
+      reject(signal.reason ?? new DOMException("작업이 취소되었습니다", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then((value) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      resolve(value);
+    }, (error) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      reject(error);
+    });
+  });
+}
+
+let handoffBrowserFactoryForTest: ((headless: boolean) => Promise<BrowserContext>) | null = null;
+
+export function setHandoffBrowserFactoryForTest(factory: ((headless: boolean) => Promise<BrowserContext>) | null) {
+  if (process.env.NODE_ENV !== "test") throw new Error("테스트 환경에서만 브라우저 factory를 교체할 수 있습니다");
+  handoffBrowserFactoryForTest = factory;
+}
+
+// 같은 page stack의 snapshot 확인과 실제 action 사이에 다른 run이 끼어들지 않게 한다.
+// 승인 재실행뿐 아니라 일반 browser 호출도 같은 큐를 써야 identity 검사와 action이 하나의 구간이 된다.
+async function withBrowserKeyLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const previous = browserTails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const hold = new Promise<void>((resolve) => { release = resolve; });
+  const tail = previous.catch(() => {}).then(() => hold);
+  browserTails.set(key, tail);
+  await previous.catch(() => {});
+  try { return await fn(); }
+  finally {
+    release();
+    if (browserTails.get(key) === tail) browserTails.delete(key);
+  }
+}
+
+function bumpPageGeneration(key: string) {
+  pageGenerations.set(key, (pageGenerations.get(key) ?? 0) + 1);
+}
+
+function pageId(page: Page): string {
+  let id = pageIds.get(page);
+  if (!id) { id = uid(); pageIds.set(page, id); }
+  return id;
+}
+
+function livePages(key: string): Page[] {
+  return (pages.get(key) ?? []).filter((page) => !page.isClosed());
+}
+
+function clearAllPageStacks() {
+  for (const key of pages.keys()) bumpPageGeneration(key);
+  pages.clear();
+}
+
+export function browserApprovalSnapshot(key: string): BrowserApprovalSnapshot {
+  const alive = livePages(key);
+  const top = alive.at(-1) ?? null;
+  return {
+    epoch: browserEpoch,
+    generation: pageGenerations.get(key) ?? 0,
+    pageId: top ? pageId(top) : null,
+    hasLivePage: !!top,
+  };
+}
+
+export function captureBrowserApprovalSnapshot(key: string): Promise<BrowserApprovalSnapshot> {
+  return withBrowserKeyLock(key, async () => browserApprovalSnapshot(key));
+}
+
+export function acquireBrowserLease(key: string, owner: string) {
+  if (!key || !owner) throw new Error("브라우저 lease key/owner 필요");
+  const prior = leaseOwners.get(owner);
+  if (prior) {
+    if (prior !== key) throw new Error("브라우저 lease owner가 다른 key에 이미 연결돼 있습니다");
+    return;
+  }
+  leaseOwners.set(owner, key);
+  const owners = leasesByKey.get(key) ?? new Set<string>();
+  owners.add(owner);
+  leasesByKey.set(key, owners);
+}
+
+export function hasBrowserLease(key: string): boolean {
+  return !!leasesByKey.get(key)?.size;
+}
+
+export function ownsBrowserLease(key: string, owner: string): boolean {
+  return leaseOwners.get(owner) === key;
+}
+
+export async function releaseBrowserLease(owner: string): Promise<boolean> {
+  const key = leaseOwners.get(owner);
+  if (!key) return false;
+  leaseOwners.delete(owner);
+  const owners = leasesByKey.get(key);
+  owners?.delete(owner);
+  if (owners?.size) return true;
+  leasesByKey.delete(key);
+  if (deferredPageClose.delete(key)) await closeAgentPageNow(key);
+  if (deferredEgoClose.delete(key)) await closeAgentEgoSpaceNow(key);
+  return true;
+}
 
 // 비동기 브라우저 이벤트 — 팝업·다운로드·대화상자·페이지 이동은 도구 호출 사이에 일어나
 // 모델이 놓치기 쉽다. 모아 두었다가 다음 도구 결과 끝에 붙여 알린다 (Aside의 agent signals).
@@ -146,16 +287,19 @@ function drainEvents(key: string): string {
 }
 
 function trackPopups(key: string, page: Page) {
+  pageId(page);
   page.on("popup", (pop) => {
     const stack = pages.get(key);
     if (!stack) return;
     stack.push(pop);
+    bumpPageGeneration(key);
     trackPopups(key, pop); // 팝업이 또 팝업을 열어도 따라간다
     pushEvent(key, `새 창/팝업 열림: ${pop.url() || "(로딩 중)"} — 화면이 새 창으로 전환됐습니다`);
   });
   page.on("close", () => {
     const stack = pages.get(key);
     if (stack) pages.set(key, stack.filter((x) => x !== page));
+    bumpPageGeneration(key);
     pushEvent(key, `탭 닫힘: ${page.url()}`);
   });
   page.on("download", (dl) => pushEvent(key, `다운로드 시작: ${dl.suggestedFilename()}`));
@@ -164,25 +308,57 @@ function trackPopups(key: string, page: Page) {
     d.dismiss().catch(() => {});
   });
   page.on("framenavigated", (frame) => {
-    if (frame === page.mainFrame()) pushEvent(key, `페이지 이동: ${frame.url()}`);
+    if (frame === page.mainFrame()) { bumpPageGeneration(key); pushEvent(key, `페이지 이동: ${frame.url()}`); }
   });
 }
 
-async function pageFor(key: string): Promise<Page> {
-  const browser = await getBrowser(true);
-  const alive = (pages.get(key) ?? []).filter((x) => !x.isClosed());
-  if (alive.length) { pages.set(key, alive); return alive[alive.length - 1]; }
-  const page = await browser.newPage();
+// Playwright를 실제로 띄우지 않고도 페이지 identity·lease·직렬화 경계를 검증하는 seam.
+// 운영 코드에서 임의 Page 주입이 가능해지지 않도록 테스트 환경에서만 열어 둔다.
+export function installBrowserPageForTest(key: string, page: Page): () => Promise<void> {
+  if (process.env.NODE_ENV !== "test") throw new Error("테스트 환경에서만 브라우저 page를 주입할 수 있습니다");
+  if (pages.has(key) || hasBrowserLease(key)) throw new Error(`이미 사용 중인 브라우저 key입니다: ${key}`);
   pages.set(key, [page]);
+  bumpPageGeneration(key);
+  trackPopups(key, page);
+  return async () => { await cancelBrowserContext(key); };
+}
+
+async function pageFor(key: string, existingOnly = false, signal?: AbortSignal): Promise<Page> {
+  throwIfAborted(signal);
+  const alive = livePages(key);
+  if (alive.length) { pages.set(key, alive); return alive[alive.length - 1]; }
+  if (existingOnly) throw new Error("승인 대기 중 원래 브라우저 페이지가 닫혔습니다 — 현재 화면에서 다시 승인 요청하세요");
+  const browser = await getBrowser(true);
+  throwIfAborted(signal);
+  const page = await browser.newPage();
+  if (signal?.aborted) {
+    try { await page.close(); } catch {}
+    throwIfAborted(signal);
+  }
+  pages.set(key, [page]);
+  bumpPageGeneration(key);
   trackPopups(key, page);
   return page;
 }
 
 export async function closeAgentPage(key: string) {
+  if (hasBrowserLease(key)) { deferredPageClose.add(key); return; }
+  await closeAgentPageNow(key);
+}
+
+async function closeAgentPageNow(key: string) {
   const stack = pages.get(key) ?? [];
   pages.delete(key);
   pendingEvents.delete(key);
+  bumpPageGeneration(key);
   for (const x of stack) { try { await x.close(); } catch {} }
+}
+
+export async function cancelBrowserContext(key: string) {
+  deferredPageClose.delete(key);
+  deferredEgoClose.delete(key);
+  await closeAgentPageNow(key);
+  await closeAgentEgoSpaceNow(key);
 }
 
 // 접두사로 시작하는 키의 페이지를 전부 닫는다 — E2 격리 팔(e2-<tag>-*) 정리용
@@ -234,7 +410,8 @@ function startViewPump(key: string) {
 // ─── 테이크오버 (A2) — 봇이 2FA·CAPTCHA·결제처럼 사람만 풀 수 있는 화면을 만나면
 // 같은 프로필의 headed 창으로 제어를 넘긴다. 세션(쿠키·로그인)은 디스크 프로필에 남아
 // 전환 후에도 유지되고, 사용자가 "반환"을 누르면 봇이 headless로 이어간다.
-async function doHandoff(agentKey: string, reason: string): Promise<string> {
+async function doHandoff(agentKey: string, reason: string, signal?: AbortSignal): Promise<string> {
+  throwIfAborted(signal);
   const cur = (pages.get(agentKey) ?? []).filter((x) => !x.isClosed()).at(-1);
   const url = cur?.url() ?? "about:blank";
   const agentId = (db.prepare("SELECT agent_id FROM agent_runs WHERE id = ?").get(agentKey) as any)?.agent_id ?? null;
@@ -242,33 +419,68 @@ async function doHandoff(agentKey: string, reason: string): Promise<string> {
   db.prepare("INSERT INTO handoff_requests (id, agent_id, run_id, reason, url, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)")
     .run(id, agentId, agentKey, reason.slice(0, 300) || "사람 확인이 필요합니다", url, now());
   const wait = (async () => {
+    let handoffContext: BrowserContext | null = null;
+    let handoffPage: Page | null = null;
+    const closeOnAbort = () => {
+      void handoffPage?.close().catch(() => {});
+      void handoffContext?.close().catch(() => {});
+    };
+    signal?.addEventListener("abort", closeOnAbort, { once: true });
     try {
-      const b = await getBrowser(false); // headed — 사용자가 보고 직접 조작한다
-      const pg = await b.newPage();
-      await pg.goto(/^https?:/.test(url) ? url : "about:blank", { waitUntil: "domcontentloaded" }).catch(() => {});
+      const browserPromise = handoffBrowserFactoryForTest ? handoffBrowserFactoryForTest(false) : getBrowser(false);
+      const b = await awaitWithAbort(browserPromise, signal, async (late) => { try { await late.close(); } catch {} }); // headed — 사용자가 보고 직접 조작한다
+      handoffContext = b;
+      throwIfAborted(signal);
+      const pg = await awaitWithAbort(b.newPage(), signal, async (late) => { try { await late.close(); } catch {} });
+      handoffPage = pg;
+      if (signal?.aborted) { try { await pg.close(); } catch {} throwIfAborted(signal); }
+      await awaitWithAbort(pg.goto(/^https?:/.test(url) ? url : "about:blank", { waitUntil: "domcontentloaded" }).catch(() => null), signal);
       const deadline = Date.now() + 5 * 60_000; // 5분 무응답 시 부분 보고로 마무리
       while (Date.now() < deadline) {
+        if (signal?.aborted) return "cancelled";
         const r = db.prepare("SELECT status FROM handoff_requests WHERE id = ?").get(id) as any;
         if (r?.status === "done") return "done";
         if (r && r.status !== "pending") return "timeout"; // cancelled 등 — 사용자가 창을 닫은 경우
-        await new Promise((res) => setTimeout(res, 1500));
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(finish, 1500);
+          const onAbort = () => finish();
+          function finish() {
+            clearTimeout(timer);
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+          }
+          signal?.addEventListener("abort", onAbort, { once: true });
+        });
       }
       return "timeout";
+    } catch (e) {
+      if (signal?.aborted) return "cancelled";
+      throw e;
     } finally {
-      try { await ctx?.close(); } catch {}
-      ctx = null;
-      pages.clear(); // headed 창 닫기 — 다음 브라우저 호출이 headless로 재기동
+      signal?.removeEventListener("abort", closeOnAbort);
+      try { await handoffPage?.close(); } catch {}
+      try { await handoffContext?.close(); } catch {}
+      if (ctx === handoffContext) ctx = null;
+      clearAllPageStacks(); // headed 창 닫기 — 다음 브라우저 호출이 headless로 재기동
     }
   })();
-  activeHandoff = wait.then(() => {});
+  // activeHandoff는 모드 전환 대기용이므로 오류를 재노출하지 않고, 원본 wait만 호출자에게 오류를 전파한다.
+  activeHandoff = wait.then(() => undefined, () => undefined);
   try {
     const outcome = await wait;
-    if (outcome !== "done")
+    if (outcome === "cancelled")
+      db.prepare("UPDATE handoff_requests SET status = 'cancelled', resolved_at = ? WHERE id = ? AND status = 'pending'").run(now(), id);
+    else if (outcome !== "done")
       db.prepare("UPDATE handoff_requests SET status = 'timeout', resolved_at = ? WHERE id = ? AND status = 'pending'").run(now(), id);
     return outcome === "done"
       ? "사용자가 인계 작업을 완료했습니다 — 로그인·인증 상태는 브라우저 프로필에 유지됩니다. browser_open으로 목표 페이지를 다시 열어 작업을 이어가세요."
+      : outcome === "cancelled"
+        ? "사용자 중지로 브라우저 인계를 취소했습니다 — 인계 중 수동 조작 결과는 미확인이며 자동 재시도하지 마세요."
       : "인계 대기 시간(5분) 초과 — 사용자가 완료하지 않았습니다. 지금까지 확보한 결과로 부분 보고하세요.";
   } finally {
+    // getBrowser/newPage 초기화 예외도 pending 행을 남기지 않는다.
+    db.prepare("UPDATE handoff_requests SET status = ?, resolved_at = ? WHERE id = ? AND status = 'pending'")
+      .run(signal?.aborted ? "cancelled" : "timeout", now(), id);
     activeHandoff = null;
   }
 }
@@ -278,6 +490,11 @@ const egoSpaces = new Set<string>();
 
 // 작업 종료 시 ego Task Space 정리 — 공간+탭을 닫아 사용자 브라우저에 mybot-* 공간이 남지 않게 함
 export async function closeAgentEgoSpace(key: string) {
+  if (hasBrowserLease(key)) { deferredEgoClose.add(key); return; }
+  await closeAgentEgoSpaceNow(key);
+}
+
+async function closeAgentEgoSpaceNow(key: string) {
   if (!egoSpaces.delete(key)) return;
   const { egoCloseSpace } = await import("./ego");
   await egoCloseSpace(`mybot-${key}`).catch(() => {});
@@ -519,11 +736,33 @@ export async function resolveVisionModel(): Promise<{ endpoint: Endpoint; model:
 
 // 봇이 쓰는 브라우저 도구 — 도구 호출 사이에 쌓인 비동기 이벤트(팝업·다운로드·탭 닫힘·페이지 이동)를
 // 결과 끝에 붙여 모델에게 알린다. 브로커 경유 호출은 부모 쪽 래퍼가 같은 방식으로 붙인다.
-export async function browserTool(agentKey: string, name: string, args: Record<string, unknown>): Promise<string> {
-  return (await browserToolInner(agentKey, name, args)) + drainEvents(agentKey);
+export async function browserTool(agentKey: string, name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
+  return withBrowserKeyLock(agentKey, async () => {
+    throwIfAborted(signal);
+    bumpPageGeneration(agentKey);
+    return (await browserToolInner(agentKey, name, args, false, signal)) + drainEvents(agentKey);
+  });
 }
 
-async function browserToolInner(agentKey: string, name: string, args: Record<string, unknown>): Promise<string> {
+export async function browserToolApproved(agentKey: string, name: string, args: Record<string, unknown>, expected: BrowserApprovalSnapshot, signal?: AbortSignal): Promise<string> {
+  return withBrowserKeyLock(agentKey, async () => {
+    throwIfAborted(signal);
+    const current = browserApprovalSnapshot(agentKey);
+    if (expected.epoch !== current.epoch)
+      return "브라우저 오류: 승인 대기 중 서버 브라우저 세션이 교체됐습니다 — 현재 화면에서 다시 승인 요청하세요";
+    if (expected.generation !== current.generation || expected.pageId !== current.pageId || expected.hasLivePage !== current.hasLivePage)
+      return "브라우저 오류: 승인 대기 중 원래 페이지가 이동·교체·종료됐습니다 — 현재 화면에서 다시 승인 요청하세요";
+    const mayCreate = name === "browser_open" || name === "browser_login";
+    if (!mayCreate && !current.hasLivePage)
+      return "브라우저 오류: 승인한 작업의 원래 페이지가 없습니다 — 빈 페이지를 만들지 않고 다시 승인을 요청해야 합니다";
+    throwIfAborted(signal);
+    bumpPageGeneration(agentKey);
+    return (await browserToolInner(agentKey, name, args, current.hasLivePage || !mayCreate, signal)) + drainEvents(agentKey);
+  });
+}
+
+async function browserToolInner(agentKey: string, name: string, args: Record<string, unknown>, existingOnly: boolean, signal?: AbortSignal): Promise<string> {
+  throwIfAborted(signal);
   // E2 격리 실행 — 샌드박스는 프로세스 생성·네트워크가 차단되므로 브로커가
   // 읽기 전용 브라우저 도구를 대행한다. 허용 집합은 브로커가 집행한다.
   if (process.env.MYBOT_ENV === "e2" && process.env.E2_BROKER_URL) {
@@ -531,18 +770,22 @@ async function browserToolInner(agentKey: string, name: string, args: Record<str
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${process.env.E2_BROKER_TOKEN ?? ""}` },
       body: JSON.stringify({ tool: name, args: { ...args, __key: agentKey } }),
-      signal: AbortSignal.timeout(110_000),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(110_000)]) : AbortSignal.timeout(110_000),
     });
     if (!res.ok) throw new Error(`broker_tool_${res.status}`);
     return String((await res.json()).result ?? "");
   }
+  const abortCleanup = () => { void cancelBrowserContext(agentKey); };
+  signal?.addEventListener("abort", abortCleanup, { once: true });
   try {
+    throwIfAborted(signal);
     lastAction.set(agentKey, `${name} ${String(args.url ?? args.site ?? args.selector ?? args.ref ?? args.text ?? "").slice(0, 80)}`.trim());
     // 테이크오버 — pageFor 전에 처리: 인계가 브라우저 컨텍스트를 headed로 전환해 기존 페이지가 무효화된다
-    if (name === "browser_handoff") return await doHandoff(agentKey, String(args.reason ?? ""));
+    if (name === "browser_handoff") return await doHandoff(agentKey, String(args.reason ?? ""), signal);
     // ego lite 경유 — 사용자의 실제 로그인된 브라우저, 내장 브라우저를 띄우지 않음
     if (name === "ego_run") {
       const { egoAvailable, egoRun } = await import("./ego");
+      throwIfAborted(signal);
       if (!egoAvailable()) return "브라우저 오류: ego lite가 설치돼 있지 않습니다 — 내장 browser_* 도구를 사용하세요";
       const script = String(args.script ?? "");
       if (!script.trim()) return "오류: script 필요";
@@ -553,16 +796,19 @@ async function browserToolInner(agentKey: string, name: string, args: Record<str
     // 내장 browser_*·ego_run과 달리 사용자의 일상 브라우저 세션을 그대로 쓴다.
     if (name === "bsk") {
       const { bskAvailable, bskExec } = await import("./bsk");
+      throwIfAborted(signal);
       if (!bskAvailable()) return "브라우저 오류: bsk가 설치돼 있지 않습니다 (~/.local/bin/bsk) — 내장 browser_* 또는 ego_run을 사용하세요";
       const cmd = String(args.cmd ?? "");
       if (!cmd.trim()) return "오류: cmd 필요 — 예: 'session start --json', 'observe --session <id>'";
       return await bskExec(cmd);
     }
-    const page = await pageFor(agentKey);
+    const page = await pageFor(agentKey, existingOnly, signal);
+    throwIfAborted(signal);
     switch (name) {
       case "browser_open": {
         const url = String(args.url ?? "");
         if (!/^https?:\/\//.test(url)) return "오류: http(s) URL만 가능";
+        throwIfAborted(signal);
         await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
         await settle(page);
         return await snapshot(page);
@@ -575,6 +821,7 @@ async function browserToolInner(agentKey: string, name: string, args: Record<str
         if (!target) return '오류: ref(@번호) 또는 selector 필요 — browser_read로 요소 번호를 먼저 확인하세요';
         const loc = await locate(page, target);
         if (!loc) return `요소를 찾지 못했습니다: ${target}\n번호는 화면이 바뀌면 무효가 됩니다 — 아래 목록에서 다시 지목하세요.\n\n${await snapshot(page)}`;
+        throwIfAborted(signal);
         try {
           await loc.frame.locator(loc.selector).first().click({ timeout: 8000 });
         } catch (e) {
@@ -582,7 +829,7 @@ async function browserToolInner(agentKey: string, name: string, args: Record<str
           return `클릭 실패(${target}): ${String((e as Error).message).split("\n")[0]}\n아래 목록에서 다시 지목하세요.\n\n${await snapshot(page)}`;
         }
         await settle(page);
-        return await snapshot(await pageFor(agentKey)); // 클릭으로 새 창이 열렸으면 그 창을 읽는다
+        return await snapshot(await pageFor(agentKey, existingOnly, signal)); // 클릭으로 새 창이 열렸으면 그 창을 읽는다
       }
       case "browser_type": {
         const target = String(args.ref ?? args.selector ?? args.target ?? "");
@@ -591,20 +838,23 @@ async function browserToolInner(agentKey: string, name: string, args: Record<str
         const loc = await locate(page, target);
         if (!loc) return `입력할 요소를 찾지 못했습니다: ${target}\n\n${await snapshot(page)}`;
         const el = loc.frame.locator(loc.selector).first();
+        throwIfAborted(signal);
         try {
           await el.fill(text, { timeout: 8000 });
         } catch (e) {
           return `입력 실패(${target}): ${String((e as Error).message).split("\n")[0]}\n\n${await snapshot(page)}`;
         }
         if (args.enter) {
+          throwIfAborted(signal);
           await el.press("Enter").catch(() => {});
           await settle(page);
-          return await snapshot(await pageFor(agentKey));
+          return await snapshot(await pageFor(agentKey, existingOnly, signal));
         }
         return `입력 완료: ${target} ← "${text.slice(0, 60)}"`;
       }
       case "browser_scroll": {
         const dy = args.direction === "up" ? -800 : 800;
+        throwIfAborted(signal);
         await page.mouse.wheel(0, dy);
         await settle(page, 2000);
         return await snapshot(page);
@@ -620,6 +870,7 @@ async function browserToolInner(agentKey: string, name: string, args: Record<str
           else if (sel) await page.locator(sel).first().waitFor({ state: "visible", timeout: ms });
           else await page.waitForTimeout((secs || 3) * 1000);
         } catch {
+          throwIfAborted(signal);
           return `대기 시간 초과 — "${text || sel}"이(가) 나타나지 않았습니다.\n\n${await snapshot(page)}`;
         }
         await settle(page);
@@ -652,6 +903,7 @@ async function browserToolInner(agentKey: string, name: string, args: Record<str
         const stack = (pages.get(agentKey) ?? []).filter((x) => !x.isClosed());
         if (stack.length > 1 && stack[stack.length - 1] === page) {
           // 새 창에 들어와 있으면 창을 닫고 이전 창으로 — 그룹웨어 "문서 열기 → 목록 복귀" 흐름
+          throwIfAborted(signal);
           try { await page.close(); } catch {}
           const prev = (pages.get(agentKey) ?? []).filter((x) => !x.isClosed());
           pages.set(agentKey, prev);
@@ -662,6 +914,7 @@ async function browserToolInner(agentKey: string, name: string, args: Record<str
             return `새 창을 닫고 이전 화면으로 돌아왔습니다.\n\n${await snapshot(back)}`;
           }
         }
+        throwIfAborted(signal);
         await page.goBack({ waitUntil: "domcontentloaded", timeout: 20000 }).catch(() => {});
         await settle(page);
         return await snapshot(page);
@@ -679,6 +932,7 @@ async function browserToolInner(agentKey: string, name: string, args: Record<str
               .run(uid(), site.name, site.url, agentId, agentKey, outcome, now());
           } catch {}
         };
+        throwIfAborted(signal);
         await page.goto(site.url, { waitUntil: "domcontentloaded", timeout: 30000 });
         await page.waitForTimeout(1500);
         // 로그인 폼 탐색 — iframe 안 폼도 지원 (그룹웨어 다수)
@@ -699,10 +953,13 @@ async function browserToolInner(agentKey: string, name: string, args: Record<str
           if (await f.count().catch(() => 0)) { await f.fill(site.username, { timeout: 5000 }).catch(() => {}); break; }
         }
         const { decryptSecret } = await import("./crypto");
+        throwIfAborted(signal);
         const password = decryptSecret(site.password);
         if (!password) { audit("failed"); return "브라우저 오류: 저장된 비밀번호를 복호화할 수 없습니다 — 계정을 다시 등록하세요"; }
+        throwIfAborted(signal);
         await pass.fill(password, { timeout: 5000 });
         const btn = scope.locator('button[type="submit"], input[type="submit"], button:has-text("로그인"), a:has-text("로그인"), button:has-text("Sign in"), button:has-text("Log in")').first();
+        throwIfAborted(signal);
         if (await btn.count().catch(() => 0)) await btn.click().catch(() => {});
         else await pass.press("Enter").catch(() => {});
         await settle(page, 12000);
@@ -720,7 +977,7 @@ async function browserToolInner(agentKey: string, name: string, args: Record<str
         if (!ok) {
           // A2 승격 — 2FA·CAPTCHA·추가 인증이 필요한 화면은 사용자에게 넘긴다
           audit("handoff");
-          return await doHandoff(agentKey, `${site.name} 로그인 미완료 — 2FA·CAPTCHA 등 추가 인증이 필요할 수 있습니다`);
+          return await doHandoff(agentKey, `${site.name} 로그인 미완료 — 2FA·CAPTCHA 등 추가 인증이 필요할 수 있습니다`, signal);
         }
         audit("ok");
         return `로그인 완료.\n\n${await snapshot(page)}`;
@@ -729,6 +986,7 @@ async function browserToolInner(agentKey: string, name: string, args: Record<str
         // 셀렉터 기반 도구로 안 되는 작업용 — 페이지 컨텍스트에서 임의 JS 실행
         const script = String(args.script ?? "");
         if (!script.trim()) return "오류: script 필요";
+        throwIfAborted(signal);
         const result = await page.evaluate(async (code) => {
           try { return { ok: true, value: await new Function(`return (async () => { ${code} })()`)() }; }
           catch (e) { return { ok: false, error: String(e) }; }
@@ -771,6 +1029,8 @@ async function browserToolInner(agentKey: string, name: string, args: Record<str
     }
   } catch (e) {
     return `브라우저 오류: ${(e as Error).message}`;
+  } finally {
+    signal?.removeEventListener("abort", abortCleanup);
   }
 }
 
@@ -952,7 +1212,7 @@ export async function recordStop(): Promise<Record<string, unknown>[]> {
   recorder.events = [];
   try { await ctx?.close(); } catch {}
   ctx = null;
-  pages.clear();
+  clearAllPageStacks();
   return events;
 }
 
@@ -1035,6 +1295,6 @@ export const browserRoute = new Hono()
     db.prepare("UPDATE handoff_requests SET status = 'cancelled', resolved_at = ? WHERE status = 'pending'").run(now());
     try { await ctx?.close(); } catch {}
     ctx = null;
-    pages.clear();
+    clearAllPageStacks();
     return c.json({ ok: true });
   });

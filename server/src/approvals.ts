@@ -4,7 +4,10 @@ import { describeApproval } from "../../shared/user-facing";
 import { currentRootJobId, finalizeCommandIfReady } from "./command-delivery";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { realpathSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import type { ToolCtx } from "./toolloop";
+import { acquireBrowserLease, releaseBrowserLease, cancelBrowserContext, ownsBrowserLease, type BrowserApprovalSnapshot } from "./browser";
+import { registerRunController } from "./run-control";
 
 // ─── 승인 경계 (그록 Auto Review 대응) ───
 // 위험한 액션(외부 발신·삭제·결제 류)은 실행 전 사용자 승인을 받는다.
@@ -87,23 +90,24 @@ export interface ApprovalGateContext {
   fileRoot: string | null;
   depth: number;
   conversationId: string | null;
+  browserSnapshot?: BrowserApprovalSnapshot | null;
 }
 
 export interface ApprovalExecutionContextV1 extends ApprovalGateContext {
   v: 1;
   agentId: string | null;
   rootJobId: string | null;
+  chain: string[];
   scope: string;
 }
 
 export type DecodedApprovalContext = Omit<ApprovalExecutionContextV1, "fileRoot"> & {
   fileRoot?: string; // null은 즉시 실행과 같은 "명시 루트 없음" 의미를 보존한다
-  chain: string[];
 };
 
 const WORKSPACE_ROOT = resolve(join(import.meta.dir, "..", "data", "workspace"));
-const contextScope = (c: Pick<ApprovalExecutionContextV1, "agentId" | "rootJobId" | "browserKey" | "fileRoot" | "conversationId">) =>
-  JSON.stringify([c.rootJobId, c.browserKey, c.fileRoot, c.conversationId]);
+const contextScope = (c: Pick<ApprovalExecutionContextV1, "rootJobId" | "browserKey" | "runKey" | "fileRoot" | "depth" | "conversationId" | "browserSnapshot" | "chain">) =>
+  createHash("sha256").update(JSON.stringify([c.rootJobId, c.browserKey, c.runKey, c.fileRoot, c.depth, c.conversationId, c.browserSnapshot, c.chain])).digest("hex");
 
 function requiredContextString(value: unknown, field: string): string {
   if (typeof value !== "string" || !value.trim() || value.length > 500) throw new Error(`${field}가 없거나 올바르지 않습니다`);
@@ -114,6 +118,23 @@ function nullableContextString(value: unknown, field: string): string | null {
   if (value === null) return null;
   if (typeof value !== "string" || !value.trim() || value.length > 2000) throw new Error(`${field}가 올바르지 않습니다`);
   return value;
+}
+
+function normalizeBrowserSnapshot(value: unknown): BrowserApprovalSnapshot | null {
+  if (value === null || value === undefined) return null;
+  const raw = value as any;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("browserSnapshot이 올바르지 않습니다");
+  const epoch = requiredContextString(raw.epoch, "browserSnapshot.epoch");
+  if (!Number.isInteger(raw.generation) || raw.generation < 0) throw new Error("browserSnapshot.generation이 올바르지 않습니다");
+  const pageId = raw.pageId === null ? null : requiredContextString(raw.pageId, "browserSnapshot.pageId");
+  if (typeof raw.hasLivePage !== "boolean" || raw.hasLivePage !== (pageId !== null)) throw new Error("browserSnapshot page identity가 올바르지 않습니다");
+  return { epoch, generation: raw.generation, pageId, hasLivePage: raw.hasLivePage };
+}
+
+function normalizeContextChain(value: unknown, field = "chain"): string[] {
+  if (!Array.isArray(value) || value.length > 64 || value.some((id) => typeof id !== "string" || !id || id.length > 500))
+    throw new Error(`${field}이 올바르지 않습니다`);
+  return [...value];
 }
 
 export function resolveApprovalFileRoot(value: unknown): string {
@@ -127,7 +148,7 @@ export function resolveApprovalFileRoot(value: unknown): string {
   return candidate;
 }
 
-function encodeApprovalContext(agentId: string | null, rootJobId: string | null, input: ApprovalGateContext): string {
+function encodeApprovalContext(agentId: string | null, rootJobId: string | null, input: ApprovalGateContext, chain: string[]): string {
   const context: ApprovalExecutionContextV1 = {
     v: 1,
     agentId,
@@ -137,6 +158,8 @@ function encodeApprovalContext(agentId: string | null, rootJobId: string | null,
     fileRoot: input?.fileRoot === null ? null : nullableContextString(input?.fileRoot, "fileRoot"),
     depth: input?.depth,
     conversationId: nullableContextString(input?.conversationId, "conversationId"),
+    browserSnapshot: normalizeBrowserSnapshot(input?.browserSnapshot),
+    chain: normalizeContextChain(chain),
     scope: "",
   };
   if (!Number.isInteger(context.depth) || context.depth < 0 || context.depth > 64) throw new Error("depth가 올바르지 않습니다");
@@ -162,6 +185,8 @@ export function decodeApprovalContext(row: any): DecodedApprovalContext {
     fileRoot: raw.fileRoot === null ? null : nullableContextString(raw.fileRoot, "fileRoot"),
     depth: raw.depth,
     conversationId: nullableContextString(raw.conversationId, "conversationId"),
+    browserSnapshot: normalizeBrowserSnapshot(raw.browserSnapshot),
+    chain: normalizeContextChain(raw.chain, "승인 실행 위임 사슬"),
     scope: requiredContextString(raw.scope, "scope"),
   };
   if (!Number.isInteger(context.depth) || context.depth < 0 || context.depth > 64) throw new Error("승인 실행 depth가 올바르지 않습니다");
@@ -169,17 +194,20 @@ export function decodeApprovalContext(row: any): DecodedApprovalContext {
   const rowRoot = row?.root_job_id ?? null;
   if (context.agentId !== rowAgent || context.rootJobId !== rowRoot) throw new Error("승인 행과 실행 맥락의 소유자가 일치하지 않습니다");
   if (context.scope !== contextScope(context)) throw new Error("승인 실행 맥락의 범위가 손상됐습니다");
-  let chain: unknown;
-  try { chain = row?.chain ? JSON.parse(row.chain) : []; }
+  if (String(row?.tool ?? "").startsWith("browser_") && !context.browserSnapshot)
+    throw new Error("승인한 브라우저 페이지 identity가 없습니다 — 현재 화면에서 다시 승인 요청하세요");
+  let rowChain: unknown;
+  try { rowChain = row?.chain ? JSON.parse(row.chain) : []; }
   catch { throw new Error("승인 실행 위임 사슬이 손상됐습니다"); }
-  if (!Array.isArray(chain) || chain.some((id) => typeof id !== "string" || !id)) throw new Error("승인 실행 위임 사슬이 올바르지 않습니다");
+  const storedChain = normalizeContextChain(rowChain, "승인 행 위임 사슬");
+  if (JSON.stringify(storedChain) !== JSON.stringify(context.chain)) throw new Error("승인 행과 실행 맥락의 위임 사슬이 일치하지 않습니다");
   let fileRoot: string | undefined;
   if (context.fileRoot !== null) {
     const canonical = resolveApprovalFileRoot(context.fileRoot);
     if (resolve(context.fileRoot) !== canonical) throw new Error("승인 후 fileRoot 대상이 변경됐습니다 — 원래 작업에서 다시 승인 요청하세요");
     fileRoot = canonical;
   }
-  return { ...context, fileRoot, chain: [...chain] };
+  return { ...context, fileRoot, chain: [...context.chain] };
 }
 
 // 도구 실행 전 호출 — 승인 필요면 요청을 만들고 안내 문자열 반환, 아니면 null
@@ -193,6 +221,8 @@ export function gateApproval(tool: string, args: Record<string, unknown>, agentI
     if (want > 0 && total + want > (Number(getSetting("agent_cap_total")) || 20)) required = true;
   }
   if (!required) return null;
+  if (tool === "ego_run" || tool === "bsk")
+    return `오류: ${tool}은 외부 브라우저 세션을 사용해 승인 대기 후 동일 page identity를 보장할 수 없습니다 — 승인 재실행이 필요한 작업은 관리형 browser_* 도구로 다시 요청하세요.`;
   // 형식이 깨진 호출은 팝업을 만들지 않고 즉시 오류를 돌려준다 — 승인→실행실패→재요청 팝업 루프 방지.
   // 봇은 이 오류를 보고 인자를 고쳐 다시 요청할 수 있다 (사용자 승인을 소모하지 않는다)
   if (tool === "agent_create" && !prospectiveCreateCount(args))
@@ -200,12 +230,14 @@ export function gateApproval(tool: string, args: Record<string, unknown>, agentI
   const argsJson = canonicalArgs(args);
   const rootJobId = explicitRootJobId ?? currentRootJobId() ?? null;
   if (!execution) return "오류: 승인 실행 맥락이 없습니다 — 원래 작업에서 다시 요청하세요.";
+  if (tool.startsWith("browser_") && !execution.browserSnapshot)
+    return "오류: 승인할 브라우저 페이지 identity가 없습니다 — 현재 화면에서 다시 요청하세요.";
   if (chain !== undefined && (!Array.isArray(chain) || chain.some((id) => typeof id !== "string" || !id)))
     return "오류: 승인 실행 위임 사슬이 올바르지 않습니다 — 원래 작업에서 다시 요청하세요.";
   let executionJson: string;
   let executionScope: string;
   try {
-    executionJson = encodeApprovalContext(agentId ?? null, rootJobId, execution);
+    executionJson = encodeApprovalContext(agentId ?? null, rootJobId, execution, chain ?? []);
     executionScope = (JSON.parse(executionJson) as ApprovalExecutionContextV1).scope;
   } catch (e) {
     return `오류: 승인 실행 맥락을 고정할 수 없습니다 — ${(e as Error).message}. 원래 작업에서 다시 요청하세요.`;
@@ -247,8 +279,10 @@ export function gateApproval(tool: string, args: Record<string, unknown>, agentI
   const dup = db.prepare("SELECT id FROM approval_requests WHERE status = 'pending' AND tool = ? AND agent_id IS ? AND args = ? AND root_job_id IS ? AND CASE WHEN json_valid(execution_context) THEN json_extract(execution_context, '$.scope') END = ?").get(tool, agentId ?? null, argsJson, rootJobId, executionScope) as any;
   if (!dup) {
     const summary = summarizeArgs(tool, args);
+    const requestId = uid();
     db.prepare("INSERT INTO approval_requests (id, tool, args, summary, agent_id, resume, status, created_at, chain, root_job_id, execution_context) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)")
-      .run(uid(), tool, argsJson, summary, agentId ?? null, resumeTask.slice(0, 500), now(), chain?.length ? JSON.stringify([...chain]) : null, rootJobId, executionJson);
+      .run(requestId, tool, argsJson, summary, agentId ?? null, resumeTask.slice(0, 500), now(), chain?.length ? JSON.stringify([...chain]) : null, rootJobId, executionJson);
+    if (tool.startsWith("browser_")) acquireBrowserLease(execution.browserKey, requestId);
     const root = rootJobId;
     if (root) void import("./command-delivery").then(({ deliverTelegramActionNeeded }) => deliverTelegramActionNeeded(root));
   }
@@ -380,10 +414,11 @@ export const approvalsRoute = new Hono()
     if (!req) return c.json({ error: "요청 없음 또는 이미 처리됨" }, 404);
     const b = await c.req.json().catch(() => ({})) as { always?: boolean };
     const pattern = `^${String(req.tool).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
+    const executionOwner = uid();
     // stale 탭이 본문 파싱을 기다리는 동안 다른 탭이 먼저 처리할 수 있다. CAS와 영구 규칙 변경을
     // 한 트랜잭션에 묶어 실제 처리 소유권을 얻은 요청만 allow 규칙을 만들게 한다.
     const claimed = db.transaction(() => {
-      const changed = db.prepare("UPDATE approval_requests SET status = 'executing', resolved_at = ? WHERE id = ? AND status = 'pending'").run(now(), req.id);
+      const changed = db.prepare("UPDATE approval_requests SET status = 'executing', resolved_at = ?, execution_owner = ?, execution_decision = 'approve' WHERE id = ? AND status = 'pending'").run(now(), executionOwner, req.id);
       if (!changed.changes) return false;
       if (b.always) {
         db.prepare("INSERT INTO approval_rules (id, pattern, action, created_at) VALUES (?, ?, 'allow', ?)").run(uid(), pattern, now());
@@ -393,7 +428,7 @@ export const approvalsRoute = new Hono()
     })();
     if (!claimed) return c.json({ error: "이미 처리됨" }, 409);
     // 저장된 도구를 실제로 실행한 뒤 봇의 원래 작업을 재개
-    executeApproved(req).catch((e) => console.error("[mybot] 승인 작업 실행 실패:", (e as Error).message));
+    executeApproved(req, {}, executionOwner).catch((e) => console.error("[mybot] 승인 작업 실행 실패:", (e as Error).message));
     return c.json({ ok: true });
   })
   .post("/:id/deny", async (c) => {
@@ -401,9 +436,10 @@ export const approvalsRoute = new Hono()
     if (!req) return c.json({ error: "요청 없음 또는 이미 처리됨" }, 404);
     const b = await c.req.json().catch(() => ({})) as { always?: boolean };
     const pattern = `^${String(req.tool).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
+    const executionOwner = uid();
     const claimed = db.transaction(() => {
       // 거부도 재개 run 등록이 끝날 때까지 blocker인 executing 상태를 유지한다.
-      const changed = db.prepare("UPDATE approval_requests SET status = 'executing', resolved_at = ? WHERE id = ? AND status = 'pending'").run(now(), req.id);
+      const changed = db.prepare("UPDATE approval_requests SET status = 'executing', resolved_at = ?, execution_owner = ?, execution_decision = 'deny' WHERE id = ? AND status = 'pending'").run(now(), executionOwner, req.id);
       if (!changed.changes) return false;
       if (b.always)
         db.prepare("INSERT INTO approval_rules (id, pattern, action, created_at) VALUES (?, ?, 'require', ?)").run(uid(), pattern, now());
@@ -411,9 +447,9 @@ export const approvalsRoute = new Hono()
     })();
     if (!claimed) return c.json({ error: "이미 처리됨" }, 409);
     try {
-      await notifyDenied(req);
+      await notifyDenied(req, executionOwner);
     } catch (e) {
-      await failApproval(req, `승인 거부 처리 실패: ${String((e as Error).message ?? e)}`);
+      await failApproval(req, `승인 거부 처리 실패: ${String((e as Error).message ?? e)}`, executionOwner, "deny");
     }
     return c.json({ ok: true });
   })
@@ -483,101 +519,266 @@ const executingApprovalIds = new Set<string>();
 
 export interface ApprovalExecutionDeps {
   dispatch?: (tool: string, args: Record<string, unknown>, ctx: ToolCtx) => Promise<{ out: string; ok: boolean }>;
-  resume?: (req: any, task: string) => Promise<{ registered: boolean; note: string }>;
+  resume?: (req: any, task: string, execution: DecodedApprovalContext, signal: AbortSignal, useBrowserContext: boolean) => Promise<ApprovalResumeResult>;
 }
 
-// 승인된 도구를 실제 실행 → 결과 저장 → 봇 작업 재개
-export async function executeApproved(req: any, deps: ApprovalExecutionDeps = {}) {
+export type ApprovalResumeResult =
+  | { registered: false; note: string; done?: never }
+  | { registered: true; note: string; done: Promise<unknown> };
+
+function awaitDispatchOrAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<{ aborted: false; value: T } | { aborted: true }> {
+  if (signal.aborted) return Promise.resolve({ aborted: true });
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      resolve({ aborted: true });
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then((value) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      resolve({ aborted: false, value });
+    }, (error) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      reject(error);
+    });
+  });
+}
+
+function withRootConversation(execution: DecodedApprovalContext): DecodedApprovalContext {
+  if (execution.conversationId || !execution.rootJobId) return execution;
+  const row = db.prepare("SELECT conversation_id FROM command_jobs WHERE id = ?").get(execution.rootJobId) as { conversation_id: string | null } | undefined;
+  return row?.conversation_id ? { ...execution, conversationId: row.conversation_id } : execution;
+}
+
+// 승인된 도구를 실제 실행 → 결과 저장 → 봇 작업 재개.
+// UI 경로는 claimOwner를 pending→executing CAS와 함께 저장한다. 과거의
+// approved+result=NULL 자동 승인 행만 이 함수가 새 owner로 한 번 claim할 수 있다.
+export async function executeApproved(req: any, deps: ApprovalExecutionDeps = {}, claimOwner?: string) {
   const id = String(req?.id ?? "");
   if (!id || executingApprovalIds.has(id)) return;
   executingApprovalIds.add(id);
+  let ownsExecution = false;
+  let executionOwner = claimOwner ?? "";
+  let unregisterController: (() => void) | null = null;
+  let executionController: AbortController | null = null;
+  let controllerTransferred = false;
+  let leaseTransferred = false;
+  let resumeStarted = false;
   try {
     // 호출자가 넘긴 객체는 승인 전 상태이거나 오래된 값일 수 있다. 승인된 원본 도구와 인자는
     // 반드시 DB에서 다시 읽고, 과거 evolve 자동 승인 경로의 approved+result=NULL 행만 CAS로 승격한다.
     let stored = db.prepare("SELECT * FROM approval_requests WHERE id = ?").get(id) as any;
     if (!stored || stored.result !== null) return;
     if (stored.status === "approved") {
-      const claimed = db.prepare("UPDATE approval_requests SET status = 'executing' WHERE id = ? AND status = 'approved' AND result IS NULL")
-        .run(id);
+      if (claimOwner) return;
+      executionOwner = uid();
+      const claimed = db.prepare("UPDATE approval_requests SET status = 'executing', execution_owner = ?, execution_decision = 'approve', resolved_at = COALESCE(resolved_at, ?) WHERE id = ? AND status = 'approved' AND result IS NULL")
+        .run(executionOwner, now(), id);
       if (!claimed.changes) return;
+      ownsExecution = true;
       stored = db.prepare("SELECT * FROM approval_requests WHERE id = ?").get(id) as any;
-    } else if (stored.status !== "executing") {
+    } else if (stored.status === "executing") {
+      if (!claimOwner || stored.execution_owner !== claimOwner || stored.execution_decision !== "approve") return;
+      ownsExecution = true;
+    } else {
       return;
     }
-    if (!stored || stored.status !== "executing" || stored.result !== null) return;
+    if (!stored || !ownsExecution || stored.status !== "executing" || stored.result !== null
+      || stored.execution_owner !== executionOwner || stored.execution_decision !== "approve") return;
     req = stored;
 
-    const execution = decodeApprovalContext(req);
+    const execution = withRootConversation(decodeApprovalContext(req));
+    if (req.tool.startsWith("browser_") && !ownsBrowserLease(execution.browserKey, id))
+      throw new Error("승인한 브라우저 lease가 없거나 다른 작업에 속합니다 — 현재 화면에서 다시 승인 요청하세요");
     let args: unknown;
     try { args = JSON.parse(req.args ?? "{}"); }
     catch { throw new Error("승인된 도구 인자가 손상됐습니다 — 원래 작업에서 다시 승인 요청하세요"); }
     if (!args || Array.isArray(args) || typeof args !== "object") throw new Error("승인된 도구 인자가 올바르지 않습니다 — 원래 작업에서 다시 승인 요청하세요");
     const controller = new AbortController();
+    executionController = controller;
+    unregisterController = registerRunController(controller, execution.conversationId);
+    if (controller.signal.aborted) {
+      await failApproval(req, "사용자 중지로 승인 작업이 실행 전에 취소되었습니다.", executionOwner, "approve");
+      return;
+    }
     const dispatch = deps.dispatch ?? (await import("./toolloop")).dispatchToolCall;
-    const dispatched = await dispatch(req.tool, args as Record<string, unknown>, {
+    let dispatchStarted = false;
+    const dispatchPromise = dispatch(req.tool, args as Record<string, unknown>, {
       agentId: req.agent_id ?? null,
       context: req.resume ?? "",
       browserKey: execution.browserKey,
       runKey: execution.runKey,
       conversationId: execution.conversationId,
+      approvedBrowserSnapshot: execution.browserSnapshot ?? undefined,
       fileRoot: execution.fileRoot,
       signal: controller.signal,
       depth: execution.depth,
       chain: execution.chain,
       rootJobId: execution.rootJobId ?? undefined,
+      onDispatch: () => { dispatchStarted = true; },
     });
+    const raced = await awaitDispatchOrAbort(dispatchPromise, controller.signal);
+    if (raced.aborted) {
+      void dispatchPromise.catch(() => {});
+      if (req.tool.startsWith("browser_")) await cancelBrowserContext(execution.browserKey);
+      await failApproval(req, dispatchStarted
+        ? "사용자 중지로 승인 작업을 중단했습니다. 외부 효과가 시작됐을 수 있어 결과는 미확인입니다 — 자동 재시도하지 마세요."
+        : "사용자 중지로 승인 작업이 실행 전에 취소되었습니다.", executionOwner, "approve");
+      return;
+    }
+    const dispatched = raced.value;
     const result = dispatched.out;
+    if (controller.signal.aborted) {
+      await failApproval(req, "사용자 중지로 승인 작업 결과 이후 재개를 취소했습니다. 외부 효과 결과는 미확인입니다 — 자동 재시도하지 마세요.", executionOwner, "approve");
+      return;
+    }
 
     // executing을 유지한 채 재개 실행을 먼저 등록한다. terminal 상태가 먼저 공개되면 다른 하위
     // 작업이 루트 명령을 완료해 버려 승인 결과가 최종 메시지에서 빠질 수 있다.
-    const resume = await (deps.resume ?? resumeAgent)(req, looksLikeToolError(result)
+    const toolFailed = looksLikeToolError(result) || !dispatched.ok;
+    const keepBrowserContext = !toolFailed && req.tool.startsWith("browser_") && ownsBrowserLease(execution.browserKey, id);
+    const resume = await (deps.resume ?? resumeAgent)(req, toolFailed
       ? `사용자가 승인한 작업 "${req.summary}"을 실행했지만 실패했습니다.\n실패 결과:\n${result}\n\n같은 인자로 재요청하면 같은 실패가 발생합니다 — 인자를 수정하거나 다른 방법으로 진행하고, 불가능하면 실패를 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`
-      : `사용자가 승인한 작업 "${req.summary}"을 실행했습니다. 실행 결과:\n${result}\n\n원래 작업을 이어서 진행하고 결과를 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`);
+      : `사용자가 승인한 작업 "${req.summary}"을 실행했습니다. 실행 결과:\n${result}\n\n원래 작업을 이어서 진행하고 결과를 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`,
+      execution, controller.signal, keepBrowserContext);
+    resumeStarted = !!resume.done;
+    if (controller.signal.aborted) {
+      await failApproval(req, "사용자 중지로 승인 후속 작업의 재개를 취소했습니다. 승인 도구의 외부 효과는 이미 발생했을 수 있어 자동 재시도하지 마세요.", executionOwner, "approve");
+      return;
+    }
     const finalResult = `${result}${resume.note ? `\n${resume.note}` : ""}`.slice(0, 4000);
     const { recordCommandResult } = await import("./command-delivery");
-    db.transaction(() => {
+    const finished = db.transaction(() => {
+      const changed = db.prepare("UPDATE approval_requests SET status = 'approved', result = ? WHERE id = ? AND status = 'executing' AND execution_owner = ? AND execution_decision = 'approve'")
+        .run(finalResult, req.id, executionOwner);
+      if (!changed.changes) return false;
       if (req.root_job_id) recordCommandResult(req.root_job_id, `approval:${req.id}`, finalResult, req.agent_id);
-      db.prepare("UPDATE approval_requests SET status = 'approved', result = ? WHERE id = ? AND status = 'executing'").run(finalResult, req.id);
+      return true;
     })();
+    if (!finished) throw new Error("승인 실행 소유권이 변경돼 결과를 저장하지 않았습니다");
+    if (resume.done) {
+      const unregister = unregisterController;
+      const transferLease = keepBrowserContext;
+      controllerTransferred = true;
+      leaseTransferred = transferLease;
+      unregisterController = null;
+      void resume.done.then(async () => {
+        unregister?.();
+        if (transferLease) await releaseBrowserLease(id);
+      }, async (e) => {
+        unregister?.();
+        if (transferLease) await releaseBrowserLease(id);
+        console.error(`[mybot] 승인 재개 실행 실패 (${id}):`, String((e as Error)?.message ?? e));
+      });
+    }
     if (req.root_job_id) await finalizeCommandIfReady(req.root_job_id);
   } catch (e) {
-    await failApproval(req, `승인 작업 처리 실패: ${String((e as Error).message ?? e)}`);
+    if (resumeStarted && !controllerTransferred && !executionController?.signal.aborted)
+      executionController?.abort(new DOMException("승인 재개 등록을 완료하지 못했습니다", "AbortError"));
+    if (ownsExecution) await failApproval(req, `승인 작업 처리 실패: ${String((e as Error).message ?? e)}`, executionOwner, "approve");
   } finally {
+    if (!controllerTransferred) unregisterController?.();
+    if (ownsExecution && !leaseTransferred) await releaseBrowserLease(id);
     executingApprovalIds.delete(id);
   }
 }
 
-async function notifyDenied(req: any) {
-  const resume = await resumeAgent(req, `사용자가 작업 "${req.summary}"을 거부했습니다. 이 액션은 실행하지 마세요. 원래 작업이 다른 방법으로 가능하면 진행하고, 아니면 거부됐다고 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`);
+async function notifyDenied(req: any, executionOwner: string) {
+  const stored = db.prepare("SELECT * FROM approval_requests WHERE id = ?").get(req.id) as any;
+  if (!stored || stored.status !== "executing" || stored.execution_owner !== executionOwner || stored.execution_decision !== "deny") return;
+  req = stored;
+  let unregister: (() => void) | null = null;
+  let controller: AbortController | null = null;
+  let controllerTransferred = false;
+  let resume: ApprovalResumeResult = { registered: false, note: "" };
+  try {
+    try {
+      const execution = withRootConversation(decodeApprovalContext(req));
+      controller = new AbortController();
+      unregister = registerRunController(controller, execution.conversationId);
+      if (controller.signal.aborted) throw controller.signal.reason ?? new DOMException("작업이 취소되었습니다", "AbortError");
+      resume = await resumeAgent(req, `사용자가 작업 "${req.summary}"을 거부했습니다. 이 액션은 실행하지 마세요. 원래 작업이 다른 방법으로 가능하면 진행하고, 아니면 거부됐다고 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`, execution, controller.signal, false);
+    } catch (e) {
+      resume = { registered: false, note: `업무 자동 재개 불가: ${String((e as Error).message ?? e)}` };
+    }
   const result = `승인 거부: ${req.summary}${resume.note ? `\n${resume.note}` : ""}`.slice(0, 4000);
   const { recordCommandResult } = await import("./command-delivery");
-  db.transaction(() => {
+  const finished = db.transaction(() => {
+    const changed = db.prepare("UPDATE approval_requests SET status = 'denied', result = ?, resolved_at = ? WHERE id = ? AND status = 'executing' AND execution_owner = ? AND execution_decision = 'deny'")
+      .run(result, now(), req.id, executionOwner);
+    if (!changed.changes) return false;
     if (req.root_job_id) recordCommandResult(req.root_job_id, `approval:${req.id}`, result, req.agent_id);
-    db.prepare("UPDATE approval_requests SET status = 'denied', result = ?, resolved_at = ? WHERE id = ? AND status = 'executing'")
-      .run(result, now(), req.id);
+    return true;
   })();
+  if (!finished) throw new Error("승인 거부 처리 소유권이 변경됐습니다");
+  if (resume.done) {
+    controllerTransferred = true;
+    const cleanup = unregister;
+    unregister = null;
+    void resume.done.then(() => cleanup?.(), (e) => {
+      cleanup?.();
+      console.error(`[mybot] 승인 거부 후 재개 실행 실패 (${req.id}):`, String((e as Error)?.message ?? e));
+    });
+  }
   if (req.root_job_id) await finalizeCommandIfReady(req.root_job_id);
-}
-
-async function failApproval(req: any, message: string) {
-  const result = message.slice(0, 4000);
-  try {
-    const { recordCommandResult, finalizeCommandIfReady: finalize } = await import("./command-delivery");
-    db.transaction(() => {
-      if (req.root_job_id) recordCommandResult(req.root_job_id, `approval:${req.id}`, result, req.agent_id);
-      db.prepare("UPDATE approval_requests SET status = 'failed', result = ?, resolved_at = ? WHERE id = ? AND status = 'executing'")
-        .run(result, now(), req.id);
-    })();
-    if (req.root_job_id) await finalize(req.root_job_id);
-  } catch {
-    db.prepare("UPDATE approval_requests SET status = 'failed', result = ?, resolved_at = ? WHERE id = ? AND status = 'executing'")
-      .run(result, now(), req.id);
+  } finally {
+    if (resume.done && !controllerTransferred && !controller?.signal.aborted)
+      controller?.abort(new DOMException("승인 거부 재개 등록을 완료하지 못했습니다", "AbortError"));
+    if (!controllerTransferred) unregister?.();
+    await releaseBrowserLease(String(req.id ?? ""));
   }
 }
 
-async function resumeAgent(req: any, task: string): Promise<{ registered: boolean; note: string }> {
+async function failApproval(req: any, message: string, executionOwner: string, decision: "approve" | "deny") {
+  const result = message.slice(0, 4000);
+  try {
+    const { recordCommandResult, finalizeCommandIfReady: finalize } = await import("./command-delivery");
+    const finished = db.transaction(() => {
+      const changed = db.prepare("UPDATE approval_requests SET status = 'failed', result = ?, resolved_at = ? WHERE id = ? AND status = 'executing' AND execution_owner = ? AND execution_decision = ?")
+        .run(result, now(), req.id, executionOwner, decision);
+      if (!changed.changes) return false;
+      if (req.root_job_id) recordCommandResult(req.root_job_id, `approval:${req.id}`, result, req.agent_id);
+      return true;
+    })();
+    if (finished && req.root_job_id) await finalize(req.root_job_id);
+  } catch {
+    const changed = db.prepare("UPDATE approval_requests SET status = 'failed', result = ?, resolved_at = ? WHERE id = ? AND status = 'executing' AND execution_owner = ? AND execution_decision = ?")
+      .run(result, now(), req.id, executionOwner, decision);
+    if (changed.changes && req.root_job_id) {
+      try {
+        const delivery = await import("./command-delivery");
+        delivery.recordCommandResult(req.root_job_id, `approval:${req.id}`, result, req.agent_id);
+        await delivery.finalizeCommandIfReady(req.root_job_id);
+      } catch (e) {
+        console.error(`[mybot] 승인 실패 결과 집계 실패 (${req.id}):`, String((e as Error)?.message ?? e));
+      }
+    }
+  }
+}
+
+export function approvalResumeOptions(execution: DecodedApprovalContext, signal: AbortSignal, useBrowserContext: boolean) {
+  return {
+    fileRoot: execution.fileRoot ?? null,
+    preserveFileRoot: true,
+    browserKey: useBrowserContext ? execution.browserKey : undefined,
+    depth: execution.depth,
+    conversationId: execution.conversationId,
+    signal,
+    chain: [...execution.chain],
+    rootJobId: execution.rootJobId,
+  };
+}
+
+async function resumeAgent(req: any, task: string, execution: DecodedApprovalContext, signal: AbortSignal, useBrowserContext: boolean): Promise<ApprovalResumeResult> {
   if (!req.agent_id) return { registered: false, note: "업무 자동 재개 불가: 요청한 봇 정보가 없습니다." };
-  const { getAgent, runAgentDetached, agentSessionConvId } = await import("./team");
+  if (signal.aborted) throw signal.reason ?? new DOMException("사용자 중지", "AbortError");
+  const { getAgent, runAgentDetached } = await import("./team");
   const agent = getAgent(req.agent_id);
   if (!agent) return { registered: false, note: "업무 자동 재개 불가: 요청한 봇이 삭제되었거나 존재하지 않습니다." };
   // 재개 폭주 방지 — 승인이 한꺼번에 처리되면 "원래 작업 재개" run이 봇당 수십 개 쌓인다.
@@ -593,30 +794,37 @@ async function resumeAgent(req: any, task: string): Promise<{ registered: boolea
   }
   // 승인으로 재개된 작업의 결과를 지시 체인으로 돌려보낸다 — 위임한 상위 봇에게 완료 회신을 전달해
   // 사용자의 원래 지시가 "승인 대기"로 끝난 뒤 결과가 사용자 대화에 도착하게 한다 (agent_message 회신 재수화와 같은 패턴)
-  let reqChain: string[] = [];
-  try { reqChain = JSON.parse(req.chain ?? "[]"); } catch {}
+  const reqChain = [...execution.chain];
   const parentId = reqChain.filter((id) => id !== agent.id).at(-1);
   const parent = parentId ? getAgent(parentId) : null;
-  runAgentDetached(agent, {
+  const contextOptions = approvalResumeOptions(execution, signal, useBrowserContext);
+  const handle = runAgentDetached(agent, {
     label: `[승인 처리됨] ${req.tool} — 작업 재개`,
     task,
     sessionTitle: `[승인 처리 — 작업 재개] ${req.tool}`,
     sessionTask: req.resume || req.tool,
-    rootJobId: req.root_job_id,
+    ...contextOptions,
     onDone: parent
-      ? (state) => {
+      ? async (state) => {
           if (state.status !== "done" || !getAgent(parent.id)) return;
-          runAgentDetached(parent, {
+          if (signal.aborted) return;
+          await runAgentDetached(parent, {
             label: `[승인 작업 회신] ${agent.name} · ${req.tool}`,
             task: `[${agent.name} 봇이 사용자 승인을 받아 실행한 작업 "${req.summary}"의 결과가 도착했습니다 — 내용을 검토해 사용자에게 취합·보고하세요. ${agent.name}에게 접수·확인 회신을 다시 보내지 마세요]\n\n${(state.result?.trim() || "(결과 없음)").slice(0, 3000)}`,
             sessionTitle: `[승인 작업 완료] ${req.tool}`,
             sessionTask: req.resume || req.summary,
             chain: [...reqChain.filter((id) => id !== parent.id), agent.id],
+            fileRoot: execution.fileRoot ?? null,
+            preserveFileRoot: true,
+            browserKey: useBrowserContext ? execution.browserKey : undefined,
+            depth: Math.max(0, execution.depth - 1),
+            conversationId: execution.conversationId,
+            signal,
             verifyIntent: false, // 완료 회신 전달은 지시가 아님 — 지시-실측 검증 대상에서 제외
-            rootJobId: req.root_job_id,
-          });
+            rootJobId: execution.rootJobId,
+          }).done;
         }
       : undefined,
   });
-  return { registered: true, note: "" };
+  return { registered: true, note: "", done: handle.done };
 }

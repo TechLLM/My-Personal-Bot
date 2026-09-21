@@ -166,6 +166,8 @@ CREATE TABLE IF NOT EXISTS approval_requests (
   status TEXT NOT NULL DEFAULT 'pending',
   result TEXT,
   execution_context TEXT,
+  execution_owner TEXT,
+  execution_decision TEXT,
   created_at INTEGER NOT NULL,
   resolved_at INTEGER
 );
@@ -343,8 +345,10 @@ try { db.exec("ALTER TABLE agent_runs ADD COLUMN root_job_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE approval_requests ADD COLUMN root_job_id TEXT"); } catch {}
 export function ensureApprovalExecutionContextColumn(database: Pick<Database, "exec"> = db) {
   try { database.exec("ALTER TABLE approval_requests ADD COLUMN execution_context TEXT"); } catch {}
+  try { database.exec("ALTER TABLE approval_requests ADD COLUMN execution_owner TEXT"); } catch {}
+  try { database.exec("ALTER TABLE approval_requests ADD COLUMN execution_decision TEXT"); } catch {}
 }
-ensureApprovalExecutionContextColumn(); // 승인 당시 실행 대상·파일/브라우저 네임스페이스
+ensureApprovalExecutionContextColumn(); // 승인 당시 실행 대상·소유자·파일/브라우저 네임스페이스
 try { db.exec("ALTER TABLE agent_messages ADD COLUMN root_job_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE messages ADD COLUMN command_status TEXT"); } catch {}
 try { db.exec("ALTER TABLE command_jobs ADD COLUMN dedupe_key TEXT"); } catch {}

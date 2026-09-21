@@ -1,14 +1,21 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { approvalsRoute, executeApproved, gateApproval, resolveApprovalFileRoot, type ApprovalGateContext } from "./approvals";
-import { sitesRoute } from "./browser";
+import { approvalResumeOptions, approvalsRoute, executeApproved, gateApproval, resolveApprovalFileRoot, type ApprovalGateContext } from "./approvals";
+import { browserApprovalSnapshot, hasBrowserLease, ownsBrowserLease, releaseBrowserLease, sitesRoute } from "./browser";
 import { db, now } from "./db";
 import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { dispatchToolCall } from "./toolloop";
+import { chatRoute } from "./routes/chat";
+import { registeredRunControllerCount } from "./run-control";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
 
 const prefix = "contract-";
 const savedFetch = globalThis.fetch;
+const scopeHash = (raw: any) => createHash("sha256").update(JSON.stringify([
+  raw.rootJobId, raw.browserKey, raw.runKey, raw.fileRoot, raw.depth, raw.conversationId, raw.browserSnapshot, raw.chain,
+])).digest("hex");
 const approvalCtx = (key: string): ApprovalGateContext => ({ browserKey: key, runKey: key, fileRoot: null, depth: 0, conversationId: null });
 
 function queueApproved(id: string, tool: string, args: Record<string, unknown>) {
@@ -149,7 +156,7 @@ test("승인 재실행은 호출자가 위조한 값 대신 DB 원본과 저장�
       seen = { tool, args: dispatchedArgs, ctx };
       return { out: "contract dispatched", ok: true };
     },
-    resume: async () => { resumed++; return { registered: true, note: "" }; },
+    resume: async () => { resumed++; return { registered: false, note: "" }; },
   });
   expect(seen.tool).toBe("memory_save");
   expect(seen.args).toEqual(args);
@@ -184,7 +191,7 @@ test("승인 당시 symlink fileRoot의 canonical 프로젝트를 고정해 alia
     let dispatchedRoot: string | undefined;
     await executeApproved({ id: "contract-link-approved" }, {
       dispatch: async (_tool, _args, ctx) => { dispatchedRoot = ctx.fileRoot; return { out: "ok", ok: true }; },
-      resume: async () => ({ registered: true, note: "" }),
+      resume: async () => ({ registered: false, note: "" }),
     });
     expect(dispatchedRoot).toBe(projectA);
     expect(dispatchedRoot).not.toBe(projectB);
@@ -202,7 +209,7 @@ test("손상·소유권 불일치·workspace 밖 승인 맥락은 dispatch와 re
     { id: "contract-bad-owner", mutate: (raw: any) => JSON.stringify({ ...raw, agentId: "forged-agent" }) },
     { id: "contract-bad-root", mutate: (raw: any) => {
       const changed = { ...raw, fileRoot: outside };
-      changed.scope = JSON.stringify([changed.rootJobId, changed.browserKey, changed.fileRoot, changed.conversationId]);
+      changed.scope = scopeHash(changed);
       return JSON.stringify(changed);
     } },
   ];
@@ -215,7 +222,7 @@ test("손상·소유권 불일치·workspace 밖 승인 맥락은 dispatch와 re
     db.prepare("UPDATE approval_requests SET execution_context = ? WHERE id = ?").run(item.mutate(parsed), item.id);
     await executeApproved({ id: item.id }, {
       dispatch: async () => { dispatched++; return { out: "should-not-run", ok: true }; },
-      resume: async () => { resumed++; return { registered: true, note: "" }; },
+      resume: async () => { resumed++; return { registered: false, note: "" }; },
     });
     const row = db.prepare("SELECT status, result FROM approval_requests WHERE id = ?").get(item.id) as any;
     expect(row.status).toBe("failed");
@@ -254,7 +261,7 @@ test("동일 승인 실행의 동시 호출과 terminal 재호출은 dispatcher�
   let resumes = 0;
   const deps = {
     dispatch: async () => { dispatches++; entered(); await blocked; return { out: "contract effect", ok: true }; },
-    resume: async () => { resumes++; return { registered: true, note: "" }; },
+    resume: async () => { resumes++; return { registered: false as const, note: "" }; },
   };
   const first = executeApproved({ id: "contract-concurrent-approved" }, deps);
   await dispatchEntered;
@@ -297,4 +304,206 @@ test("대기 및 거부 행은 executeApproved로 실행되지 않고 원본을 
   expect(denied).toEqual({ status: "denied", result: null, args: deniedArgs });
   expect((db.prepare("SELECT COUNT(*) n FROM memories WHERE content LIKE 'contract-%memory'").get() as any).n).toBe(0);
   expect((db.prepare("SELECT COUNT(*) n FROM messages").get() as any).n).toBe(messageCount);
+});
+
+test("실행 소유권이 없는 pending·executing 호출은 dispatch하지 않고 browser lease도 풀지 않는다", async () => {
+  const key = `contract-owner-browser-${Date.now()}`;
+  const snapshot = browserApprovalSnapshot(key);
+  gateApproval("browser_click", { ref: "@1" }, null, "contract", [], undefined, {
+    browserKey: key, runKey: key, fileRoot: null, depth: 0, conversationId: "contract-owner-conv", browserSnapshot: snapshot,
+  }, true);
+  const row = db.prepare("SELECT id FROM approval_requests WHERE status = 'pending' AND tool = 'browser_click' ORDER BY created_at DESC LIMIT 1").get() as { id: string };
+  expect(ownsBrowserLease(key, row.id)).toBe(true);
+  let dispatches = 0;
+  await executeApproved({ id: row.id }, { dispatch: async () => { dispatches++; return { out: "no", ok: true }; } });
+  expect((db.prepare("SELECT status FROM approval_requests WHERE id = ?").get(row.id) as any).status).toBe("pending");
+  expect(ownsBrowserLease(key, row.id)).toBe(true);
+  db.prepare("UPDATE approval_requests SET status = 'executing', execution_owner = 'other-process', execution_decision = 'approve' WHERE id = ?").run(row.id);
+  await executeApproved({ id: row.id }, { dispatch: async () => { dispatches++; return { out: "no", ok: true }; } });
+  expect(dispatches).toBe(0);
+  expect(ownsBrowserLease(key, row.id)).toBe(true);
+  await releaseBrowserLease(row.id);
+  db.prepare("DELETE FROM approval_requests WHERE id = ?").run(row.id);
+});
+
+test("브라우저 승인은 terminal 재호출에도 resume.done이 끝날 때까지 lease를 보존한다", async () => {
+  const key = `contract-done-browser-${Date.now()}`;
+  gateApproval("browser_open", { url: "https://example.test" }, null, "contract", [], undefined, {
+    browserKey: key, runKey: key, fileRoot: null, depth: 0, conversationId: null, browserSnapshot: browserApprovalSnapshot(key),
+  }, true);
+  const row = db.prepare("SELECT id FROM approval_requests WHERE status = 'pending' AND tool = 'browser_open' ORDER BY created_at DESC LIMIT 1").get() as { id: string };
+  db.prepare("UPDATE approval_requests SET status = 'approved', resolved_at = ? WHERE id = ?").run(now(), row.id);
+  let finish!: () => void;
+  const done = new Promise<void>((resolve) => { finish = resolve; });
+  await executeApproved({ id: row.id }, {
+    dispatch: async (_tool, _args, ctx) => { ctx.onDispatch?.(_tool); return { out: "opened", ok: true }; },
+    resume: async () => ({ registered: true, note: "", done }),
+  });
+  expect(hasBrowserLease(key)).toBe(true);
+  await executeApproved({ id: row.id });
+  expect(hasBrowserLease(key)).toBe(true);
+  finish();
+  await done;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(hasBrowserLease(key)).toBe(false);
+  db.prepare("DELETE FROM approval_requests WHERE id = ?").run(row.id);
+});
+
+test("브라우저 snapshot이 사라진 승인 행은 dispatcher 전에 실패로 닫힌다", async () => {
+  const key = `contract-bad-snapshot-${Date.now()}`;
+  gateApproval("browser_click", { ref: "@1" }, null, "contract", [], undefined, {
+    browserKey: key, runKey: key, fileRoot: null, depth: 0, conversationId: null, browserSnapshot: browserApprovalSnapshot(key),
+  }, true);
+  const row = db.prepare("SELECT id, execution_context FROM approval_requests WHERE status = 'pending' AND tool = 'browser_click' ORDER BY created_at DESC LIMIT 1").get() as any;
+  const raw = JSON.parse(row.execution_context);
+  raw.browserSnapshot = null;
+  raw.scope = scopeHash(raw);
+  db.prepare("UPDATE approval_requests SET status = 'approved', execution_context = ?, resolved_at = ? WHERE id = ?").run(JSON.stringify(raw), now(), row.id);
+  let dispatches = 0;
+  await executeApproved({ id: row.id }, { dispatch: async () => { dispatches++; return { out: "no", ok: true }; } });
+  const terminal = db.prepare("SELECT status, result FROM approval_requests WHERE id = ?").get(row.id) as any;
+  expect(dispatches).toBe(0);
+  expect(terminal.status).toBe("failed");
+  expect(terminal.result).toContain("identity");
+  expect(hasBrowserLease(key)).toBe(false);
+  db.prepare("DELETE FROM approval_requests WHERE id = ?").run(row.id);
+});
+
+test("브라우저 승인 거부는 pending lease를 해제한다", async () => {
+  const key = `contract-deny-browser-${Date.now()}`;
+  gateApproval("browser_click", { ref: "@1" }, null, "contract", [], undefined, {
+    browserKey: key, runKey: key, fileRoot: null, depth: 0, conversationId: null, browserSnapshot: browserApprovalSnapshot(key),
+  }, true);
+  const row = db.prepare("SELECT id FROM approval_requests WHERE status = 'pending' AND tool = 'browser_click' ORDER BY created_at DESC LIMIT 1").get() as { id: string };
+  expect(hasBrowserLease(key)).toBe(true);
+  expect((await approvalsRoute.request(`/${row.id}/deny`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(200);
+  expect((db.prepare("SELECT status FROM approval_requests WHERE id = ?").get(row.id) as any).status).toBe("denied");
+  expect(hasBrowserLease(key)).toBe(false);
+  db.prepare("DELETE FROM approval_requests WHERE id = ?").run(row.id);
+});
+
+test("onDispatch에서 중지된 builtin은 부수효과 직전 재검사로 실행되지 않는다", async () => {
+  const ctl = new AbortController();
+  const content = `contract-cancel-before-${Date.now()}`;
+  const out = await dispatchToolCall("memory_save", { content }, {
+    agentId: null, context: "", browserKey: "contract-cancel-before", signal: ctl.signal,
+    onDispatch: () => ctl.abort(new DOMException("사용자 중지", "AbortError")),
+  });
+  expect(out.ok).toBe(false);
+  expect((db.prepare("SELECT COUNT(*) n FROM memories WHERE content = ?").get(content) as any).n).toBe(0);
+});
+
+test("대화 stop은 dispatch 중인 승인 작업을 미확인으로 닫고 resume하지 않는다", async () => {
+  const conversationId = `contract-stop-conv-${Date.now()}`;
+  const id = `contract-stop-approved-${Date.now()}`;
+  const context: ApprovalGateContext = { browserKey: `${id}-browser`, runKey: `${id}-run`, fileRoot: null, depth: 1, conversationId };
+  gateApproval("memory_save", { content: `${id}-memory` }, null, "contract stop", [], undefined, context, true);
+  const queued = db.prepare("SELECT id FROM approval_requests WHERE status = 'pending' AND args = ?").get(JSON.stringify({ content: `${id}-memory` })) as { id: string };
+  db.prepare("UPDATE approval_requests SET id = ?, status = 'approved', resolved_at = ? WHERE id = ?").run(id, now(), queued.id);
+  let entered!: () => void;
+  let finish!: () => void;
+  const dispatchEntered = new Promise<void>((resolve) => { entered = resolve; });
+  const blocked = new Promise<void>((resolve) => { finish = resolve; });
+  let resumes = 0;
+  const baselineControllers = registeredRunControllerCount();
+  const running = executeApproved({ id }, {
+    dispatch: async (tool, _args, ctx) => { ctx.onDispatch?.(tool); entered(); await blocked; return { out: "late", ok: true }; },
+    resume: async () => { resumes++; return { registered: false, note: "" }; },
+  });
+  await dispatchEntered;
+  expect(registeredRunControllerCount()).toBe(baselineControllers + 1);
+  const stopped = await chatRoute.request("/stop", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ conversationId }) });
+  expect(stopped.status).toBe(200);
+  await running;
+  const row = db.prepare("SELECT status, result FROM approval_requests WHERE id = ?").get(id) as any;
+  expect(row.status).toBe("failed");
+  expect(row.result).toMatch(/미확인|canceled|cancelled|중단/);
+  expect(row.result).toContain("자동 재시도하지 마세요");
+  expect(resumes).toBe(0);
+  expect(registeredRunControllerCount()).toBe(baselineControllers);
+  finish();
+  await blocked;
+});
+
+test("전체 중지는 서로 다른 대화의 승인 dispatch를 모두 취소한다", async () => {
+  const ids = [`contract-stop-all-a-${Date.now()}`, `contract-stop-all-b-${Date.now()}`];
+  let enteredCount = 0;
+  let allEntered!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>((resolve) => { allEntered = resolve; });
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  let resumes = 0;
+  for (const [i, id] of ids.entries()) {
+    const args = { content: `${id}-memory` };
+    gateApproval("memory_save", args, null, "contract stop all", [], undefined, {
+      browserKey: `${id}-browser`, runKey: `${id}-run`, fileRoot: null, depth: i, conversationId: `${id}-conv`,
+    }, true);
+    const queued = db.prepare("SELECT id FROM approval_requests WHERE status = 'pending' AND args = ?").get(JSON.stringify(args)) as { id: string };
+    db.prepare("UPDATE approval_requests SET id = ?, status = 'approved', resolved_at = ? WHERE id = ?").run(id, now(), queued.id);
+  }
+  const baseline = registeredRunControllerCount();
+  const runs = ids.map((id) => executeApproved({ id }, {
+    dispatch: async (tool, _args, ctx) => {
+      ctx.onDispatch?.(tool);
+      enteredCount++;
+      if (enteredCount === ids.length) allEntered();
+      await blocked;
+      return { out: "late", ok: true };
+    },
+    resume: async () => { resumes++; return { registered: false, note: "" }; },
+  }));
+  await entered;
+  const { stopAllRuns } = await import("./team");
+  expect(stopAllRuns().runs).toBeGreaterThanOrEqual(2);
+  await Promise.all(runs);
+  for (const id of ids) expect((db.prepare("SELECT status FROM approval_requests WHERE id = ?").get(id) as any).status).toBe("failed");
+  expect(resumes).toBe(0);
+  expect(registeredRunControllerCount()).toBe(baseline);
+  release();
+  await blocked;
+});
+
+test("승인 도구 성공 후 대화 stop은 등록된 후속 resume signal을 취소한다", async () => {
+  const id = `contract-resume-stop-${Date.now()}`;
+  const conversationId = `${id}-conv`;
+  const args = { content: `${id}-memory` };
+  gateApproval("memory_save", args, null, "contract resume stop", [], undefined, {
+    browserKey: `${id}-browser`, runKey: `${id}-run`, fileRoot: null, depth: 0, conversationId,
+  }, true);
+  const queued = db.prepare("SELECT id FROM approval_requests WHERE status = 'pending' AND args = ?").get(JSON.stringify(args)) as { id: string };
+  db.prepare("UPDATE approval_requests SET id = ?, status = 'approved', resolved_at = ? WHERE id = ?").run(id, now(), queued.id);
+  const seen: { resumeSignal?: AbortSignal } = {};
+  let done!: Promise<void>;
+  const baseline = registeredRunControllerCount();
+  await executeApproved({ id }, {
+    dispatch: async (tool, _args, ctx) => { ctx.onDispatch?.(tool); return { out: "saved", ok: true }; },
+    resume: async (_req, _task, _execution, signal) => {
+      seen.resumeSignal = signal;
+      done = new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+      return { registered: true, note: "", done };
+    },
+  });
+  expect((db.prepare("SELECT status FROM approval_requests WHERE id = ?").get(id) as any).status).toBe("approved");
+  expect(registeredRunControllerCount()).toBe(baseline + 1);
+  await chatRoute.request("/stop", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ conversationId }) });
+  await done;
+  await Promise.resolve();
+  expect(seen.resumeSignal?.aborted).toBe(true);
+  expect(registeredRunControllerCount()).toBe(baseline);
+});
+
+test("승인 재개 옵션은 fileRoot null 의미와 depth·chain·root·conversation·browser를 그대로 보존한다", () => {
+  const ctl = new AbortController();
+  const execution: any = {
+    v: 1, agentId: "a", rootJobId: "contract-root", browserKey: "contract-browser", runKey: "contract-run",
+    fileRoot: undefined, depth: 3, conversationId: "contract-conv", browserSnapshot: null, scope: "scope", chain: ["p1", "p2"],
+  };
+  const options = approvalResumeOptions(execution, ctl.signal, true);
+  expect(options).toMatchObject({
+    fileRoot: null, preserveFileRoot: true, browserKey: "contract-browser", depth: 3,
+    conversationId: "contract-conv", rootJobId: "contract-root", chain: ["p1", "p2"], signal: ctl.signal,
+  });
+  execution.chain.push("mutated");
+  expect(options.chain).toEqual(["p1", "p2"]);
+  expect(approvalResumeOptions(execution, ctl.signal, false).browserKey).toBeUndefined();
 });

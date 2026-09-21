@@ -1,8 +1,11 @@
 import { test, expect, beforeEach } from "bun:test";
 import { db } from "./db";
-import { ensureBossAgent } from "./team";
+import { callBuiltin, deleteAgentRow, ensureBossAgent, WORK_DIR } from "./team";
 import { systemPrompt } from "./routes/chat";
 import { gateApproval, type ApprovalGateContext } from "./approvals";
+import { browserApprovalSnapshot, hasBrowserLease } from "./browser";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
 
 // 아래 테스트는 CEO 봇의 역할문을 덮어쓴다 — 운영 DB가 열렸으면 즉시 중단
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
@@ -58,6 +61,57 @@ test("bsk·ego_run 도구가 브라우저 경로로 디스패치된다 (MCP 새�
   expect(isBrowserish("browser_open")).toBe(true);
   expect(isBrowserish("shell_run")).toBe(false);
   expect(isBrowserish("agent_list")).toBe(false);
+});
+
+test("shell_run은 승인에 고정된 project root를 cwd와 쓰기 경계로 사용한다", async () => {
+  const root = mkdtempSync(join(WORK_DIR, "shell-cwd-"));
+  const marker = `cwd-marker-${Date.now()}`;
+  try {
+    const pwd = await callBuiltin("shell_run", { command: "pwd" }, null, undefined, 0, undefined, "shell-cwd-run", root);
+    expect(pwd).toContain(root);
+    const wrote = await callBuiltin("shell_run", { command: `touch ${marker}` }, null, undefined, 0, undefined, "shell-cwd-run", root);
+    expect(wrote).toContain("exit 0");
+    expect(existsSync(join(root, marker))).toBe(true);
+    expect(existsSync(join(WORK_DIR, marker))).toBe(false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("shell_run 중지는 지연된 자식 쓰기를 종료한다", async () => {
+  const root = mkdtempSync(join(WORK_DIR, "shell-cancel-"));
+  const ctl = new AbortController();
+  try {
+    const running = callBuiltin("shell_run", {
+      // 셸이 먼저 끝나 child가 고아가 되어도 process group 단위로 끊겨야 한다.
+      command: `bun -e "setTimeout(() => Bun.write('late.txt', 'late'), 500)" & true`,
+    }, null, ctl.signal, 0, undefined, "shell-cancel-run", root);
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    ctl.abort(new DOMException("사용자 중지", "AbortError"));
+    let cancelled = false;
+    try { await running; } catch { cancelled = true; }
+    expect(cancelled).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 650));
+    expect(existsSync(join(root, "late.txt"))).toBe(false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("봇 삭제는 해당 봇의 pending browser 승인 lease를 해제한다", async () => {
+  const agentId = `delete-browser-agent-${Date.now()}`;
+  const key = `${agentId}-key`;
+  db.prepare("INSERT INTO agents (id, name, created_at) VALUES (?, ?, ?)").run(agentId, agentId, Date.now());
+  gateApproval("browser_click", { ref: "@1" }, agentId, "delete browser approval", [], undefined, {
+    browserKey: key, runKey: key, fileRoot: null, depth: 0, conversationId: null, browserSnapshot: browserApprovalSnapshot(key),
+  }, true);
+  const row = db.prepare("SELECT id FROM approval_requests WHERE agent_id = ? AND status = 'pending'").get(agentId) as { id: string };
+  expect(hasBrowserLease(key)).toBe(true);
+  deleteAgentRow(agentId);
+  await Promise.resolve();
+  expect(hasBrowserLease(key)).toBe(false);
+  expect((db.prepare("SELECT status FROM approval_requests WHERE id = ?").get(row.id) as any).status).toBe("denied");
+  db.prepare("DELETE FROM approval_requests WHERE id = ?").run(row.id);
 });
 
 // 2026-09-18 승인 루프 사고 회귀 — {"bots":[],"name":"X"} 형태의 호출이 빈 배열 때문에

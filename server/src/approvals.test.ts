@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
 import { db, now, ensureApprovalExecutionContextColumn } from "./db";
-import { approvalDecision, gateApproval, isReadOnlyShell, looksLikeToolError, resolveApprovalFileRoot, type ApprovalGateContext } from "./approvals";
+import { approvalDecision, decodeApprovalContext, gateApproval, isReadOnlyShell, looksLikeToolError, resolveApprovalFileRoot, type ApprovalGateContext } from "./approvals";
 import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 
@@ -59,7 +59,7 @@ test("도구 오류 문자열과 성공 문자열을 구분한다", () => {
   expect(looksLikeToolError("봇 생성됨: 테스트봇")).toBe(false);
 });
 
-test("구형 승인 테이블 마이그레이션은 context 열을 한 번만 더하고 기존 행을 보존한다", () => {
+test("구형 승인 테이블 마이그레이션은 context·owner 열을 한 번만 더하고 기존 행을 보존한다", () => {
   const legacy = new Database(":memory:");
   try {
     legacy.exec("CREATE TABLE approval_requests (id TEXT PRIMARY KEY, args TEXT, status TEXT, result TEXT)");
@@ -68,8 +68,10 @@ test("구형 승인 테이블 마이그레이션은 context 열을 한 번만 �
     ensureApprovalExecutionContextColumn(legacy);
     const columns = legacy.prepare("PRAGMA table_info(approval_requests)").all() as { name: string }[];
     expect(columns.filter((c) => c.name === "execution_context").length).toBe(1);
-    expect(legacy.prepare("SELECT id, args, status, result, execution_context FROM approval_requests").get()).toEqual({
-      id: "legacy", args: "{}", status: "pending", result: null, execution_context: null,
+    expect(columns.filter((c) => c.name === "execution_owner").length).toBe(1);
+    expect(columns.filter((c) => c.name === "execution_decision").length).toBe(1);
+    expect(legacy.prepare("SELECT id, args, status, result, execution_context, execution_owner, execution_decision FROM approval_requests").get()).toEqual({
+      id: "legacy", args: "{}", status: "pending", result: null, execution_context: null, execution_owner: null, execution_decision: null,
     });
   } finally { legacy.close(); }
 });
@@ -162,6 +164,33 @@ test("같은 root·브라우저·인자여도 fileRoot가 다르면 별도 승�
   }
 });
 
+test("같은 root·브라우저·인자여도 runKey·depth·chain이 다르면 승인을 합치지 않는다", () => {
+  clearApprovals();
+  try {
+    const args = { to: "scope-run@example.com", subject: "범위" };
+    const base = { ...approvalCtx("scope-run-browser"), conversationId: "scope-run-conv" };
+    gateApproval("send_email", args, "boss", "작업", ["parent-a"], "scope-run-root", { ...base, runKey: "run-a", depth: 1 });
+    gateApproval("send_email", args, "boss", "작업", ["parent-a"], "scope-run-root", { ...base, runKey: "run-b", depth: 1 });
+    gateApproval("send_email", args, "boss", "작업", ["parent-a"], "scope-run-root", { ...base, runKey: "run-b", depth: 2 });
+    gateApproval("send_email", args, "boss", "작업", ["parent-b"], "scope-run-root", { ...base, runKey: "run-b", depth: 2 });
+    expect(pending("send_email").length).toBe(4);
+  } finally { clearApprovals(); }
+});
+
+test("허용 범위의 긴 위임 사슬도 고정 크기 scope hash로 저장·복원한다", () => {
+  clearApprovals();
+  try {
+    const chain = Array.from({ length: 64 }, (_, i) => `parent-${i}-${"x".repeat(100)}`);
+    gateApproval("send_email", { to: "long-chain@example.com" }, "boss", "작업", chain, "long-chain-root", {
+      ...approvalCtx("long-chain-browser"), runKey: "long-chain-run", depth: 64, conversationId: "long-chain-conversation",
+    });
+    const row = db.prepare("SELECT * FROM approval_requests WHERE status = 'pending' AND root_job_id = 'long-chain-root'").get() as any;
+    const raw = JSON.parse(row.execution_context);
+    expect(raw.scope).toMatch(/^[a-f0-9]{64}$/);
+    expect(decodeApprovalContext(row).chain).toEqual(chain);
+  } finally { clearApprovals(); }
+});
+
 test("완료·거부 dedupe는 다른 실행 범위의 동일 호출을 억제하지 않는다", () => {
   const args = { to: "scope-terminal@example.com", subject: "범위" };
   const ctxA = approvalCtx("scope-terminal-a");
@@ -185,6 +214,17 @@ test("실행 맥락이 없으면 승인 행을 만들지 않는다", () => {
   const out = gateApproval("send_email", { to: "x@y.z" }, "boss", "작업");
   expect(out).toContain("실행 맥락이 없습니다");
   expect(pending("send_email").length).toBe(0);
+});
+
+test("외부 브라우저 ego_run·bsk는 identity를 보장할 수 없는 승인 replay에서 fail-closed한다", () => {
+  clearApprovals();
+  try {
+    for (const tool of ["ego_run", "bsk"]) {
+      const out = gateApproval(tool, tool === "ego_run" ? { script: "cliLog('x')" } : { cmd: "status" }, "boss", "작업", [], undefined, approvalCtx(), true);
+      expect(out).toContain("동일 page identity를 보장할 수 없습니다");
+    }
+    expect((db.prepare("SELECT COUNT(*) c FROM approval_requests WHERE status = 'pending' AND tool IN ('ego_run','bsk')").get() as { c: number }).c).toBe(0);
+  } finally { clearApprovals(); }
 });
 
 test("손상된 execution_context 행 하나가 정상 신규 승인을 막지 않는다", () => {
