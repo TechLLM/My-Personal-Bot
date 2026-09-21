@@ -286,7 +286,7 @@ const BARE_FENCE_LINE = /^(`{3,}|~{3,})[ \t]*$/;
 // 걸러내는 데 쓴다 — 텔레그램 평문에 "markdown" 같은 태그가 그대로 전달된 사고의 경로다.
 const FENCE_LANG_WORD = /^(json|jsonc|json5|xml|html|svg|css|scss|sass|less|markdown|md|mdx|yaml|yml|toml|ini|conf|cfg|env|csv|tsv|sql|mysql|pgsql|sqlite|graphql|gql|http|rest|text|txt|plain|plaintext|log|diff|patch|console|terminal|shell|sh|bash|zsh|fish|powershell|ps1|bat|cmd|js|jsx|mjs|cjs|javascript|ts|tsx|typescript|node|vue|svelte|astro|java|kotlin|kt|scala|groovy|c|h|cpp|cc|cxx|hpp|c\+\+|cs|csharp|fs|fsharp|vb|go|golang|rust|rs|ruby|rb|php|swift|objc|objective-c|r|lua|perl|pl|python|py|elixir|ex|exs|erlang|haskell|hs|clojure|clj|edn|lisp|scheme|racket|dart|julia|jl|nim|zig|crystal|reason|ocaml|ml|elm|solidity|wasm|wat|asm|verilog|vhdl|tcl|awk|sed|proto|protobuf|thrift|dockerfile|makefile|cmake|ninja|bazel|nginx|regex|latex|tex|pascal|fortran|cobol|ada|matlab|mermaid|plantuml|dot|sequence|flowchart|prisma|terraform|hcl|cue|jsonnet|gradle|docker|compose|output)$/i;
 
-function cleanResult(content: string): string[] {
+function cleanResult(content: string): { text: string; heading: boolean }[] {
   const raw = String(content ?? "")
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
@@ -313,38 +313,58 @@ function cleanResult(content: string): string[] {
     .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;/gi, " ");
   const source = plain.split("\n")
-    .map((line) => line.replace(/[ \t]+/g, " ").trim().replace(/^#{1,6}\s*/, ""))
-    .filter(Boolean);
+    .map((line) => {
+      const flat = line.replace(/[ \t]+/g, " ").trim();
+      // 마크다운 제목이던 줄을 표시해 둔다 — 제목은 내용이 아니라 섹션 라벨이라
+      // 단독으로 전송되면 "미확인·한계" 같은 빈 껍데기만 나가는 사고가 된다.
+      return { text: flat.replace(/^#{1,6}\s*/, ""), heading: /^#{1,6}\s*/.test(flat) };
+    })
+    .filter((l) => l.text);
   const lines = source.flatMap((line) => {
-    if (line.length <= 260) return [line];
-    const chunks: string[] = [];
-    for (let i = 0; i < line.length; i += 260) chunks.push(line.slice(i, i + 260));
+    if (line.text.length <= 260) return [line];
+    const chunks: { text: string; heading: boolean }[] = [];
+    for (let i = 0; i < line.text.length; i += 260) chunks.push({ text: line.text.slice(i, i + 260), heading: line.heading });
     return chunks;
   });
-  return [...new Set(lines)];
+  const seen = new Set<string>();
+  return lines.filter((line) => !seen.has(line.text) && (seen.add(line.text), true));
 }
 
 export function compactResult(content: string, maxChars = 1000): string {
   const limit = Math.max(1, Math.floor(maxChars || 1000));
-  const lines = cleanResult(content);
-  if (!lines.length) return "결과 내용이 없습니다.".slice(0, limit);
-  const warningRe = /(실패|오류|에러|부분 결과|부분 완료|중단|미완료|남은 작업|미확인|미검증|확인하지 못|검증하지 못|불확실|주의|조치 필요|해야 합니다|필요합니다|다시 시도|권한|취소|거부|action required|partial|unverified|interrupted)/i;
+  const entries = cleanResult(content);
+  if (!entries.length) return "결과 내용이 없습니다.".slice(0, limit);
+  const warningRe = /(실패|오류|에러|부분 결과|부분 완료|중단|미완료|남은 작업|미확인|미검증|확인하지 못|검증하지 못|하지 못|못했|불확실|주의|조치 필요|해야 합니다|필요합니다|다시 시도|권한|취소|거부|제외|누락|부족|action required|partial|unverified|interrupted)/i;
   const chatterRe = /^(알겠습니다|요청하신 작업을 시작|작업을 시작|진행하겠습니다|확인해 보겠습니다)[.!… ]*$/i;
-  const important = lines.filter((line) => warningRe.test(line));
-  const lead = lines.filter((line) => !chatterRe.test(line) && (!important.length || !/^(완료|성공|모두 처리)/.test(line))).slice(0, important.length ? 1 : 3);
-  const selected: string[] = [];
-  for (const line of [...important, ...lead]) if (!selected.includes(line)) selected.push(line);
+  // 제목 줄은 후보에서 뺀다 — 내용 없는 제목만 선택되면 받는 사람이 빈 섹션명만 보게 된다.
+  const body = entries.filter((e) => !e.heading);
+  const important = body.filter((e) => warningRe.test(e.text));
+  const lead = body.filter((e) => !chatterRe.test(e.text) && (!important.length || !/^(완료|성공|모두 처리)/.test(e.text))).slice(0, 3);
+  const selected = new Set([...important, ...lead]);
+  // 본문 줄의 직전 섹션 제목을 기억한다 — 선택된 내용이 나갈 때 제목을 함께 붙인다.
+  const secOf = new Map<(typeof entries)[number], (typeof entries)[number] | null>();
+  let cur: (typeof entries)[number] | null = null;
+  for (const e of entries) {
+    if (e.heading) { cur = e; continue; }
+    if (!secOf.has(e)) secOf.set(e, cur);
+  }
   let out = "";
-  for (const line of selected) {
-    const next = out ? `${out}\n${line}` : line;
-    if (next.length <= limit) out = next;
-    else if (!out) out = line.slice(0, limit);
-    else if (important.includes(line)) {
-      const suffix = `\n${line}`.slice(0, limit);
+  const emittedHeads = new Set<(typeof entries)[number]>();
+  for (const e of entries) {
+    if (!selected.has(e)) continue;
+    const head = secOf.get(e) ?? null;
+    const needHead = !!head && !emittedHeads.has(head);
+    // 제목은 그 아래 내용과 한 덩어리로만 나간다 — 제목 단독 전송 금지.
+    const chunk = needHead ? `${head!.text}\n${e.text}` : e.text;
+    const next = out ? `${out}\n${chunk}` : chunk;
+    if (next.length <= limit) { out = next; if (needHead) emittedHeads.add(head!); continue; }
+    if (!out) { out = chunk.slice(0, limit); if (needHead) emittedHeads.add(head!); continue; }
+    if (important.includes(e)) {
+      const suffix = `\n${e.text}`.slice(0, limit);
       out = `${out.slice(0, Math.max(0, limit - suffix.length - 1))}…${suffix}`.slice(0, limit);
     }
   }
-  const omitted = lines.filter((line) => !selected.includes(line)).join("\n").length;
+  const omitted = entries.filter((e) => !selected.has(e) && !emittedHeads.has(e)).map((e) => e.text).join("\n").length;
   const note = omitted ? `\n(${omitted}자 이상 생략 · 전체 결과 보기)` : "";
   if (note && out.length + note.length <= limit) out += note;
   return out.slice(0, limit) || "결과 내용이 없습니다.".slice(0, limit);

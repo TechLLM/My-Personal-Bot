@@ -208,4 +208,39 @@ describe("결과 축약", () => {
     expect(normal).toContain("JSON 형식");
     expect(normal).toContain("TypeScript 파일");
   });
+
+  test("섹션 제목은 내용과 함께 나가고 빈 제목은 전송하지 않는다", () => {
+    // 실제 사고 재현 — 브리핑 보고서에서 경고 키워드에 걸린 줄과 빈 제목만 나갔다
+    const md = [
+      "## 오늘의 핵심",
+      "- 코스피 장중 회복 — 수급 지속성이 관건입니다.",
+      "- 무역협상대표 위상 격상 — 협상 준비 움직임입니다.",
+      "",
+      "## 업무 관련성",
+      "- 정책을 확인한 뒤 판단해야 합니다.",
+      "",
+      "## 미확인·한계",
+      "- 개별 기사 본문은 열람하지 못했습니다.",
+      "## 내용 없는 섹션",
+      "## 마지막",
+      "- 보통 내용입니다.",
+    ].join("\n");
+    const result = compactResult(md, 1000);
+    // 핵심 뉴스가 생략되지 않고 섹션과 함께 나간다
+    expect(result).toContain("오늘의 핵심");
+    expect(result).toContain("코스피 장중 회복");
+    expect(result).toContain("무역협상대표");
+    // 제한사항도 제목과 함께 나간다
+    expect(result).toContain("미확인·한계");
+    expect(result).toContain("열람하지 못했습니다");
+    // 내용 없는 섹션 제목은 단독으로 나가지 않는다
+    expect(result).not.toContain("내용 없는 섹션");
+  });
+
+  test("경고가 있으면 완료 선언은 앞세우지 않는다", () => {
+    const md = "## 요약\n완료했습니다\n\n## 미확인\n- 일부는 확인하지 못했습니다";
+    const result = compactResult(md, 300);
+    expect(result).toContain("확인하지 못했습니다");
+    expect(result).not.toContain("완료했습니다");
+  });
 });
