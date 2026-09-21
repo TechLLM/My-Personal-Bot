@@ -26,7 +26,7 @@ const LEGACY_BENCH_UNAVAILABLE = "legacy-bench-unavailable — 격리되지 않�
 export interface Surfaces {
   surfaces: { id: string; kind: "db" | "code"; table?: string; column?: string; glob?: string; desc: string }[];
   protected: string[];
-  limits: { cyclesPerDay: number; cycleWallClockMin: number; diffMaxLines: number; benchSamples: number; variantsPerCycle?: number };
+  limits: { cyclesPerDay: number; cycleWallClockMin: number; diffMaxLines: number; benchSamples: number; variantsPerCycle?: number; benchReps?: number };
 }
 
 export interface GoldenCheck {
@@ -428,24 +428,31 @@ function toBenchResult(samples: BenchSample[]): BenchResult {
 async function measureCandidateArms(opts: {
   candidate: Candidate; tasks: GoldenTask[]; brokerPort: number; brokerToken: string;
   evalModel: string; seed: { agents: SeedAgent[] }; fallbackModel: string;
-  tagSuffix?: string; armReceipts?: object[];
+  tagSuffix?: string; armReceipts?: object[]; reps?: number;
 }): Promise<{ baseline: BenchSample[]; candidate: BenchSample[] }> {
   const model = productionModelFor(opts.candidate, opts.fallbackModel);
   const baseline: BenchSample[] = []; const candidate: BenchSample[] = [];
   for (const task of opts.tasks) {
-    const cmp = await isolation.runIsolatedComparison({
-      sourceRoot: ROOT, mode: "production", candidate: opts.candidate, golden: task,
-      broker: { port: opts.brokerPort, token: opts.brokerToken },
-      model, evalModel: opts.evalModel, seed: opts.seed, deadlineMs: 180_000, tagSuffix: opts.tagSuffix,
-    });
-    for (const [bucket, receipt] of [[baseline, cmp.baseline], [candidate, cmp.candidate]] as const) {
-      if (!receipt) continue;
-      opts.armReceipts?.push(boundedArmReceipt(receipt)!);
-      const v = receipt.value as any;
-      bucket.push({
-        taskId: task.id, pass: !!v?.pass, latencyMs: receipt.endedAt - receipt.startedAt,
-        checks: v?.checks ?? [], error: receipt.reasonCode,
+    // eval_min은 평가자 주관이 섞여 단일 표본이 ~50% 요동한다(반복 실측: 동일 설정 2/4 vs 2/4).
+    // 반복 표본으로만 분산을 잡을 수 있다. 결정적 체크만 있는 과제는 같은 조건에서 같은
+    // 결과가 나오므로 1회로 유지해 측정 비용을 아낀다.
+    const reps = task.checks?.some((c) => c.type === "eval_min") ? Math.max(1, opts.reps ?? 1) : 1;
+    for (let rep = 0; rep < reps; rep++) {
+      const cmp = await isolation.runIsolatedComparison({
+        sourceRoot: ROOT, mode: "production", candidate: opts.candidate, golden: task,
+        broker: { port: opts.brokerPort, token: opts.brokerToken },
+        model, evalModel: opts.evalModel, seed: opts.seed, deadlineMs: 180_000,
+        tagSuffix: opts.tagSuffix && reps > 1 ? `${opts.tagSuffix}-r${rep}` : opts.tagSuffix,
       });
+      for (const [bucket, receipt] of [[baseline, cmp.baseline], [candidate, cmp.candidate]] as const) {
+        if (!receipt) continue;
+        opts.armReceipts?.push(boundedArmReceipt(receipt)!);
+        const v = receipt.value as any;
+        bucket.push({
+          taskId: task.id, pass: !!v?.pass, latencyMs: receipt.endedAt - receipt.startedAt,
+          checks: v?.checks ?? [], error: receipt.reasonCode,
+        });
+      }
     }
   }
   return { baseline, candidate };
@@ -547,10 +554,13 @@ export async function runTournament(candidatesIn: Candidate[]): Promise<Tourname
     // 브로커 핸들러가 거부한다. 전체 상한·토큰 예산은 후보 수에 비례해 늘린다.
     const declaredTools = [...tasks, ...loadGoldenTasks(true).filter((t) => t.holdout && !t.env && !t.approvals)]
       .flatMap((t) => (t.tools ?? []).filter(sandboxToolOk));
+    // eval_min 과제는 표본 반복(benchReps)이 붙는다 — 실제 실행 수만큼 팔별 예산도 늘린다
+    const reps = Math.max(1, Math.min(5, surfaces.limits.benchReps ?? 1));
+    const runsPerArm = tasks.reduce((n, t) => n + (t.checks?.some((c) => c.type === "eval_min") ? reps : 1), 0);
     const broker = await startBroker({
       models: allowed, tools: [...new Set(["web_search", ...declaredTools])],
-      maxCalls: tasks.length * 60 * alive.length, maxCallsPerTag: tasks.length * 30,
-      maxToolCallsPerTag: tasks.length * 5, maxEstTokens: 300_000 * alive.length,
+      maxCalls: runsPerArm * 60 * alive.length, maxCallsPerTag: runsPerArm * 30,
+      maxToolCallsPerTag: runsPerArm * 5, maxEstTokens: 300_000 * alive.length,
     });
     const armReceipts: object[] = [];
     try {
@@ -560,7 +570,7 @@ export async function runTournament(candidatesIn: Candidate[]): Promise<Tourname
       for (const { i, c } of alive) {
         const pair = await measureCandidateArms({
           candidate: c, tasks, brokerPort: broker.port, brokerToken: broker.token,
-          evalModel: evalModelId, seed, fallbackModel: fallback, tagSuffix: `-${i}`, armReceipts,
+          evalModel: evalModelId, seed, fallbackModel: fallback, tagSuffix: `-${i}`, armReceipts, reps,
         });
         baselineSamples.push(...pair.baseline);
         const measured = toBenchResult(pair.candidate);
@@ -591,7 +601,7 @@ export async function runTournament(candidatesIn: Candidate[]): Promise<Tourname
         if (holdoutTasks.length) {
           const pair = await measureCandidateArms({
             candidate: winCandidate, tasks: holdoutTasks, brokerPort: broker.port, brokerToken: broker.token,
-            evalModel: evalModelId, seed, fallbackModel: fallback, tagSuffix: "-h", armReceipts,
+            evalModel: evalModelId, seed, fallbackModel: fallback, tagSuffix: "-h", armReceipts, reps,
           });
           const hb = toBenchResult(pair.baseline), hc = toBenchResult(pair.candidate);
           holdout = { baseline: hb, candidate: hc };
