@@ -145,3 +145,78 @@ test("플랜 미지원은 그 모델만 오래 건너뛴다", () => {
   expect(cd.key).toBe("zai/flashx");   // 다른 모델은 플랜에 있을 수 있으므로 프로바이더를 통째로 막지 않는다
   expect(cd.ms).toBe(3_600_000);
 });
+
+// --- 콘텐츠 정책 거부 (tasks/browser-reliability.md) ---
+// 실측 2026-09-20~21: zai가 400 code 1301을 내자 폴백 대상이 아니어서 그 자리에서 죽었다.
+// 정기 스킬 4개(메일조회·메인현황·browser-skill·뉴스브리핑)가 같은 시각에 사흘간 12번 전부 실패했다.
+
+test("콘텐츠 정책 거부(1301)는 다른 프로바이더로 폴백한다", async () => {
+  setSetting("custom_providers", JSON.stringify([
+    { id: "t-strict", baseUrl: "http://strict.test/v1", apiKey: "k", models: ["m"] },
+    { id: "t-loose", baseUrl: "http://loose.test/v1", apiKey: "k", models: ["m"] },
+  ]));
+  setSetting("fallback_chain", "t-strict → t-loose");
+  const calls = { strict: 0, loose: 0 };
+  const saved = globalThis.fetch;
+  globalThis.fetch = (async (url: unknown) => {
+    if (String(url).includes("strict.test")) {
+      calls.strict++;
+      return new Response('{"contentFilter":[{"level":1,"role":"assistant"}],"error":{"code":"1301","message":"System detected potentially unsafe or sensitive content in input or generation."}}', { status: 400 });
+    }
+    calls.loose++;
+    return new Response(JSON.stringify({ choices: [{ message: { content: "통과한 응답" } }] }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as unknown as typeof fetch;
+  try {
+    const { endpoint, model } = resolveModel("t-strict/m");
+    const r = await chatOnce(endpoint, model, [{ role: "user", content: "뉴스 요약" }]);
+    expect(r.content).toBe("통과한 응답");
+    expect(r.fallbackFrom).toBe("t-strict/m");
+    expect(calls.strict).toBe(1); // 400은 백오프 재시도 없이 바로 폴백
+
+    // 거부된 것은 그 입력이지 모델이 아니다 — 다음 요청에서 같은 모델을 다시 쓴다
+    const second = await chatOnce(endpoint, model, [{ role: "user", content: "다른 내용" }]);
+    expect(second.content).toBe("통과한 응답");
+    expect(calls.strict).toBe(2); // 쿨다운에 걸려 건너뛰었다면 1에 머문다
+  } finally {
+    globalThis.fetch = saved;
+    setSetting("custom_providers", "[]");
+    setSetting("fallback_chain", "");
+  }
+});
+
+test("콘텐츠 거부는 쿨다운을 걸지 않는다", () => {
+  const cd = cooldownFor("zai", "zai/glm-5.3-flash", new Error('오류 400: {"contentFilter":[{"level":1}],"error":{"code":"1301"}}'));
+  expect(cd.ms).toBe(0);
+});
+
+// 400 전체를 폴백 대상으로 열면 잘못된 요청까지 모든 프로바이더를 헛되이 두드린다
+test("내용과 무관한 400은 폴백하지 않고 즉시 실패한다", async () => {
+  setSetting("custom_providers", JSON.stringify([
+    { id: "t-bad", baseUrl: "http://bad.test/v1", apiKey: "k", models: ["m"] },
+    { id: "t-spare", baseUrl: "http://spare.test/v1", apiKey: "k", models: ["m"] },
+  ]));
+  setSetting("fallback_chain", "t-bad → t-spare");
+  const calls = { spare: 0 };
+  const saved = globalThis.fetch;
+  globalThis.fetch = (async (url: unknown) => {
+    if (String(url).includes("bad.test"))
+      return new Response('{"error":{"message":"Invalid value for parameter max_tokens"}}', { status: 400 });
+    calls.spare++;
+    return new Response(JSON.stringify({ choices: [{ message: { content: "쓰이면 안 됨" } }] }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as unknown as typeof fetch;
+  try {
+    const { endpoint, model } = resolveModel("t-bad/m");
+    await expect(chatOnce(endpoint, model, [{ role: "user", content: "안녕" }])).rejects.toThrow(/400/);
+    expect(calls.spare).toBe(0);
+  } finally {
+    globalThis.fetch = saved;
+    setSetting("custom_providers", "[]");
+    setSetting("fallback_chain", "");
+  }
+});
+
+test("폴백까지 모두 거부되면 콘텐츠 정책이라고 알려준다", () => {
+  const msg = friendlyProviderError('오류 400: {"contentFilter":[{"level":1,"role":"assistant"}],"error":{"code":"1301","message":"System detected potentially unsafe or sensitive content"}}');
+  expect(msg).toContain("콘텐츠 정책");
+  expect(msg).toContain("원문:");
+});

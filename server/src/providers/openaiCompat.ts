@@ -35,7 +35,12 @@ function isTransientErr(e: unknown): boolean {
 function isAuthErr(e: unknown): boolean {
   return /\b(401|403)\b|token_expired|invalid.?api.?key|unauthorized|authentication token/i.test(String((e as Error)?.message ?? e));
 }
-const shouldFallback = (e: unknown) => isTransientErr(e) || isAuthErr(e);
+// 콘텐츠 정책 거부(z.ai 1301 등)는 재시도로 풀리지 않지만 정책이 프로바이더마다 달라 다른 곳에서는 통과한다.
+// 실측 2026-09-20~21: zai가 1301을 내자 폴백 없이 그 자리에서 죽어 정기 스킬 4개가 사흘간 12번 전부 실패했다.
+function isContentFilterErr(e: unknown): boolean {
+  return /content.?filter|\b1301\b|content policy|unsafe or sensitive/i.test(String((e as Error)?.message ?? e));
+}
+const shouldFallback = (e: unknown) => isTransientErr(e) || isAuthErr(e) || isContentFilterErr(e);
 
 // 프로바이더 원문 오류(JSON 덩어리)를 원인과 조치가 보이는 한 줄로 — 폴백까지 모두 실패해 사용자에게 갈 때 쓴다
 // ("에이전트 오류: 오류 401: {"error":{...}}"만 남아 실패 이유를 알 수 없다는 보고가 있었다)
@@ -43,6 +48,7 @@ export function friendlyProviderError(msg: string): string {
   if (/\b1311\b|subscription plan|does not (yet )?include/i.test(msg)) return `현재 구독 플랜에 포함되지 않은 모델이라 호출이 거부됐습니다 — 설정 > 프로바이더에서 플랜에 맞는 모델로 바꾸세요 (원문: ${msg.slice(0, 200)})`;
   if (/insufficient|balance|1113|CreditsError/i.test(msg)) return `모델 제공자 잔액이 부족해 호출이 거부됐습니다 — 결제 후 다시 시도하세요 (원문: ${msg.slice(0, 200)})`;
   if (isAuthErr(msg)) return `모델 제공자 인증이 만료됐습니다 — 설정 > 프로바이더에서 재인증하세요 (원문: ${msg.slice(0, 200)})`;
+  if (isContentFilterErr(msg)) return `모델 제공자가 콘텐츠 정책으로 거부했습니다 — 폴백 체인의 모든 모델이 같은 판정을 내렸습니다. 요청 내용을 바꾸거나 다른 계열의 프로바이더를 체인에 넣으세요 (원문: ${msg.slice(0, 200)})`;
   if (/\b429\b|rate.?limit|1302/i.test(msg)) return `모델 제공자 요청 한도에 걸렸습니다 — 잠시 후 다시 시도하거나 다른 모델을 배정하세요 (원문: ${msg.slice(0, 200)})`;
   return msg;
 }
@@ -69,6 +75,9 @@ const coolingDown = (key: string) => (skipUntil.get(key) ?? 0) > Date.now();
 // 실패한 모델을 건너뛸 기간·대상을 정한다. 잔액 오류면 엔드포인트 전체를 오래 건너뛴다
 export function cooldownFor(endpointId: string, modelKey: string, e: unknown): { key: string; ms: number } {
   if (isCreditsErr(e)) return { key: endpointId, ms: PERM_COOLDOWN_MS };
+  // 콘텐츠 거부는 모델이 못 쓰게 된 게 아니라 이번 입력이 거부된 것이다. 건너뛰게 두면
+  // 멀쩡한 모델이 다음 요청에서도 빠진다 — 폴백만 하고 쿨다운은 걸지 않는다.
+  if (isContentFilterErr(e)) return { key: modelKey, ms: 0 };
   return { key: modelKey, ms: isPermanentModelErr(e) ? PERM_COOLDOWN_MS : FAIL_COOLDOWN_MS };
 }
 
