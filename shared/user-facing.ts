@@ -279,14 +279,39 @@ export function describeApproval(tool: string, args: Record<string, unknown>): A
   };
 }
 
+// 코드펜스 한 줄 — ```lang · ``` lang · ~~~lang · ````lang · 닫는 펜스를 모두 포함한다.
+const FENCE_LINE = /^(`{3,}|~{3,})[ \t]*[\w+#.-]*[ \t]*$/;
+const BARE_FENCE_LINE = /^(`{3,}|~{3,})[ \t]*$/;
+// 모델이 코드펜스에 붙이는 언어 식별자. 펜스가 끊겨 언어명만 단독 줄로 남았을 때
+// 걸러내는 데 쓴다 — 텔레그램 평문에 "markdown" 같은 태그가 그대로 전달된 사고의 경로다.
+const FENCE_LANG_WORD = /^(json|jsonc|json5|xml|html|svg|css|scss|sass|less|markdown|md|mdx|yaml|yml|toml|ini|conf|cfg|env|csv|tsv|sql|mysql|pgsql|sqlite|graphql|gql|http|rest|text|txt|plain|plaintext|log|diff|patch|console|terminal|shell|sh|bash|zsh|fish|powershell|ps1|bat|cmd|js|jsx|mjs|cjs|javascript|ts|tsx|typescript|node|vue|svelte|astro|java|kotlin|kt|scala|groovy|c|h|cpp|cc|cxx|hpp|c\+\+|cs|csharp|fs|fsharp|vb|go|golang|rust|rs|ruby|rb|php|swift|objc|objective-c|r|lua|perl|pl|python|py|elixir|ex|exs|erlang|haskell|hs|clojure|clj|edn|lisp|scheme|racket|dart|julia|jl|nim|zig|crystal|reason|ocaml|ml|elm|solidity|wasm|wat|asm|verilog|vhdl|tcl|awk|sed|proto|protobuf|thrift|dockerfile|makefile|cmake|ninja|bazel|nginx|regex|latex|tex|pascal|fortran|cobol|ada|matlab|mermaid|plantuml|dot|sequence|flowchart|prisma|terraform|hcl|cue|jsonnet|gradle|docker|compose|output)$/i;
+
 function cleanResult(content: string): string[] {
-  const plain = String(content ?? "")
-    .replace(/```[\w-]*\n?/g, "")
+  const raw = String(content ?? "")
     .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
     .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/gi, " ")
     .replace(/\r/g, "");
+  // 펜스는 줄 단위로 지운다 — "``` json"처럼 공백이 끼거나 "```\njson"처럼 언어가
+  // 다음 줄로 밀린 형태, ~~~·4개 이상 백틱 펜스까지 정규식 하나로는 못 잡는다.
+  const kept: string[] = [];
+  let bareFence = false;
+  for (const line of raw.split("\n")) {
+    const t = line.trim();
+    if (FENCE_LINE.test(t)) { bareFence = BARE_FENCE_LINE.test(t); continue; }
+    if (!t) { kept.push(line); continue; }
+    // 언어 없는 펜스 바로 다음의 언어명 단독 줄은 펜스의 잔여물로 같이 지운다.
+    if (bareFence && FENCE_LANG_WORD.test(t)) { bareFence = false; continue; }
+    bareFence = false;
+    kept.push(line);
+  }
+  // 본문 첫 콘텐츠 줄이 언어 라벨 하나뿐이면 펜스가 끊긴 잔여물과 같다고 본다.
+  const firstContent = kept.findIndex((l) => l.trim());
+  if (firstContent >= 0 && FENCE_LANG_WORD.test(kept[firstContent].trim())) kept.splice(firstContent, 1);
+  const plain = kept.join("\n")
+    // 다른 글자와 같은 줄에 섞인 펜스 잔여물도 걷어낸다.
+    .replace(/(`{3,}|~{3,})[ \t]*[\w+#.-]*\n?/g, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ");
   const source = plain.split("\n")
     .map((line) => line.replace(/[ \t]+/g, " ").trim().replace(/^#{1,6}\s*/, ""))
     .filter(Boolean);

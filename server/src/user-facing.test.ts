@@ -173,4 +173,39 @@ describe("결과 축약", () => {
   test("빈 결과에 안내를 제공한다", () => {
     expect(compactResult("   \n```\n```", 100)).toBe("결과 내용이 없습니다.");
   });
+
+  test("코드펜스 언어 태그가 어떤 형태로 와도 전송 문구에 남지 않는다", () => {
+    for (const lang of ["markdown", "typescript", "json", "bash", "python"]) {
+      const result = compactResult(`## 요약\n\`\`\`${lang}\n내용입니다\n\`\`\``, 500);
+      expect(result).toContain("내용입니다");
+      expect(result).not.toContain(lang);
+      expect(result).not.toContain("```");
+    }
+  });
+
+  test("공백·줄바꿈으로 끊긴 펜스와 물결표·4개 백틱 펜스의 언어 태그도 지운다", () => {
+    for (const raw of [
+      "``` json\n내용입니다\n```",
+      "```\njson\n내용입니다\n```",
+      "```\n\nmarkdown\n내용입니다\n```",
+      "~~~typescript\n내용입니다\n~~~",
+      "````markdown\n내용입니다\n````",
+      "```c++\n내용입니다\n```",
+    ]) {
+      const result = compactResult(`도입 문장\n${raw}\n마무리 문장`, 500);
+      expect(result).toContain("내용입니다");
+      expect(result).not.toContain("```");
+      expect(result).not.toContain("~~~");
+      expect(result).not.toMatch(/^(json|markdown|typescript|c\+\+)$/im);
+    }
+  });
+
+  test("본문 첫 줄의 언어 라벨만 지우고 일반 문장의 언어 언급은 보존한다", () => {
+    const labeled = compactResult("markdown\n## 요약\n내용입니다", 500);
+    expect(labeled).not.toMatch(/^markdown$/m);
+    expect(labeled).toContain("내용입니다");
+    const normal = compactResult("JSON 형식으로 저장했습니다\nTypeScript 파일을 수정했습니다", 500);
+    expect(normal).toContain("JSON 형식");
+    expect(normal).toContain("TypeScript 파일");
+  });
 });
