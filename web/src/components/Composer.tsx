@@ -5,6 +5,7 @@ import { mybotFetch, type Model } from "../api";
 import { X } from "lucide-react";
 
 export type Mode = "auto" | "think" | "deepsearch" | "image" | "team";
+export type TaskMode = "default" | "readonly" | "guard";
 
 export interface Persona { id: string; name: string; prompt: string; avatar: string | null; builtin: number }
 
@@ -19,6 +20,7 @@ export function Composer({
   streaming,
   queued,
   onRemoveQueued,
+  onSteer,
   personas,
   personaId,
   onPersonaChange,
@@ -27,11 +29,12 @@ export function Composer({
   models: Model[];
   model: string;
   onModelChange: (id: string) => void;
-  onSend: (text: string, mode: Mode, attachments: Attachment[]) => void;
+  onSend: (text: string, mode: Mode, attachments: Attachment[], taskMode?: TaskMode) => void;
   onStop: () => void;
   streaming: boolean;
-  queued: { text: string; mode: Mode; attachments: Attachment[] }[];
+  queued: { text: string; mode: Mode; attachments: Attachment[]; taskMode?: TaskMode }[];
   onRemoveQueued: (i: number) => void;
+  onSteer?: (i: number) => void;
   personas: Persona[];
   personaId: string;
   onPersonaChange: (id: string) => void;
@@ -39,6 +42,7 @@ export function Composer({
 }) {
   const [text, setText] = useState("");
   const [mode, setMode] = useState<Mode>("auto");
+  const [taskMode, setTaskMode] = useState<TaskMode>("default");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [listening, setListening] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -71,7 +75,7 @@ export function Composer({
   const send = () => {
     const t = text.trim();
     if (!t && !attachments.length) return; // 스트리밍 중이면 App의 대기열로 들어가 응답 후 자동 전송됨
-    onSend(t, mode, attachments);
+    onSend(t, mode, attachments, taskMode);
     setText("");
     setAttachments([]);
     if (ref.current) ref.current.style.height = "auto";
@@ -132,6 +136,11 @@ export function Composer({
             <div key={i} className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 py-1 pl-3 pr-1 text-xs text-stone-600">
               <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-500" />
               <span className="min-w-0 flex-1 truncate"><span className="text-amber-700">대기 중</span> {q.text}</span>
+              {onSteer && (
+                <button onClick={() => onSteer(i)} className="shrink-0 rounded-lg bg-amber-200 px-2 py-1 text-2xs text-amber-800 hover:bg-amber-300" title="대기하지 않고 지금 실행 중인 작업에 지시를 주입">
+                  지금 지시
+                </button>
+              )}
               <button onClick={() => onRemoveQueued(i)} className="grid size-8 shrink-0 place-items-center rounded-lg text-stone-400 hover:bg-amber-100 hover:text-stone-700" title="대기열에서 제거"><X size={14} /></button>
             </div>
           ))}
@@ -199,6 +208,16 @@ export function Composer({
             {personas.map((p) => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
+          </select>
+          <select
+            className={`h-9 max-w-[110px] shrink-0 rounded-full pl-3 pr-2 text-xs outline-none md:h-8 ${taskMode !== "default" ? "bg-red-100 text-red-700" : "bg-stone-100 text-stone-700 hover:bg-stone-200"}`}
+            value={taskMode}
+            onChange={(e) => setTaskMode(e.target.value as TaskMode)}
+            title="작업 권한 — 읽기 전용: 조회·읽기 도구만 허용 / 승인 강화: 읽기 외 모든 도구에 승인 팝업"
+          >
+            <option value="default">권한 기본</option>
+            <option value="readonly">읽기 전용</option>
+            <option value="guard">승인 강화</option>
           </select>
           {chip("team", "팀", "bg-amber-600 text-white")}
           {chip("deepsearch", "DeepSearch", "bg-sky-600 text-white")}

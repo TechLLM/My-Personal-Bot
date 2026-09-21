@@ -14,3 +14,4 @@ server/data/*.key
 server/data/*.jsonl
 server/.certs/
 evolve/candidates/
+evolve/updates-outbox/

@@ -1,5 +1,7 @@
 import { Hono } from "hono";
 import { db, uid, now, getSetting } from "./db";
+import { describeApproval } from "../../shared/user-facing";
+import { currentRootJobId, finalizeCommandIfReady } from "./command-delivery";
 
 // ─── 승인 경계 (그록 Auto Review 대응) ───
 // 위험한 액션(외부 발신·삭제·결제 류)은 실행 전 사용자 승인을 받는다.
@@ -77,8 +79,8 @@ const TOOL_ERROR_RE = /^(오류|실행 오류|도구 오류|브라우저 오류|
 export const looksLikeToolError = (result: string) => TOOL_ERROR_RE.test(result.trim());
 
 // 도구 실행 전 호출 — 승인 필요면 요청을 만들고 안내 문자열 반환, 아니면 null
-export function gateApproval(tool: string, args: Record<string, unknown>, agentId: string | null, resumeTask: string, chain?: string[]): string | null {
-  let required = approvalDecision(tool, args) === "require";
+export function gateApproval(tool: string, args: Record<string, unknown>, agentId: string | null, resumeTask: string, chain?: string[], explicitRootJobId?: string, forceRequire = false): string | null {
+  let required = forceRequire || approvalDecision(tool, args) === "require";
   // A6/C7 — 봇 생성은 정원 내면 승인 면제(팀장 포함). 전체 정원(agent_cap_total, 기본 20)
   // 초과분만 승인 대상. 팀장의 max_children 한도는 도구 내부에서 거부하므로 여기선 보지 않는다.
   if (!required && tool === "agent_create") {
@@ -92,9 +94,10 @@ export function gateApproval(tool: string, args: Record<string, unknown>, agentI
   if (tool === "agent_create" && !prospectiveCreateCount(args))
     return '오류: 생성할 봇 이름이 없습니다 — {"name":"메일분석봇","role":"20년 경력의 메일 분석 시니어"} 형식 또는 {"bots":[{"name":"봇1","role":"..."},{"name":"봇2","role":"..."}]} 배치 형식으로 호출하세요';
   const argsJson = canonicalArgs(args);
+  const rootJobId = explicitRootJobId ?? currentRootJobId();
   // 최근에 이미 승인·실행된 동일 호출 — 승인 재개 봇의 재시도가 같은 팝업을 반복해 띄우는 것을 차단.
   // 재실행은 하지 않고 이전 실행 결과를 그대로 돌려준다 (비멱등 도구의 이중 실행 방지).
-  const done = db.prepare("SELECT result FROM approval_requests WHERE status = 'approved' AND tool = ? AND agent_id IS ? AND args = ? AND resolved_at > ? ORDER BY resolved_at DESC LIMIT 1")
+  const done = db.prepare("SELECT result FROM approval_requests WHERE status = 'approved' AND result IS NOT NULL AND tool = ? AND agent_id IS ? AND args = ? AND resolved_at > ? ORDER BY resolved_at DESC LIMIT 1")
     .get(tool, agentId ?? null, argsJson, now() - 10 * 60_000) as { result: string | null } | undefined;
   if (done && !(done.result ?? "").startsWith("실행 오류") && !deleteTargetStillExists(tool, args)) {
     const res = done.result ?? "";
@@ -123,14 +126,16 @@ export function gateApproval(tool: string, args: Record<string, unknown>, agentI
   // 봇마다 5~7건씩 팝업으로 쌓였던 사고(2026-09-18) 방지. 요청한 봇이 달라도 대상이 같으면 교체한다
   if (tool === "agent_update") {
     const target = String(args.name ?? args.to ?? args.agent ?? args.target ?? args.bot ?? "");
-    if (target) db.prepare("UPDATE approval_requests SET status = 'expired', result = '같은 봇에 대한 새 수정 요청으로 대체됨', resolved_at = ? WHERE status = 'pending' AND tool = 'agent_update' AND args != ? AND COALESCE(json_extract(args, '$.name'), json_extract(args, '$.to'), json_extract(args, '$.agent'), json_extract(args, '$.target'), json_extract(args, '$.bot')) = ?")
-      .run(now(), argsJson, target);
+    if (target) db.prepare("UPDATE approval_requests SET status = 'expired', result = '같은 봇에 대한 새 수정 요청으로 대체됨', resolved_at = ? WHERE status = 'pending' AND tool = 'agent_update' AND root_job_id IS ? AND args != ? AND COALESCE(json_extract(args, '$.name'), json_extract(args, '$.to'), json_extract(args, '$.agent'), json_extract(args, '$.target'), json_extract(args, '$.bot')) = ?")
+      .run(now(), rootJobId, argsJson, target);
   }
-  const dup = db.prepare("SELECT id FROM approval_requests WHERE status = 'pending' AND tool = ? AND agent_id IS ? AND args = ?").get(tool, agentId ?? null, argsJson) as any;
+  const dup = db.prepare("SELECT id FROM approval_requests WHERE status = 'pending' AND tool = ? AND agent_id IS ? AND args = ? AND root_job_id IS ?").get(tool, agentId ?? null, argsJson, rootJobId) as any;
   if (!dup) {
     const summary = summarizeArgs(tool, args);
-    db.prepare("INSERT INTO approval_requests (id, tool, args, summary, agent_id, resume, status, created_at, chain) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)")
-      .run(uid(), tool, argsJson, summary, agentId ?? null, resumeTask.slice(0, 500), now(), chain?.length ? JSON.stringify(chain) : null);
+    db.prepare("INSERT INTO approval_requests (id, tool, args, summary, agent_id, resume, status, created_at, chain, root_job_id) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)")
+      .run(uid(), tool, argsJson, summary, agentId ?? null, resumeTask.slice(0, 500), now(), chain?.length ? JSON.stringify(chain) : null, rootJobId);
+    const root = rootJobId;
+    if (root) void import("./command-delivery").then(({ deliverTelegramActionNeeded }) => deliverTelegramActionNeeded(root));
   }
   return `이 작업(${tool})은 사용자 승인이 필요합니다 — 화면의 승인 팝업에서 승인되면 자동으로 실행되고 작업이 이어집니다. 사용자에게 승인을 기다리고 있다고 알리고, 다른 작업으로 진행하세요. 같은 도구를 다시 호출해 재시도하지 마세요.`;
 }
@@ -193,7 +198,13 @@ export function dispatchAgentMessage(msgId: string) {
     if (!claimed.changes) return;
     const { getAgent, runAgentDetached } = await import("./team");
     const target = getAgent(msg.to_agent_id);
-    if (!target) { db.prepare("UPDATE agent_messages SET status = 'failed', reply = '봇을 찾을 수 없음', done_at = ? WHERE id = ?").run(now(), msgId); return; }
+    if (!target) {
+      const failure = "봇을 찾을 수 없음";
+      db.prepare("UPDATE agent_messages SET status = 'failed', reply = ?, done_at = ? WHERE id = ?").run(failure, now(), msgId);
+      const { childCommandFinished } = await import("./command-delivery");
+      await childCommandFinished(msg.root_job_id, `message:${msgId}`, failure, msg.to_agent_id);
+      return;
+    }
     const sender = msg.from_agent_id ? getAgent(msg.from_agent_id) : null;
     // 메시지 사슬 = 보낸 봇까지의 상위 봇 id. 받는 봇은 사슬의 봇에게 되돌아 지시·메시지를 보낼 수 없다
     let chain: string[] = [];
@@ -206,9 +217,8 @@ export function dispatchAgentMessage(msgId: string) {
       replyTo: sender,
       chain,
       verifyIntent: false, // 메시지 본문은 보고·알림 — 지시-실측 검증 대상이 아님 (보고 속 단어를 지시로 오독해 반대 실행을 강제하는 사고 방지)
-      onDone: (state) => {
-        db.prepare("UPDATE agent_messages SET status = ?, reply = ?, done_at = ? WHERE id = ?")
-          .run(state.status === "done" ? "done" : "failed", (state.result?.trim() || "(결과 없음)").slice(0, 4000), now(), msgId);
+      rootJobId: msg.root_job_id,
+      onDone: async (state) => {
         // 회신을 발신 봇이 실제로 받아 처리하게 재실행 — 세션에 기록만 하면 아무도 읽지 않는 데드레터가 됨
         // 재실행 사슬에 회신한 봇을 넣어, 회신에 다시 메시지로 답하는 보고-회신 핑퐁을 구조적으로 막는다
         // (추가 안전장치: 봇 쌍 메시지 10건/30분 + 봇별 실행 15회/시간 상한)
@@ -220,30 +230,53 @@ export function dispatchAgentMessage(msgId: string) {
             sessionTask: msg.content,
             chain: [...chain.filter((id) => id !== sender.id), target.id],
             verifyIntent: false, // 회신 전달은 지시가 아님 — 지시-실측 검증 대상에서 제외
+            rootJobId: msg.root_job_id,
           });
         }
+        db.prepare("UPDATE agent_messages SET status = ?, reply = ?, done_at = ? WHERE id = ?")
+          .run(state.status === "done" ? "done" : "failed", (state.result?.trim() || "(결과 없음)").slice(0, 4000), now(), msgId);
       },
     });
-  })().catch(() => {});
+  })().catch(async (e) => {
+    const failure = `메시지 처리 실패: ${String((e as Error).message ?? e).slice(0, 500)}`;
+    const msg = db.prepare("SELECT * FROM agent_messages WHERE id = ?").get(msgId) as any;
+    if (!msg) return;
+    db.prepare("UPDATE agent_messages SET status = 'failed', reply = ?, done_at = ? WHERE id = ? AND status IN ('pending','processing')")
+      .run(failure, now(), msgId);
+    const { childCommandFinished } = await import("./command-delivery");
+    await childCommandFinished(msg.root_job_id, `message:${msgId}`, failure, msg.to_agent_id);
+  });
 }
 
 // ─── 승인 API ───
 
 export const approvalsRoute = new Hono()
   .get("/", (c) => c.json({
-    requests: db.prepare("SELECT r.*, a.name agent_name FROM approval_requests r LEFT JOIN agents a ON a.id = r.agent_id WHERE r.status = 'pending' ORDER BY r.created_at").all(),
+    requests: (db.prepare("SELECT r.*, a.name agent_name FROM approval_requests r LEFT JOIN agents a ON a.id = r.agent_id WHERE r.status = 'pending' ORDER BY r.created_at").all() as any[]).map((r) => {
+      let args: Record<string, unknown> = {};
+      try { args = JSON.parse(r.args ?? "{}"); } catch {}
+      const p = describeApproval(r.tool, args);
+      return { id: r.id, tool: r.tool, agent_name: r.agent_name, created_at: r.created_at, ...p, summary: p.summary };
+    }),
     rules: db.prepare("SELECT * FROM approval_rules ORDER BY created_at").all(),
   }))
   .post("/:id/approve", async (c) => {
     const req = db.prepare("SELECT * FROM approval_requests WHERE id = ? AND status = 'pending'").get(c.req.param("id")) as any;
     if (!req) return c.json({ error: "요청 없음 또는 이미 처리됨" }, 404);
     const b = await c.req.json().catch(() => ({})) as { always?: boolean };
-    if (b.always) {
-      // 항상 허용 → 이 도구명에 allow 규칙 추가 (require 규칙이 있어도 require가 우선하므로 해당 규칙 삭제)
-      db.prepare("INSERT INTO approval_rules (id, pattern, action, created_at) VALUES (?, ?, 'allow', ?)").run(uid(), `^${req.tool.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, now());
-      db.prepare("DELETE FROM approval_rules WHERE action = 'require' AND pattern = ?").run(`^${req.tool}$`);
-    }
-    db.prepare("UPDATE approval_requests SET status = 'approved', resolved_at = ? WHERE id = ?").run(now(), req.id);
+    const pattern = `^${String(req.tool).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
+    // stale 탭이 본문 파싱을 기다리는 동안 다른 탭이 먼저 처리할 수 있다. CAS와 영구 규칙 변경을
+    // 한 트랜잭션에 묶어 실제 처리 소유권을 얻은 요청만 allow 규칙을 만들게 한다.
+    const claimed = db.transaction(() => {
+      const changed = db.prepare("UPDATE approval_requests SET status = 'executing', resolved_at = ? WHERE id = ? AND status = 'pending'").run(now(), req.id);
+      if (!changed.changes) return false;
+      if (b.always) {
+        db.prepare("INSERT INTO approval_rules (id, pattern, action, created_at) VALUES (?, ?, 'allow', ?)").run(uid(), pattern, now());
+        db.prepare("DELETE FROM approval_rules WHERE action = 'require' AND pattern = ?").run(pattern);
+      }
+      return true;
+    })();
+    if (!claimed) return c.json({ error: "이미 처리됨" }, 409);
     // 저장된 도구를 실제로 실행한 뒤 봇의 원래 작업을 재개
     executeApproved(req).catch((e) => console.error("[mybot] 승인 작업 실행 실패:", (e as Error).message));
     return c.json({ ok: true });
@@ -252,10 +285,21 @@ export const approvalsRoute = new Hono()
     const req = db.prepare("SELECT * FROM approval_requests WHERE id = ? AND status = 'pending'").get(c.req.param("id")) as any;
     if (!req) return c.json({ error: "요청 없음 또는 이미 처리됨" }, 404);
     const b = await c.req.json().catch(() => ({})) as { always?: boolean };
-    if (b.always)
-      db.prepare("INSERT INTO approval_rules (id, pattern, action, created_at) VALUES (?, ?, 'require', ?)").run(uid(), `^${req.tool.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, now());
-    db.prepare("UPDATE approval_requests SET status = 'denied', resolved_at = ? WHERE id = ?").run(now(), req.id);
-    notifyDenied(req).catch(() => {});
+    const pattern = `^${String(req.tool).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
+    const claimed = db.transaction(() => {
+      // 거부도 재개 run 등록이 끝날 때까지 blocker인 executing 상태를 유지한다.
+      const changed = db.prepare("UPDATE approval_requests SET status = 'executing', resolved_at = ? WHERE id = ? AND status = 'pending'").run(now(), req.id);
+      if (!changed.changes) return false;
+      if (b.always)
+        db.prepare("INSERT INTO approval_rules (id, pattern, action, created_at) VALUES (?, ?, 'require', ?)").run(uid(), pattern, now());
+      return true;
+    })();
+    if (!claimed) return c.json({ error: "이미 처리됨" }, 409);
+    try {
+      await notifyDenied(req);
+    } catch (e) {
+      await failApproval(req, `승인 거부 처리 실패: ${String((e as Error).message ?? e)}`);
+    }
     return c.json({ ok: true });
   })
   .post("/rules", async (c) => {
@@ -294,56 +338,132 @@ export const approvalsRoute = new Hono()
     runSql += " ORDER BY r.created_at DESC LIMIT 200";
     const runs = db.prepare(runSql).all(...(runArgs as any[]));
     const apArgs: unknown[] = [since];
-    let apSql = `SELECT r.id, r.agent_id, a.name agent_name, r.tool, r.summary, r.status, r.created_at, r.resolved_at
+    let apSql = `SELECT r.id, r.agent_id, a.name agent_name, r.tool, r.args, r.status, r.created_at, r.resolved_at
       FROM approval_requests r LEFT JOIN agents a ON a.id = r.agent_id WHERE r.created_at > ?`;
     if (agentId) { apSql += " AND r.agent_id = ?"; apArgs.push(agentId); }
     if (tool) { apSql += " AND r.tool = ?"; apArgs.push(tool); }
     apSql += " ORDER BY r.created_at DESC LIMIT 200";
-    const approvals = db.prepare(apSql).all(...(apArgs as any[]));
+    const approvals = (db.prepare(apSql).all(...(apArgs as any[])) as any[]).map((r) => {
+      let args: Record<string, unknown> = {};
+      try { args = JSON.parse(r.args ?? "{}"); } catch {}
+      const presentation = describeApproval(r.tool, args);
+      // 실행용 원본 args와 과거 기술 요약은 감사 API로 내보내지 않는다.
+      return {
+        id: r.id,
+        agent_id: r.agent_id,
+        agent_name: r.agent_name,
+        tool: r.tool,
+        status: r.status,
+        created_at: r.created_at,
+        resolved_at: r.resolved_at,
+        ...presentation,
+      };
+    });
     return c.json({ runs, approvals });
   });
 
+// 같은 프로세스에서 동일 승인 실행이 겹치는 것을 차단한다. DB가 이미 executing인 UI 경로도
+// 있으므로 status만으로 실행 소유권을 구분할 수 없다.
+const executingApprovalIds = new Set<string>();
+
 // 승인된 도구를 실제 실행 → 결과 저장 → 봇 작업 재개
 export async function executeApproved(req: any) {
-  const { callBuiltin } = await import("./team");
-  const { browserTool, BROWSER_TOOLS } = await import("./browser");
-  const { mcpCall, mcpTools } = await import("./mcp");
-  const args = JSON.parse(req.args ?? "{}");
-  let result: string;
+  const id = String(req?.id ?? "");
+  if (!id || executingApprovalIds.has(id)) return;
+  executingApprovalIds.add(id);
   try {
-    if (req.tool.startsWith("computer_")) result = await (await import("./computer")).computerTool(req.tool, args);
-    else if (BROWSER_TOOLS.some((t: any) => t.function.name === req.tool)) result = await browserTool(req.id, req.tool, args);
-    else {
-      const mcpNames = (await mcpTools().catch(() => [] as any[])).map((t: any) => t.function?.name ?? t.name);
-      if (mcpNames.includes(req.tool)) result = await mcpCall(req.tool, args);
-      else result = await callBuiltin(req.tool, args, req.agent_id);
+    // 호출자가 넘긴 객체는 승인 전 상태이거나 오래된 값일 수 있다. 승인된 원본 도구와 인자는
+    // 반드시 DB에서 다시 읽고, 과거 evolve 자동 승인 경로의 approved+result=NULL 행만 CAS로 승격한다.
+    let stored = db.prepare("SELECT * FROM approval_requests WHERE id = ?").get(id) as any;
+    if (!stored || stored.result !== null) return;
+    if (stored.status === "approved") {
+      const claimed = db.prepare("UPDATE approval_requests SET status = 'executing' WHERE id = ? AND status = 'approved' AND result IS NULL")
+        .run(id);
+      if (!claimed.changes) return;
+      stored = db.prepare("SELECT * FROM approval_requests WHERE id = ?").get(id) as any;
+    } else if (stored.status !== "executing") {
+      return;
     }
-  } catch (e) { result = `실행 오류: ${(e as Error).message}`; }
-  db.prepare("UPDATE approval_requests SET result = ? WHERE id = ?").run(result.slice(0, 4000), req.id);
-  // 실행 실패는 실패라고 명시한다 — "실행했습니다"로 뭉개면 봇이 같은 깨진 호출을 재제출해 승인 루프가 된다
-  resumeAgent(req, looksLikeToolError(result)
-    ? `사용자가 승인한 작업 "${req.summary}"을 실행했지만 실패했습니다.\n실패 결과:\n${result}\n\n같은 인자로 재요청하면 같은 실패가 발생합니다 — 인자를 수정하거나 다른 방법으로 진행하고, 불가능하면 실패를 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`
-    : `사용자가 승인한 작업 "${req.summary}"을 실행했습니다. 실행 결과:\n${result}\n\n원래 작업을 이어서 진행하고 결과를 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`);
+    if (!stored || stored.status !== "executing" || stored.result !== null) return;
+    req = stored;
+
+    const { callBuiltin } = await import("./team");
+    const { browserTool, BROWSER_TOOLS } = await import("./browser");
+    const { mcpCall, mcpTools } = await import("./mcp");
+    let result: string;
+    const args = JSON.parse(req.args ?? "{}");
+    try {
+      if (req.tool.startsWith("computer_")) result = await (await import("./computer")).computerTool(req.tool, args);
+      else if (BROWSER_TOOLS.some((t: any) => t.function.name === req.tool)) result = await browserTool(req.id, req.tool, args);
+      else {
+        const mcpNames = (await mcpTools().catch(() => [] as any[])).map((t: any) => t.function?.name ?? t.name);
+        if (mcpNames.includes(req.tool)) result = await mcpCall(req.tool, args);
+        else result = await callBuiltin(req.tool, args, req.agent_id, undefined, 0, undefined, undefined, undefined, [], req.root_job_id);
+      }
+    } catch (e) { result = `실행 오류: ${(e as Error).message}`; }
+
+    // executing을 유지한 채 재개 실행을 먼저 등록한다. terminal 상태가 먼저 공개되면 다른 하위
+    // 작업이 루트 명령을 완료해 버려 승인 결과가 최종 메시지에서 빠질 수 있다.
+    const resume = await resumeAgent(req, looksLikeToolError(result)
+      ? `사용자가 승인한 작업 "${req.summary}"을 실행했지만 실패했습니다.\n실패 결과:\n${result}\n\n같은 인자로 재요청하면 같은 실패가 발생합니다 — 인자를 수정하거나 다른 방법으로 진행하고, 불가능하면 실패를 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`
+      : `사용자가 승인한 작업 "${req.summary}"을 실행했습니다. 실행 결과:\n${result}\n\n원래 작업을 이어서 진행하고 결과를 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`);
+    const finalResult = `${result}${resume.note ? `\n${resume.note}` : ""}`.slice(0, 4000);
+    const { recordCommandResult } = await import("./command-delivery");
+    db.transaction(() => {
+      if (req.root_job_id) recordCommandResult(req.root_job_id, `approval:${req.id}`, finalResult, req.agent_id);
+      db.prepare("UPDATE approval_requests SET status = 'approved', result = ? WHERE id = ? AND status = 'executing'").run(finalResult, req.id);
+    })();
+    if (req.root_job_id) await finalizeCommandIfReady(req.root_job_id);
+  } catch (e) {
+    await failApproval(req, `승인 작업 처리 실패: ${String((e as Error).message ?? e)}`);
+  } finally {
+    executingApprovalIds.delete(id);
+  }
 }
 
 async function notifyDenied(req: any) {
-  resumeAgent(req, `사용자가 작업 "${req.summary}"을 거부했습니다. 이 액션은 실행하지 마세요. 원래 작업이 다른 방법으로 가능하면 진행하고, 아니면 거부됐다고 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`);
+  const resume = await resumeAgent(req, `사용자가 작업 "${req.summary}"을 거부했습니다. 이 액션은 실행하지 마세요. 원래 작업이 다른 방법으로 가능하면 진행하고, 아니면 거부됐다고 보고하세요.\n\n원래 작업: ${req.resume || "(없음)"}`);
+  const result = `승인 거부: ${req.summary}${resume.note ? `\n${resume.note}` : ""}`.slice(0, 4000);
+  const { recordCommandResult } = await import("./command-delivery");
+  db.transaction(() => {
+    if (req.root_job_id) recordCommandResult(req.root_job_id, `approval:${req.id}`, result, req.agent_id);
+    db.prepare("UPDATE approval_requests SET status = 'denied', result = ?, resolved_at = ? WHERE id = ? AND status = 'executing'")
+      .run(result, now(), req.id);
+  })();
+  if (req.root_job_id) await finalizeCommandIfReady(req.root_job_id);
 }
 
-async function resumeAgent(req: any, task: string) {
-  if (!req.agent_id) return;
+async function failApproval(req: any, message: string) {
+  const result = message.slice(0, 4000);
+  try {
+    const { recordCommandResult, finalizeCommandIfReady: finalize } = await import("./command-delivery");
+    db.transaction(() => {
+      if (req.root_job_id) recordCommandResult(req.root_job_id, `approval:${req.id}`, result, req.agent_id);
+      db.prepare("UPDATE approval_requests SET status = 'failed', result = ?, resolved_at = ? WHERE id = ? AND status = 'executing'")
+        .run(result, now(), req.id);
+    })();
+    if (req.root_job_id) await finalize(req.root_job_id);
+  } catch {
+    db.prepare("UPDATE approval_requests SET status = 'failed', result = ?, resolved_at = ? WHERE id = ? AND status = 'executing'")
+      .run(result, now(), req.id);
+  }
+}
+
+async function resumeAgent(req: any, task: string): Promise<{ registered: boolean; note: string }> {
+  if (!req.agent_id) return { registered: false, note: "업무 자동 재개 불가: 요청한 봇 정보가 없습니다." };
   const { getAgent, runAgentDetached, agentSessionConvId } = await import("./team");
   const agent = getAgent(req.agent_id);
-  if (!agent) return;
+  if (!agent) return { registered: false, note: "업무 자동 재개 불가: 요청한 봇이 삭제되었거나 존재하지 않습니다." };
   // 재개 폭주 방지 — 승인이 한꺼번에 처리되면 "원래 작업 재개" run이 봇당 수십 개 쌓인다.
   // 최근 10분에 재개 run이 3개를 넘으면 run을 새로 돌리지 않고 결과만 세션에 기록한다
   // (결과 자체는 approval_requests.result에도 남아 있고 세션 노트로 맥락이 유지된다).
   const recentResumes = (db.prepare("SELECT COUNT(*) c FROM agent_runs WHERE agent_id = ? AND task LIKE '[승인 처리됨]%' AND created_at > ?").get(agent.id, now() - 10 * 60_000) as any)?.c ?? 0;
   if (recentResumes >= 3) {
-    const { appendToAgentSession } = await import("./routes/chat");
-    const { normalizeReport } = await import("./report");
-    appendToAgentSession(agentSessionConvId(agent.id), `[승인 처리 — 결과 기록] ${req.tool}`, await normalizeReport(agent.name, req.resume || req.tool, task), agent.model, null);
-    return;
+    if (req.root_job_id) {
+      const { recordCommandResult } = await import("./command-delivery");
+      recordCommandResult(req.root_job_id, `resume-cap:${req.id}`, `자동 재개 상한으로 추가 실행하지 않았습니다.\n${task}`, agent.id);
+    }
+    return { registered: false, note: "업무 자동 재개 불가: 최근 자동 재개 상한에 도달했습니다." };
   }
   // 승인으로 재개된 작업의 결과를 지시 체인으로 돌려보낸다 — 위임한 상위 봇에게 완료 회신을 전달해
   // 사용자의 원래 지시가 "승인 대기"로 끝난 뒤 결과가 사용자 대화에 도착하게 한다 (agent_message 회신 재수화와 같은 패턴)
@@ -356,7 +476,7 @@ async function resumeAgent(req: any, task: string) {
     task,
     sessionTitle: `[승인 처리 — 작업 재개] ${req.tool}`,
     sessionTask: req.resume || req.tool,
-    notifyTitle: `승인 작업 · ${agent.name} · ${req.tool}`,
+    rootJobId: req.root_job_id,
     onDone: parent
       ? (state) => {
           if (state.status !== "done" || !getAgent(parent.id)) return;
@@ -367,8 +487,10 @@ async function resumeAgent(req: any, task: string) {
             sessionTask: req.resume || req.summary,
             chain: [...reqChain.filter((id) => id !== parent.id), agent.id],
             verifyIntent: false, // 완료 회신 전달은 지시가 아님 — 지시-실측 검증 대상에서 제외
+            rootJobId: req.root_job_id,
           });
         }
       : undefined,
   });
+  return { registered: true, note: "" };
 }

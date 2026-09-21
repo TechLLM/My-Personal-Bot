@@ -10,7 +10,7 @@ import { db, uid, now } from "./db";
 // - 프로필 디렉터리 영속 → 사용자가 한 번 로그인하면 봇이 세션 재사용
 // - 봇별 탭(page) 격리 = ego의 "Space"에 해당
 
-const PROFILE_DIR = join(import.meta.dir, "..", "data", "browser-profile");
+const PROFILE_DIR = process.env.MYBOT_BROWSER_PROFILE || join(import.meta.dir, "..", "data", "browser-profile");
 mkdirSync(PROFILE_DIR, { recursive: true });
 
 // 자동화 탐지 신호 제거 스크립트
@@ -77,7 +77,7 @@ export async function getBrowser(headless = true): Promise<BrowserContext> {
     })
     .then(async (c) => {
       await c.addInitScript(STEALTH_INIT);
-      c.on("close", () => { ctx = null; pages.clear(); });
+      c.on("close", () => { ctx = null; pages.clear(); pendingEvents.clear(); });
       ctx = c;
       ctxHeadless = headless;
       return c;
@@ -92,16 +92,43 @@ export async function getBrowser(headless = true): Promise<BrowserContext> {
 // 이제 팝업이 열리면 스택에 쌓아 자동으로 따라가고, browser_back으로 이전 창에 돌아온다.
 const pages = new Map<string, Page[]>();
 
+// 비동기 브라우저 이벤트 — 팝업·다운로드·대화상자·페이지 이동은 도구 호출 사이에 일어나
+// 모델이 놓치기 쉽다. 모아 두었다가 다음 도구 결과 끝에 붙여 알린다 (Aside의 agent signals).
+const pendingEvents = new Map<string, string[]>();
+
+function pushEvent(key: string, msg: string) {
+  const arr = pendingEvents.get(key) ?? [];
+  arr.push(msg);
+  pendingEvents.set(key, arr.slice(-20));
+}
+
+function drainEvents(key: string): string {
+  const arr = pendingEvents.get(key);
+  if (!arr?.length) return "";
+  pendingEvents.delete(key);
+  return `\n\n[브라우저 이벤트 — 직전 도구 호출 이후 발생]\n${arr.map((e) => `- ${e}`).join("\n")}`;
+}
+
 function trackPopups(key: string, page: Page) {
   page.on("popup", (pop) => {
     const stack = pages.get(key);
     if (!stack) return;
     stack.push(pop);
     trackPopups(key, pop); // 팝업이 또 팝업을 열어도 따라간다
+    pushEvent(key, `새 창/팝업 열림: ${pop.url() || "(로딩 중)"} — 화면이 새 창으로 전환됐습니다`);
   });
   page.on("close", () => {
     const stack = pages.get(key);
     if (stack) pages.set(key, stack.filter((x) => x !== page));
+    pushEvent(key, `탭 닫힘: ${page.url()}`);
+  });
+  page.on("download", (dl) => pushEvent(key, `다운로드 시작: ${dl.suggestedFilename()}`));
+  page.on("dialog", (d) => {
+    pushEvent(key, `대화상자(${d.type()}): ${d.message().slice(0, 120)} — 자동으로 닫았습니다`);
+    d.dismiss().catch(() => {});
+  });
+  page.on("framenavigated", (frame) => {
+    if (frame === page.mainFrame()) pushEvent(key, `페이지 이동: ${frame.url()}`);
   });
 }
 
@@ -118,7 +145,13 @@ async function pageFor(key: string): Promise<Page> {
 export async function closeAgentPage(key: string) {
   const stack = pages.get(key) ?? [];
   pages.delete(key);
+  pendingEvents.delete(key);
   for (const x of stack) { try { await x.close(); } catch {} }
+}
+
+// 접두사로 시작하는 키의 페이지를 전부 닫는다 — E2 격리 팔(e2-<tag>-*) 정리용
+export async function closePagesForPrefix(prefix: string) {
+  for (const key of [...pages.keys()].filter((k) => k.startsWith(prefix))) await closeAgentPage(key);
 }
 
 // ─── 컴퓨터 뷰 (A3) — 보는 사람이 있을 때만 2.5초 간격으로 viewport 프레임을 밀어낸다 ───
@@ -280,9 +313,16 @@ async function collectFrame(frame: Frame, start: number, room: number): Promise<
       if (!name) name = norm((el as HTMLElement).innerText);
       if (!name) name = norm(el.getAttribute("placeholder") || el.getAttribute("name") || el.getAttribute("value"));
       if (!name && tag === "a") { try { name = norm(decodeURIComponent(String(any.href || "").split("/").filter(Boolean).pop() || "")); } catch {} }
+      // 이름 없는 비폼 요소(onclick div 등)는 모델이 지목해도 의미를 알 수 없는 잡음 —
+      // 상한 안의 자리만 차지하므로 버린다 (Aside식 스냅샷 정제)
+      if (!name && !/^(input|select|textarea)$/.test(tag) && el.getAttribute("contenteditable") !== "true") continue;
       const bits: string[] = [];
       if (any.disabled) bits.push("비활성");
       if (any.checked) bits.push("체크됨");
+      if (el === document.activeElement) bits.push("포커스");
+      const expanded = el.getAttribute("aria-expanded");
+      if (expanded === "true") bits.push("펼침"); else if (expanded === "false") bits.push("접힘");
+      if (el.getAttribute("aria-selected") === "true" || el.getAttribute("aria-current")) bits.push("선택됨");
       const val = typeof any.value === "string" ? norm(any.value) : "";
       if (val && (tag === "input" || tag === "textarea" || tag === "select")) bits.push(`값="${val}"`);
       const inView = r.top < vpH && r.bottom > 0 && r.left < vpW && r.right > 0;
@@ -360,6 +400,8 @@ async function snapshotOnce(page: Page, opts: { maxRefs?: number; textChars?: nu
   // 그룹웨어처럼 본문이 iframe 안에 있으면 메인 텍스트가 사실상 비어 있다 — 가장 큰 iframe 본문을 덧붙인다
   let text = mainText;
   if (frameText && mainText.length < 400) text = `${mainText}\n\n[iframe 본문]\n${frameText}`.trim();
+  // 본문 연속 중복 줄 제거 — 목록·메뉴 반복이 그대로 토큰을 먹는다
+  text = text.split("\n").filter((l, i, a) => i === 0 || l !== a[i - 1] || !l.trim()).join("\n");
   const offscreen = lines.filter((l) => l.startsWith("· ")).length;
   const head = [
     `URL: ${url}`,
@@ -372,8 +414,16 @@ async function snapshotOnce(page: Page, opts: { maxRefs?: number; textChars?: nu
     : "";
   const shown = lines.length - lines.filter((l) => l.startsWith("  ── iframe")).length;
   const capped = n - 1 >= maxRefs; // 상한에 걸려 더 못 담은 요소가 있다는 뜻
+  // 연속 동일 요소(같은 역할·이름·상태)는 "@5,6,7"로 압축 — 각 번호는 그대로 지목 가능하다
+  const grouped: string[] = [];
+  for (const l of lines) {
+    const m = l.match(/^(· ?)@(\d+) (.*)$/);
+    const pm = grouped.length ? grouped[grouped.length - 1].match(/^(· ?)@([\d,]+) (.*)$/) : null;
+    if (m && pm && pm[1] === m[1] && pm[3] === m[3]) grouped[grouped.length - 1] = `${pm[1]}@${pm[2]},${m[2]} ${m[3]}`;
+    else grouped.push(l);
+  }
   const refs = lines.length
-    ? `\n\n[조작 가능 요소 ${shown}개] — browser_click/browser_type에 "@번호"로 지목하세요${offscreen ? ` (· 표시 ${offscreen}개는 화면 밖 — browser_scroll 후 다시 읽으세요)` : ""}${capped ? ` (표시 상한 ${maxRefs}개 도달 — 목록에 없는 요소는 browser_scroll로 화면을 옮기거나 browser_eval로 찾으세요)` : ""}\n${lines.join("\n")}`
+    ? `\n\n[조작 가능 요소 ${shown}개] — browser_click/browser_type에 "@번호"로 지목하세요${offscreen ? ` (· 표시 ${offscreen}개는 화면 밖 — browser_scroll 후 다시 읽으세요)` : ""}${capped ? ` (표시 상한 ${maxRefs}개 도달 — 목록에 없는 요소는 browser_scroll로 화면을 옮기거나 browser_eval로 찾으세요)` : ""}\n${grouped.join("\n")}`
     : `\n\n[조작 가능 요소] 없음 — 아직 로딩 중이거나(browser_wait) 접근이 막힌 iframe일 수 있습니다`;
   const refCount = shown;
   return { text: `${head}${body}${refs}`, incomplete: refCount === 0 || pendingFrame || loading, refCount, textLen: text.length };
@@ -431,8 +481,25 @@ export async function resolveVisionModel(): Promise<{ endpoint: Endpoint; model:
   return (visionPick = null);
 }
 
-// 봇이 쓰는 브라우저 도구
+// 봇이 쓰는 브라우저 도구 — 도구 호출 사이에 쌓인 비동기 이벤트(팝업·다운로드·탭 닫힘·페이지 이동)를
+// 결과 끝에 붙여 모델에게 알린다. 브로커 경유 호출은 부모 쪽 래퍼가 같은 방식으로 붙인다.
 export async function browserTool(agentKey: string, name: string, args: Record<string, unknown>): Promise<string> {
+  return (await browserToolInner(agentKey, name, args)) + drainEvents(agentKey);
+}
+
+async function browserToolInner(agentKey: string, name: string, args: Record<string, unknown>): Promise<string> {
+  // E2 격리 실행 — 샌드박스는 프로세스 생성·네트워크가 차단되므로 브로커가
+  // 읽기 전용 브라우저 도구를 대행한다. 허용 집합은 브로커가 집행한다.
+  if (process.env.MYBOT_ENV === "e2" && process.env.E2_BROKER_URL) {
+    const res = await fetch(`${process.env.E2_BROKER_URL}/tool`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${process.env.E2_BROKER_TOKEN ?? ""}` },
+      body: JSON.stringify({ tool: name, args: { ...args, __key: agentKey } }),
+      signal: AbortSignal.timeout(110_000),
+    });
+    if (!res.ok) throw new Error(`broker_tool_${res.status}`);
+    return String((await res.json()).result ?? "");
+  }
   try {
     lastAction.set(agentKey, `${name} ${String(args.url ?? args.site ?? args.selector ?? args.ref ?? args.text ?? "").slice(0, 80)}`.trim());
     // 테이크오버 — pageFor 전에 처리: 인계가 브라우저 컨텍스트를 headed로 전환해 기존 페이지가 무효화된다
@@ -545,6 +612,14 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
         const siteName = String(args.site ?? "");
         const site = db.prepare("SELECT * FROM site_logins WHERE name LIKE ? ESCAPE '\\'").get(`%${siteName.replace(/[\\%_]/g, (c) => `\\${c}`)}%`) as any;
         if (!site) return `등록된 사이트 계정 없음: "${siteName}". request_credentials 도구로 사용자에게 계정 입력을 요청하거나, 설정 → 사이트 계정에서 먼저 등록하세요.`;
+        // 감사 — 어느 봇의 어떤 실행이 어떤 계정을 썼는지 결과와 함께 남긴다 (Aside식 credential-use 로그)
+        const audit = (outcome: string) => {
+          try {
+            const agentId = (db.prepare("SELECT agent_id FROM agent_runs WHERE id = ?").get(agentKey) as any)?.agent_id ?? null;
+            db.prepare("INSERT INTO credential_uses (id, site_name, url, agent_id, run_id, action, outcome, created_at) VALUES (?, ?, ?, ?, ?, 'autofill', ?, ?)")
+              .run(uid(), site.name, site.url, agentId, agentKey, outcome, now());
+          } catch {}
+        };
         await page.goto(site.url, { waitUntil: "domcontentloaded", timeout: 30000 });
         await page.waitForTimeout(1500);
         // 로그인 폼 탐색 — iframe 안 폼도 지원 (그룹웨어 다수)
@@ -556,6 +631,7 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
         }
         const pass = scope.locator('input[type="password"]').first();
         if (!(await pass.count().catch(() => 0))) {
+          audit("failed");
           return `로그인 폼을 찾지 못했습니다 — 이미 로그인된 상태일 수 있습니다.\n\n${await snapshot(page)}`;
         }
         const userSels = ['input[type="email"]', 'input[name*="user" i]', 'input[name*="login" i]', 'input[name*="mail" i]', 'input[id*="user" i]', 'input[name*="id" i]', 'input[id*="id" i]', 'input[type="text"]'];
@@ -565,7 +641,7 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
         }
         const { decryptSecret } = await import("./crypto");
         const password = decryptSecret(site.password);
-        if (!password) return "브라우저 오류: 저장된 비밀번호를 복호화할 수 없습니다 — 계정을 다시 등록하세요";
+        if (!password) { audit("failed"); return "브라우저 오류: 저장된 비밀번호를 복호화할 수 없습니다 — 계정을 다시 등록하세요"; }
         await pass.fill(password, { timeout: 5000 });
         const btn = scope.locator('button[type="submit"], input[type="submit"], button:has-text("로그인"), a:has-text("로그인"), button:has-text("Sign in"), button:has-text("Log in")').first();
         if (await btn.count().catch(() => 0)) await btn.click().catch(() => {});
@@ -584,8 +660,10 @@ export async function browserTool(agentKey: string, name: string, args: Record<s
         }
         if (!ok) {
           // A2 승격 — 2FA·CAPTCHA·추가 인증이 필요한 화면은 사용자에게 넘긴다
+          audit("handoff");
           return await doHandoff(agentKey, `${site.name} 로그인 미완료 — 2FA·CAPTCHA 등 추가 인증이 필요할 수 있습니다`);
         }
+        audit("ok");
         return `로그인 완료.\n\n${await snapshot(page)}`;
       }
       case "browser_eval": {
@@ -658,52 +736,112 @@ export const sitesRoute = new Hono()
   .get("/", (c) => c.json({ sites: db.prepare("SELECT id, name, url, username, success_check, created_at FROM site_logins ORDER BY created_at").all() }))
   // 봇이 요청한 계정 입력 (팝업 대기 목록)
   .get("/requests", (c) => c.json({ requests: db.prepare("SELECT id, name, url, reason, created_at FROM credential_requests WHERE status = 'pending' ORDER BY created_at").all() }))
-  .post("/requests/:id/dismiss", (c) => {
-    db.prepare("UPDATE credential_requests SET status = 'dismissed' WHERE id = ?").run(c.req.param("id"));
+  // 자격증명 사용 감사 — 누가 언제 어느 사이트 계정을 썼는지 (비밀번호는 절대 포함하지 않음)
+  .get("/uses", (c) => c.json({ uses: db.prepare("SELECT u.id, u.site_name, u.url, u.agent_id, u.run_id, u.action, u.outcome, u.created_at, a.name AS agent_name FROM credential_uses u LEFT JOIN agents a ON a.id = u.agent_id ORDER BY u.created_at DESC LIMIT 100").all() }))
+  .post("/requests/:id/dismiss", async (c) => {
+    const req = db.prepare("SELECT * FROM credential_requests WHERE id = ? AND status = 'pending'").get(c.req.param("id")) as any;
+    if (!req) return c.json({ error: "요청 없음 또는 이미 처리됨" }, 404);
+    try {
+      db.prepare("INSERT INTO credential_uses (id, site_name, url, agent_id, run_id, action, outcome, created_at) VALUES (?, ?, ?, ?, ?, 'request_dismissed', 'dismissed', ?)")
+        .run(uid(), req.name, req.url, req.agent_id, null, now());
+    } catch {}
+    const result = `계정 입력 거부: ${req.name}`.slice(0, 4000);
+    // 모듈 로드 중에는 pending blocker를 유지한다.
+    const delivery = req.root_job_id ? await import("./command-delivery") : null;
+    const claimed = db.transaction(() => {
+      const processing = db.prepare("UPDATE credential_requests SET status = 'processing' WHERE id = ? AND status = 'pending'").run(req.id);
+      if (!processing.changes) return false;
+      if (req.root_job_id) delivery!.recordCommandResult(req.root_job_id, `credential:${req.id}`, result, req.agent_id);
+      db.prepare("UPDATE credential_requests SET status = 'dismissed' WHERE id = ? AND status = 'processing'").run(req.id);
+      return true;
+    })();
+    if (!claimed) return c.json({ error: "이미 처리됨" }, 409);
+    if (req.root_job_id) await delivery!.finalizeCommandIfReady(req.root_job_id);
     return c.json({ ok: true });
   })
   .post("/", async (c) => {
     const b = await c.req.json();
     if (!b.name || !b.url || !b.username || !b.password) return c.json({ error: "name/url/username/password 필요" }, 400);
-    const { uid, now } = await import("./db");
-    const { encryptSecret } = await import("./crypto");
-    // 같은 이름의 계정이 있으면 갱신 — 재입력 시 중복 행이 쌓이지 않음
     const siteName = String(b.name).slice(0, 50);
-    const existing = db.prepare("SELECT id FROM site_logins WHERE name = ?").get(siteName) as any;
-    const id = existing?.id ?? uid();
-    // success_check: 사이트별 로그인 성공 기준 — CSS 선택자(요소 존재) 또는 "url:정규식" (C20)
     const successCheck = typeof b.success_check === "string" && b.success_check.trim() ? b.success_check.trim().slice(0, 300) : null;
-    if (existing)
-      db.prepare("UPDATE site_logins SET url = ?, username = ?, password = ?, success_check = COALESCE(?, success_check) WHERE id = ?")
-        .run(String(b.url), String(b.username), encryptSecret(String(b.password)), successCheck, id);
-    else
-      db.prepare("INSERT INTO site_logins (id, name, url, username, password, success_check, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .run(id, siteName, String(b.url), String(b.username), encryptSecret(String(b.password)), successCheck, now());
-    // 봇 요청으로 온 입력이면 요청을 완료 처리하고 요청한 봇의 작업을 자동 재개
-    // status='pending' 조건으로 원자 전이 — 이미 처리된 요청의 중복 제출이 재개를 다시 발화하지 않게
+    let pendingReq: any = null;
     if (b.request_id) {
-      const flipped = db.prepare("UPDATE credential_requests SET status = 'done' WHERE id = ? AND status = 'pending'").run(String(b.request_id));
-      const req = flipped.changes > 0 ? db.prepare("SELECT * FROM credential_requests WHERE id = ?").get(String(b.request_id)) as any : null;
-      if (req?.agent_id) {
-        const { getAgent, runAgentDetached } = await import("./team");
-        const agent = getAgent(req.agent_id);
-        if (agent) {
-          runAgentDetached(agent, {
-            label: `[계정 입력됨] ${req.name} — 작업 자동 재개`,
-            task: `사용자가 "${req.name}" 계정을 보안 팝업에 입력했습니다. 계정은 암호화되어 저장됐고 browser_login(site: "${req.name}")으로 로그인할 수 있습니다. 이어서 원래 업무를 진행하고 결과를 보고하세요.\n\n원래 작업: ${req.resume || req.reason || "(없음)"}`,
-            sessionTitle: `[계정 입력 완료 — 작업 자동 재개] ${req.name}`,
-            sessionTask: req.resume || req.name,
-            notifyTitle: `계정 입력됨 — ${agent.name} 작업 재개`,
-          });
-        }
-      }
+      pendingReq = db.prepare("SELECT * FROM credential_requests WHERE id = ? AND status = 'pending'").get(String(b.request_id)) as any;
+      if (!pendingReq || pendingReq.name !== siteName || !credentialRequestUrlMatches(pendingReq.url, String(b.url)))
+        return c.json({ error: "계정 요청 대상이 변경됐습니다. 새 요청에서 다시 입력해 주세요." }, 409);
     }
+
+    // 요청 검증이 끝나기 전에는 암호화조차 하지 않고 기존 계정을 절대 변경하지 않는다.
+    const { encryptSecret } = await import("./crypto");
+    const team = pendingReq?.agent_id ? await import("./team") : null;
+    const delivery = pendingReq?.root_job_id ? await import("./command-delivery") : null;
+    const encrypted = encryptSecret(String(b.password));
+    let id = "";
+    let outcome = "";
+    try {
+      db.transaction(() => {
+        if (pendingReq) {
+          const claimed = db.prepare("UPDATE credential_requests SET status = 'processing' WHERE id = ? AND status = 'pending'").run(pendingReq.id);
+          if (!claimed.changes) throw new Error("이미 처리됨");
+        }
+        const existing = db.prepare("SELECT id FROM site_logins WHERE name = ?").get(siteName) as any;
+        id = existing?.id ?? uid();
+        if (existing)
+          db.prepare("UPDATE site_logins SET url = ?, username = ?, password = ?, success_check = COALESCE(?, success_check) WHERE id = ?")
+            .run(String(b.url), String(b.username), encrypted, successCheck, id);
+        else
+          db.prepare("INSERT INTO site_logins (id, name, url, username, password, success_check, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .run(id, siteName, String(b.url), String(b.username), encrypted, successCheck, now());
+
+        if (pendingReq) {
+          const agent = team?.getAgent(pendingReq.agent_id);
+          outcome = agent
+            ? `계정 입력 완료: ${pendingReq.name}`
+            : `계정 입력 완료: ${pendingReq.name}\n업무 자동 재개 불가: 요청한 봇이 삭제되었거나 존재하지 않습니다.`;
+          if (pendingReq.root_job_id)
+            delivery!.recordCommandResult(pendingReq.root_job_id, `credential:${pendingReq.id}`, outcome, pendingReq.agent_id);
+          if (agent && team) team.runAgentDetached(agent, {
+            label: `[계정 입력됨] ${pendingReq.name} — 작업 자동 재개`,
+            task: `사용자가 "${pendingReq.name}" 계정을 보안 팝업에 입력했습니다. 계정은 암호화되어 저장됐고 browser_login(site: "${pendingReq.name}")으로 로그인할 수 있습니다. 이어서 원래 업무를 진행하고 결과를 보고하세요.\n\n원래 작업: ${pendingReq.resume || pendingReq.reason || "(없음)"}`,
+            sessionTitle: `[계정 입력 완료 — 작업 자동 재개] ${pendingReq.name}`,
+            sessionTask: pendingReq.resume || pendingReq.name,
+            notifyTitle: `계정 입력됨 — ${agent.name} 작업 재개`,
+            rootJobId: pendingReq.root_job_id,
+          });
+          db.prepare("UPDATE credential_requests SET status = 'done' WHERE id = ? AND status = 'processing'").run(pendingReq.id);
+          db.prepare("INSERT INTO credential_uses (id, site_name, url, agent_id, run_id, action, outcome, created_at) VALUES (?, ?, ?, ?, ?, 'request_fulfilled', 'done', ?)")
+            .run(uid(), pendingReq.name, pendingReq.url, pendingReq.agent_id, null, now());
+        }
+      })();
+    } catch (e) {
+      if ((e as Error).message === "이미 처리됨") return c.json({ error: "이미 처리됨" }, 409);
+      throw e;
+    }
+    if (pendingReq?.root_job_id) await delivery!.finalizeCommandIfReady(pendingReq.root_job_id);
     return c.json({ site: db.prepare("SELECT id, name, url, username, created_at FROM site_logins WHERE id = ?").get(id) });
   })
   .delete("/:id", (c) => {
     db.prepare("DELETE FROM site_logins WHERE id = ?").run(c.req.param("id"));
     return c.json({ ok: true });
   });
+
+function credentialRequestUrlMatches(intended: unknown, submitted: string): boolean {
+  if (!intended) return true;
+  try {
+    const normalize = (raw: string) => {
+      const u = new URL(raw);
+      u.hash = "";
+      const path = u.pathname.replace(/\/+$/, "") || "/";
+      return { origin: u.origin.toLowerCase(), full: `${u.origin.toLowerCase()}${path}${u.search}` };
+    };
+    const expected = normalize(String(intended));
+    const actual = normalize(submitted);
+    // 요청이 origin만 지정했다면 같은 origin의 로그인 경로를 허용하고, 구체 URL이면 그대로 맞춘다.
+    return expected.origin === actual.origin && (expected.full === `${expected.origin}/` || expected.full === actual.full);
+  } catch {
+    return false;
+  }
+}
 
 export function browserRunning(): boolean {
   return ctx !== null;

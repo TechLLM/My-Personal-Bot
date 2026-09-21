@@ -3,17 +3,17 @@ import { AgentIcon } from "./icons";
 import type { SearchEvent } from "./SearchTrace";
 
 // 순환 상태어 — 도구 이벤트가 없을 때 순서대로 돎
-const WORDS = ["Thinking", "Pondering", "Working", "Navigating", "Reading", "Writing", "Synthesizing"];
+const WORDS = ["생각하는 중", "검토하는 중", "작업하는 중", "이동하는 중", "읽는 중", "작성하는 중", "정리하는 중"];
 
 // PGE 단계 → 상태어 — 파이프라인 진행 위치를 그대로 반영
 export function phaseWord(phase?: string): string | null {
   if (!phase) return null;
-  if (phase === "plan") return "Planning";
-  if (phase === "exec") return "Working";
-  if (phase === "gen") return "Generating";
-  if (phase === "verify") return "Verifying";
-  if (phase === "verify_done") return "Verified";
-  if (phase === "done") return "Finishing";
+  if (phase === "plan") return "계획하는 중";
+  if (phase === "exec") return "실행하는 중";
+  if (phase === "gen") return "결과 만드는 중";
+  if (phase === "verify") return "확인하는 중";
+  if (phase === "verify_done") return "확인 완료";
+  if (phase === "done") return "마무리하는 중";
   return null;
 }
 
@@ -21,16 +21,18 @@ export function phaseWord(phase?: string): string | null {
 export function toolWord(title?: string): string | null {
   const t = title ?? "";
   if (!t || t.includes("라운드")) return null;
-  if (/web_search|DeepSearch/i.test(t)) return "Searching";
-  if (/browser_|ego_run/i.test(t)) return "Navigating";
-  if (/agent_(direct|create|update|delete)/.test(t)) return "Delegating";
-  if (/request_credentials/.test(t)) return "Requesting";
-  if (/write_file/.test(t)) return "Writing";
-  if (/read_file|list_files/.test(t)) return "Reading";
-  if (/routine_/.test(t)) return "Scheduling";
-  if (/memory_save|checkpoint/i.test(t)) return "Memorizing";
-  if (/결과 정리|상한|제한/.test(t)) return "Summarizing";
-  return "Working";
+  if (/web_search|DeepSearch/i.test(t)) return "검색하는 중";
+  if (/browser_|ego_run/i.test(t)) return "웹 페이지 탐색 중";
+  if (/agent_(direct|message|create|update|delete)/.test(t)) return "봇에게 전달하는 중";
+  if (/request_credentials/.test(t)) return "계정 정보를 요청하는 중";
+  if (/mail_(list|read)/.test(t)) return "메일을 확인하는 중";
+  if (/org_audit/.test(t)) return "봇 조직을 점검하는 중";
+  if (/write_file/.test(t)) return "작성하는 중";
+  if (/read_file|list_files/.test(t)) return "읽는 중";
+  if (/routine_/.test(t)) return "일정을 관리하는 중";
+  if (/memory_save|checkpoint/i.test(t)) return "기억하는 중";
+  if (/결과 정리|상한|제한/.test(t)) return "정리하는 중";
+  return "작업하는 중";
 }
 
 // 도구명 → 한국어 작업 설명 — 사이드바에서 봇이 지금 무슨 일을 하는지 표시
@@ -41,8 +43,11 @@ export function toolLabel(tool?: string | null): string {
   if (/browser_login/i.test(t)) return "사이트 로그인 중";
   if (/browser_|ego_run/i.test(t)) return "웹 페이지 탐색 중";
   if (/agent_direct/.test(t)) return "하위 봇에 위임 중";
+  if (/agent_message/.test(t)) return "다른 봇에 메시지 전달 중";
   if (/agent_(create|update|delete|list)/.test(t)) return "봇 조직 관리 중";
   if (/request_credentials/.test(t)) return "계정 입력 요청 중";
+  if (/mail_(list|read)/.test(t)) return "메일 확인 중";
+  if (/org_audit/.test(t)) return "봇 조직 점검 중";
   if (/write_file/.test(t)) return "파일 작성 중";
   if (/read_file|list_files/.test(t)) return "파일 읽는 중";
   if (/routine_/.test(t)) return "루틴 관리 중";

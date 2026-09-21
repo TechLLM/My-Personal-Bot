@@ -122,6 +122,19 @@ CREATE TABLE IF NOT EXISTS site_logins (
   created_at INTEGER NOT NULL
 );
 
+-- 자격증명 사용 감사 — 어느 봇이 언제 어떤 사이트 계정을 썼는지 결과와 함께 남긴다.
+-- 비밀번호 값은 절대 기록하지 않는다 (사이트명·URL·봇·결과만).
+CREATE TABLE IF NOT EXISTS credential_uses (
+  id TEXT PRIMARY KEY,
+  site_name TEXT NOT NULL,
+  url TEXT,
+  agent_id TEXT,
+  run_id TEXT,
+  action TEXT NOT NULL,          -- autofill | request_fulfilled | request_dismissed
+  outcome TEXT NOT NULL,         -- ok | failed | handoff | done | dismissed
+  created_at INTEGER NOT NULL
+);
+
 -- 봇이 사용자에게 요청한 계정 입력 — 팝업으로 수집, 완료/거절 시 상태 변경
 CREATE TABLE IF NOT EXISTS credential_requests (
   id TEXT PRIMARY KEY,
@@ -172,6 +185,42 @@ CREATE TABLE IF NOT EXISTS agent_messages (
   reply TEXT,
   created_at INTEGER NOT NULL,
   done_at INTEGER
+);
+-- 사용자 명령 단위 전달 원장. 중간 실행과 외부 채널 전달을 root job 아래 묶는다.
+CREATE TABLE IF NOT EXISTS command_jobs (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL,
+  conversation_id TEXT,
+  assistant_message_id TEXT,
+  request TEXT NOT NULL DEFAULT '',
+  owner_agent_id TEXT,
+  execution_done INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'running',
+  full_result TEXT,
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS command_deliveries (
+  root_job_id TEXT NOT NULL,
+  channel TEXT NOT NULL,
+  target TEXT,
+  status TEXT NOT NULL,
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(root_job_id, channel)
+);
+CREATE TABLE IF NOT EXISTS command_job_results (
+  root_job_id TEXT NOT NULL,
+  result_key TEXT NOT NULL,
+  agent_id TEXT,
+  content TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(root_job_id, result_key)
+);
+CREATE TABLE IF NOT EXISTS telegram_updates (
+  update_id INTEGER PRIMARY KEY,
+  created_at INTEGER NOT NULL
 );
 -- 그룹채팅 — 여러 봇이 하나의 대화에 참여 (@멘션으로 특정 봇 지정 가능)
 CREATE TABLE IF NOT EXISTS groups (
@@ -287,6 +336,23 @@ db.exec("DELETE FROM conversations WHERE mode = 'bot' AND agent_id IS NOT NULL A
 try { db.exec("ALTER TABLE agent_messages ADD COLUMN chain TEXT"); } catch {} // 보낸 쪽 위임·메시지 사슬(JSON 봇 id 배열) — 순환 메시지 차단용
 try { db.exec("ALTER TABLE credential_requests ADD COLUMN agent_id TEXT"); } catch {}
 try { db.exec("ALTER TABLE credential_requests ADD COLUMN resume TEXT"); } catch {}
+try { db.exec("ALTER TABLE messages ADD COLUMN full_content TEXT"); } catch {}
+try { db.exec("ALTER TABLE messages ADD COLUMN root_job_id TEXT"); } catch {}
+try { db.exec("ALTER TABLE agent_runs ADD COLUMN root_job_id TEXT"); } catch {}
+try { db.exec("ALTER TABLE approval_requests ADD COLUMN root_job_id TEXT"); } catch {}
+try { db.exec("ALTER TABLE agent_messages ADD COLUMN root_job_id TEXT"); } catch {}
+try { db.exec("ALTER TABLE messages ADD COLUMN command_status TEXT"); } catch {}
+try { db.exec("ALTER TABLE command_jobs ADD COLUMN dedupe_key TEXT"); } catch {}
+try { db.exec("ALTER TABLE command_jobs ADD COLUMN needs_final_aggregation INTEGER NOT NULL DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE command_jobs ADD COLUMN target_snapshot TEXT"); } catch {}
+try { db.exec("ALTER TABLE command_jobs ADD COLUMN credential_fingerprint TEXT"); } catch {}
+try { db.exec("ALTER TABLE command_jobs ADD COLUMN root_result_key TEXT"); } catch {}
+try { db.exec("ALTER TABLE command_jobs ADD COLUMN email_target_snapshot TEXT"); } catch {}
+try { db.exec("ALTER TABLE command_jobs ADD COLUMN email_credential_fingerprint TEXT"); } catch {}
+try { db.exec("ALTER TABLE command_deliveries ADD COLUMN external_message_id TEXT"); } catch {}
+try { db.exec("ALTER TABLE command_deliveries ADD COLUMN target_fingerprint TEXT"); } catch {}
+try { db.exec("ALTER TABLE credential_requests ADD COLUMN root_job_id TEXT"); } catch {}
+try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_command_jobs_dedupe ON command_jobs(source, dedupe_key) WHERE dedupe_key IS NOT NULL"); } catch {}
 // 자기개선 실험 원장 — 모든 사이클의 후보·측정·판정·적용 여부를 남긴다 (tasks/self-improvement-contract.md)
 try { db.exec(`CREATE TABLE IF NOT EXISTS experiments (
   id TEXT PRIMARY KEY,
@@ -333,3 +399,12 @@ export function setSetting(key: string, value: string) {
 
 export const uid = () => crypto.randomUUID().replaceAll("-", "").slice(0, 16);
 export const now = () => Date.now();
+try { db.exec("ALTER TABLE command_jobs ADD COLUMN task_mode TEXT"); } catch {} // 작업별 권한 모드 (readonly|guard|null=기본)
+try { db.exec(`CREATE TABLE IF NOT EXISTS run_steers (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  consumed_at INTEGER
+)`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_run_steers_run ON run_steers(run_id, consumed_at)"); } catch {}

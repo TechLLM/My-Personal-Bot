@@ -44,6 +44,7 @@ export interface Message {
   parent_id: string | null;
   role: "user" | "assistant" | "system";
   content: string;
+  full_content?: string | null;
   reasoning: string | null;
   model: string | null;
   search_meta: string | null;
@@ -53,6 +54,7 @@ export interface Message {
   created_at: number;
   sibling_count?: number;
   sibling_index?: number;
+  command_status?: "running" | "waiting_approval" | "waiting_children" | "completed" | "interrupted";
 }
 
 export function authHeaders(): Record<string, string> {
@@ -177,13 +179,27 @@ export const api = {
   rejectUpdate: (id: string) => mybotFetch(`/api/evolve/updates/${id}/reject`, { method: "POST" }).then(j),
   // 서비스 릴리스 — 개발 인스턴스가 release 브랜치로 민 커밋을 관리자가 직접 반영
   releaseStatus: () => mybotFetch("/api/release").then(j) as Promise<ReleaseStatus>,
-  applyRelease: () => mybotFetch("/api/release/apply", { method: "POST" }).then(j) as Promise<{ version: number; sha: string; restarting: boolean }>,
+  applyRelease: () => mybotFetch("/api/release/apply", { method: "POST" }).then(j) as Promise<{ version: number; sha: string; release: string; tier: ReleaseTier; restarting: boolean }>,
   revertRelease: () => mybotFetch("/api/release/revert", { method: "POST" }).then(j) as Promise<{ sha: string; restarting: boolean }>,
+  winbackRelease: (sha?: string) => mybotFetch("/api/release/winback", { method: "POST", body: JSON.stringify(sha ? { sha } : {}) }).then(j) as Promise<{ sha: string; release: string; restarting: boolean }>,
+  launchRelease: () => mybotFetch("/api/release/launch", { method: "POST" }).then(j) as Promise<{ ok: boolean; stage: string }>,
 };
+
+export type ReleaseTier = "patch" | "minor" | "major";
+
+export interface ReleaseRecord {
+  version: string; tier: ReleaseTier; sha: string; prevSha: string;
+  appliedAt: number; subjects: string[]; status: "applied" | "reverted";
+}
 
 export interface ReleaseStatus {
   branch: string; current: string; currentSubject: string; clean: boolean;
+  stage: "dev" | "launch";
   pending: { sha: string; subject: string; date: string }[];
+  files: string[];
+  pendingTier: ReleaseTier | null; pendingTierLabel: string | null;
+  version: string | null; nextVersion: string | null;
+  history: ReleaseRecord[];
   canApply: boolean; reason: string;
   canRevert: boolean; prevSha: string; appliedAt: number; appVersion: number;
   receipts: ReleaseReceipt[];
@@ -191,19 +207,24 @@ export interface ReleaseStatus {
 
 export interface ReleaseReceipt {
   ts: number; from: string; to: string; subjects: string[]; gates: string[];
-  result: "applied" | "rolled-back" | "interrupted"; error?: string;
+  result: "applied" | "rolled-back" | "interrupted" | "winback" | "rejected"; error?: string;
+  version?: string; tier?: ReleaseTier;
 }
 
 export interface EvolveUpdate {
   id: string; version: number | null; status: "pending" | "applied" | "rejected" | "reverted";
   restart_required: number; source: string | null; created_at: number; applied_at: number | null;
-  payload: { summary: string; measurement: { verdict: string; reason: string; baseline?: { passRate: number; avgLatencyMs: number }; candidate?: { passRate: number; avgLatencyMs: number } }; ops: { kind: string; surface: string; target: string }[] };
+  payload: { summary: string; measurement: { verdict: string; reason: string; baseline?: { passRate: number; avgLatencyMs: number }; candidate?: { passRate: number; avgLatencyMs: number } }; ops: { kind: string; surface: string; target: string }[]; rejectedReason?: string };
 }
 
 export interface ApprovalRequest {
   id: string;
   tool: string;
+  title: string;
   summary: string;
+  risk: string;
+  details: { label: string; value: string }[];
+  technicalDetails?: string;
   agent_name: string | null;
   created_at: number;
 }
@@ -331,7 +352,7 @@ async function ssePost(url: string, body: unknown, handlers: StreamHandlers, sig
 }
 
 export function streamChat(
-  body: { conversationId?: string; content?: string; model: string; mode?: string; regenerateMessageId?: string; parentMessageId?: string; attachments?: { url: string; name: string; mime: string }[]; personaId?: string; workspaceId?: string; agentId?: string },
+  body: { conversationId?: string; content?: string; model: string; mode?: string; regenerateMessageId?: string; parentMessageId?: string; attachments?: { url: string; name: string; mime: string }[]; personaId?: string; workspaceId?: string; agentId?: string; taskMode?: string },
   handlers: StreamHandlers,
   signal?: AbortSignal,
 ) {

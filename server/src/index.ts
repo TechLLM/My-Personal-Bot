@@ -19,6 +19,7 @@ import { releaseRoute, recoverJournal } from "./release";
 import { groupsRoute } from "./routes/groups";
 import { startMaintenance } from "./maintenance";
 import { installAccessControl, accessOrigins, readAccessCode } from "./access";
+import { finalizeCommandIfReady, markInterruptedDeliveriesUnknown, recoverInterruptedCommands } from "./command-delivery";
 
 const PORT = Number(process.env.MYBOT_PORT ?? 5274);
 const HOST = process.env.MYBOT_HOST ?? "127.0.0.1";
@@ -58,31 +59,45 @@ seedPersonas();
 }
 // 대장 봇 시드 + 기존 대화를 대장에게 귀속 (봇 중심 모델)
 const boss = ensureBossAgent();
+// 외부 전달은 재전송보다 정직한 미확인 확정이 우선이며, 실행 재개보다 먼저 처리한다.
+markInterruptedDeliveriesUnknown();
+await recoverInterruptedCommands();
+// 개발 인스턴스는 공유 계정에 접근할 수 있으므로 명시적 opt-in 없이는 예약·재생·외부 채널을 가동하지 않는다.
+const backgroundAutorun = process.env.MYBOT_ENV !== "dev" || process.env.MYBOT_DEV_AUTORUN === "1";
 // 그룹 대화는 agent_id가 원래 NULL — 대장 귀속에서 제외해야 그룹 대화가 대장 대화로 겹쳐 보이지 않음
 db.prepare("UPDATE conversations SET agent_id = ? WHERE agent_id IS NULL AND group_id IS NULL").run(boss.id);
 // 서버 재시작으로 끊긴 실행 — A5: error로 죽이지 말고 재개한다. 같은 run id에 이어 기록되고
 // 재개 횟수(resume_count)가 3회를 넘으면 그때만 error로 확정한다.
-const orphanRuns = db.prepare("SELECT * FROM agent_runs WHERE status = 'running'").all() as any[];
+const orphanRuns = db.prepare("SELECT * FROM agent_runs WHERE status = 'running' AND root_job_id IS NULL").all() as any[];
 for (const r of orphanRuns) {
-  if ((r.resume_count ?? 0) < 3) {
+  if (backgroundAutorun && (r.resume_count ?? 0) < 3) {
     db.prepare("UPDATE agent_runs SET status = 'resumable' WHERE id = ?").run(r.id); // 상태 전이로 중복 재개 방지
     import("./team").then(({ resumeAgentRun }) => resumeAgentRun(r)).catch((e) => console.error(`[mybot] 실행 재개 실패 (${r.id}):`, (e as Error).message));
   } else {
     db.prepare("UPDATE agent_runs SET status = 'error', result = COALESCE(result, '서버 재시작으로 작업이 중단됨 — 재개 3회 초과'), finished_at = ? WHERE id = ?").run(now(), r.id);
+    if (r.root_job_id) void finalizeCommandIfReady(r.root_job_id);
   }
 }
 // 재시작으로 끊긴 대화 스트림의 빈 assistant 자리표시 — 빈 말풍선으로 남지 않게
-db.prepare("UPDATE messages SET content = '⚠️ 서버 재시작으로 중단된 작업입니다.' WHERE role = 'assistant' AND trim(content) = ''").run();
+db.prepare("UPDATE messages SET content = '⚠️ 서버 재시작으로 중단된 작업입니다.' WHERE role = 'assistant' AND trim(content) = '' AND root_job_id IS NULL").run();
 // 같은 이유로 처리 중이던 봇 간 메시지도 정리 — 'processing' 상태로 영원히 멈추지 않게
-db.prepare("UPDATE agent_messages SET status = 'failed', reply = '서버 재시작으로 처리 중단', done_at = ? WHERE status = 'processing'").run(now());
+const interruptedMessages = db.prepare("SELECT DISTINCT root_job_id FROM agent_messages WHERE status IN ('pending','processing') AND root_job_id IS NOT NULL").all() as { root_job_id: string }[];
+db.prepare("UPDATE agent_messages SET status = 'failed', reply = '서버 재시작으로 처리 중단', done_at = ? WHERE status IN ('pending','processing') AND root_job_id IS NOT NULL").run(now());
+db.prepare("UPDATE agent_messages SET status = 'failed', reply = '서버 재시작으로 처리 중단', done_at = ? WHERE status = 'processing' AND root_job_id IS NULL").run(now());
+for (const x of interruptedMessages) void finalizeCommandIfReady(x.root_job_id);
+const interruptedApprovals = db.prepare("SELECT DISTINCT root_job_id FROM approval_requests WHERE status = 'executing' AND root_job_id IS NOT NULL").all() as { root_job_id: string }[];
+db.prepare("UPDATE approval_requests SET status = 'failed', result = '서버 재시작으로 실행 결과 미확인', resolved_at = ? WHERE status = 'executing'").run(now());
+for (const x of interruptedApprovals) void finalizeCommandIfReady(x.root_job_id);
 // 인계 대기 중이던 테이크오버도 재시작으로 headed 창이 닫혔으므로 정리 — 프론트에 영원히 뜨지 않게
 db.prepare("UPDATE handoff_requests SET status = 'timeout', resolved_at = ? WHERE status = 'pending'").run(now());
 // 재시작 사이에 디스패치가 끊긴 pending 메시지 재배달 — pending은 아직 시작 안 한 큐이므로 전달해야 함
-for (const m of db.prepare("SELECT id FROM agent_messages WHERE status = 'pending'").all() as { id: string }[]) {
+if (backgroundAutorun) for (const m of db.prepare("SELECT id FROM agent_messages WHERE status = 'pending' AND root_job_id IS NULL").all() as { id: string }[]) {
   import("./approvals").then(({ dispatchAgentMessage }) => dispatchAgentMessage(m.id)).catch(() => {});
 }
-startScheduler();
-startTelegramBot();
+if (backgroundAutorun) {
+  startScheduler();
+  startTelegramBot();
+}
 startMaintenance(); // 보존 정리 — 실행이력·승인·브라우저 캐시 (업무지침서 C16)
 // 재시작으로 끊긴 자기개선 사이클 잠금 해제 — finished_at NULL은 crash로 확정
 db.prepare("UPDATE experiments SET verdict = 'crash', reason = '서버 재시작으로 사이클 중단', finished_at = ? WHERE finished_at IS NULL").run(now());

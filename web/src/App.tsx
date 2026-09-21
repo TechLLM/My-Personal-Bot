@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AuthenticatedEventStream, api, streamChat, runTeam, mybotFetch, type Agent, type Conversation, type Message, type Model, type TeamPlanTask, type SiteRequest, type Group, type ApprovalRequest, type HandoffRequest } from "./api";
 import { Sidebar } from "./components/Sidebar";
-import { Composer, type Mode, type Persona } from "./components/Composer";
+import { Composer, type Mode, type Persona, type TaskMode } from "./components/Composer";
 import { MessageItem } from "./components/MessageItem";
 import { SearchTrace, type SearchEvent } from "./components/SearchTrace";
 import { TeamTrace, type TeamEvent } from "./components/TeamTrace";
@@ -44,19 +44,23 @@ export default function App() {
   const [viewKey, setViewKey] = useState<string | null>(null); // 열려 있는 컴퓨터 뷰 패널의 run 키
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]); // 봇의 위험 액션 승인 대기열
   const [pendingUpdates, setPendingUpdates] = useState(0); // 개발이 보낸 미적용 버전 업데이트 수
-  const [pendingReleases, setPendingReleases] = useState(0); // release 브랜치에서 온 미적용 서비스 릴리스 수
+  const [pendingReleases, setPendingReleases] = useState(0); // release 브랜치에서 온 릴리스 중 지금 적용 가능한 수
   const [groups, setGroups] = useState<Group[]>([]); // 그룹채팅 목록
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null); // 현재 열린 그룹 대화
   const [runningInfo, setRunningInfo] = useState<Record<string, string | null>>({}); // 서버에서 실행 중인 봇: id → 현재 도구 — 사이드바 실시간 작업 표시용
   const abortRef = useRef<AbortController | null>(null);
   const convIdRef = useRef<string | null>(null); // 현재 보고 있는 대화 — 오래된 스트림 클로저에서도 읽을 수 있게
   convIdRef.current = convId;
+  const streamingRef = useRef(false);
+  streamingRef.current = streaming;
+  const conversationPollSeqRef = useRef(0);
+  const conversationLoadSeqRef = useRef(0);
   const streamConvRef = useRef<string | null>(null); // 진행 중 스트림의 소속 대화 — 다른 세션으로 이동해도 이벤트가 새지 않게
   const scrollRef = useRef<HTMLDivElement>(null);
   const nearBottomRef = useRef(true); // 사용자가 하단 근처를 보고 있을 때만 자동 스크롤 — 위쪽 읽기 중엔 위치 고정
   const [showJump, setShowJump] = useState(false); // 위를 읽는 중 새 콘텐츠 도착 시 "최신으로" 버튼
   // 응답 스트리밍 중 전송된 명령 대기열 — 현재 응답이 끝나면 순서대로 자동 전송 ("1번→2번→3번" 연속 지시)
-  const [queued, setQueued] = useState<{ text: string; mode: Mode; attachments: { url: string; name: string; mime: string }[]; forConv: string | null }[]>([]);
+  const [queued, setQueued] = useState<{ text: string; mode: Mode; attachments: { url: string; name: string; mime: string }[]; forConv: string | null; taskMode?: TaskMode }[]>([]);
 
   const refreshConversations = useCallback(() => {
     api.conversations().then((d) => setConversations(d.conversations)).catch(() => {});
@@ -138,7 +142,7 @@ export default function App() {
 
   // 서비스 릴리스 대기 수 — release 브랜치를 보는 git 조회라 배지용으로만 느슨하게 확인한다
   useEffect(() => {
-    const poll = () => api.releaseStatus().then((d) => setPendingReleases(d.pending.length)).catch(() => {});
+    const poll = () => api.releaseStatus().then((d) => setPendingReleases(d.canApply ? d.pending.length : 0)).catch(() => {});
     poll();
     const t = setInterval(poll, 60000);
     return () => clearInterval(t);
@@ -164,26 +168,44 @@ export default function App() {
   // 회신 기록이 run 종료보다 늦을 수 있어(normalizeReport LLM 호출) 유휴 중엔 항상 4초 주기로 읽되,
   // 변화가 없으면 같은 배열을 반환해 스크롤 점프를 막는다.
   useEffect(() => {
-    if (streaming || !convId) return;
+    if (streaming || !convId) {
+      conversationPollSeqRef.current++;
+      return;
+    }
+    const requestedId = convId;
+    const seq = ++conversationPollSeqRef.current;
     api.conversation(convId).then((d) => {
+      if (seq !== conversationPollSeqRef.current || convIdRef.current !== requestedId || streamingRef.current) return;
       setMessages((prev) => {
-        const last = prev[prev.length - 1], lastD = d.messages[d.messages.length - 1];
-        if (prev.length === d.messages.length && last?.id === lastD?.id && last?.content === lastD?.content) return prev;
+        const persisted = prev.filter((m) => !m.id.startsWith("err"));
+        const unchanged = persisted.length === d.messages.length && persisted.every((m, i) => {
+          const incoming = d.messages[i];
+          return m.id === incoming?.id
+            && m.content === incoming.content
+            && (m.full_content ?? null) === (incoming.full_content ?? null)
+            && (m.command_status ?? null) === (incoming.command_status ?? null);
+        });
+        if (unchanged) return prev;
         const ids = new Set(d.messages.map((m) => m.id));
         return [...d.messages, ...prev.filter((m) => m.id.startsWith("err") && !ids.has(m.id))];
       });
     }).catch(() => {});
+    return () => { conversationPollSeqRef.current++; };
   }, [runningInfo, convId, streaming]);
 
   const loadConversation = useCallback((id: string) => {
+    const seq = ++conversationLoadSeqRef.current;
+    convIdRef.current = id;
     setConvId(id);
     setPendingAgent(null);
     setLiveViewKey(null); setViewKey(null); // 다른 대화의 컴퓨터 뷰가 남지 않게
     refreshConversations(); // 목록이 오래돼 현재 대화가 없으면 담당 봇 칩이 안 뜸 — 열 때마다 갱신
     api.conversation(id).then((d) => {
+      if (seq !== conversationLoadSeqRef.current || convIdRef.current !== id) return;
       setMessages(d.messages);
       if (d.conversation.model) setModel(d.conversation.model);
     }).catch(() => {
+      if (seq !== conversationLoadSeqRef.current || convIdRef.current !== id) return;
       setMessages([{ // 로드 실패가 조용히 지나가지 않게 명시 — 서버 재시작 중 열기 등
         id: "err" + Date.now(), conversation_id: id, parent_id: null, role: "assistant",
         content: "⚠️ 대화를 불러오지 못했습니다 — 서버 연결을 확인한 뒤 다시 시도해 주세요.", reasoning: null, model: null, search_meta: null, attachments: null,
@@ -193,6 +215,9 @@ export default function App() {
   }, [refreshConversations]);
 
   const newConversation = useCallback(() => {
+    conversationLoadSeqRef.current++;
+    conversationPollSeqRef.current++;
+    convIdRef.current = null;
     setConvId(null);
     setPendingAgent(null);
     setMessages([]);
@@ -265,10 +290,10 @@ export default function App() {
     setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)));
   }, []);
 
-  const send = useCallback(async (text: string, mode: Mode, attachments: { url: string; name: string; mime: string }[]) => {
+  const send = useCallback(async (text: string, mode: Mode, attachments: { url: string; name: string; mime: string }[], taskMode?: TaskMode) => {
     if (streaming) {
       // 응답 진행 중 보낸 명령은 대기열에 쌓음 — 응답 완료 후 순서대로 자동 전송
-      setQueued((prev) => [...prev, { text, mode, attachments, forConv: convId }]);
+      setQueued((prev) => [...prev, { text, mode, attachments, forConv: convId, taskMode }]);
       return;
     }
     // "/new" — 현재 봇의 새 세션 시작. 이전 세션은 삭제되지 않고 요약만 이어받아 맥락 유지 (계정·키값은 봇 장기기억이 보존)
@@ -306,7 +331,7 @@ export default function App() {
     abortRef.current = abort;
 
     streamChat(
-      { conversationId: sendConvId ?? undefined, content: text, model: effectiveModel, mode, attachments, personaId, workspaceId: workspaceId || undefined, agentId: sendConvId ? undefined : sendAgent?.id },
+      { conversationId: sendConvId ?? undefined, content: text, model: effectiveModel, mode, attachments, personaId, workspaceId: workspaceId || undefined, agentId: sendConvId ? undefined : sendAgent?.id, taskMode },
       {
         onConversation: (id) => {
           streamConvRef.current = id;
@@ -363,7 +388,7 @@ export default function App() {
     if (!streaming && queued.length && (queued[0].forConv == null || queued[0].forConv === convId)) {
       const [next, ...rest] = queued;
       setQueued(rest);
-      send(next.text, next.mode, next.attachments);
+      send(next.text, next.mode, next.attachments, next.taskMode);
     }
   }, [streaming, queued, send, convId]);
 
@@ -518,7 +543,7 @@ export default function App() {
           <button
             className="relative grid size-10 shrink-0 place-items-center rounded-xl text-stone-500 hover:bg-stone-200/60 hover:text-stone-800 md:size-9"
             onClick={() => setSidebarOpen(!sidebarOpen)}
-            aria-label={`${sidebarOpen ? "사이드바 닫기" : "사이드바 열기"}${pendingUpdates + pendingReleases ? ` — 적용할 업데이트 ${pendingUpdates + pendingReleases}건` : ""}`}
+            aria-label={`${sidebarOpen ? "사이드바 닫기" : "사이드바 열기"}${pendingUpdates + pendingReleases ? " — 적용할 업데이트가 있습니다" : ""}`}
           >
             <Menu size={20} strokeWidth={1.8} />
             {/* 사이드바를 닫아둬도 업데이트가 온 것은 알 수 있게 한다 */}
@@ -585,11 +610,18 @@ export default function App() {
                   <WorkingStatus events={searchEvents} agent={activeAgent} />
                 </div>
               )}
-              {searchEvents.length > 0 && (
-                <SearchTrace events={searchEvents} done={!streaming} />
-              )}
-              {teamEvents.length > 0 && (
-                <TeamTrace events={teamEvents} done={!streaming} onView={(key) => setViewKey(key)} />
+              {(searchEvents.length > 0 || teamEvents.length > 0) && (
+                <details className="rounded-xl border border-stone-200/60 bg-white/30 px-4 py-2.5">
+                  <summary className="cursor-pointer text-sm font-medium text-stone-600">작업 상세 보기</summary>
+                  <div className="mt-3 space-y-3">
+                    {searchEvents.length > 0 && (
+                      <SearchTrace events={searchEvents} done={!streaming} />
+                    )}
+                    {teamEvents.length > 0 && (
+                      <TeamTrace events={teamEvents} done={!streaming} onView={(key) => setViewKey(key)} />
+                    )}
+                  </div>
+                </details>
               )}
             </div>
           </div>
@@ -606,7 +638,12 @@ export default function App() {
               >↓ 새 내용 — 최신으로</button>
             )}
             <div className="mx-auto max-w-3xl">
-              <Composer models={models} model={effectiveModel} onModelChange={changeModel} onSend={send} onStop={stop} streaming={streaming} queued={queued} onRemoveQueued={(i) => setQueued((prev) => prev.filter((_, j) => j !== i))} personas={personas} personaId={personaId} onPersonaChange={setPersonaId} skills={skills} />
+              <Composer models={models} model={effectiveModel} onModelChange={changeModel} onSend={send} onStop={stop} streaming={streaming} queued={queued} onRemoveQueued={(i) => setQueued((prev) => prev.filter((_, j) => j !== i))} onSteer={(i) => {
+                const item = queued[i];
+                if (!item) return;
+                const target = item.forConv ?? convId;
+                if (target) mybotFetch("/api/chat/steer", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ conversationId: target, content: item.text }) }).then((r) => { if (r.ok) setQueued((prev) => prev.filter((_, j) => j !== i)); });
+              }} personas={personas} personaId={personaId} onPersonaChange={setPersonaId} skills={skills} />
             </div>
           </div>
         )}

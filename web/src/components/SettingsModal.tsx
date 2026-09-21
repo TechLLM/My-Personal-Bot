@@ -7,6 +7,7 @@ import {
   ChevronDown, ChevronUp, Plus, Zap, KeyRound, LogIn,
 } from "lucide-react";
 import { AgentIcon } from "./icons";
+import { operationLabel } from "../../../shared/user-facing";
 
 type Section = "providers" | "search" | "image" | "agents" | "audit" | "routines" | "tools" | "browser" | "notify" | "memory" | "updates" | "general";
 
@@ -229,6 +230,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   const [rMailFrom, setRMailFrom] = useState(""); const [rMailSubj, setRMailSubj] = useState("");
   const [hookUrl, setHookUrl] = useState("");
   const [rRuns, setRRuns] = useState<Record<string, any[]>>({}); // 펼쳐진 루틴별 실행 이력 (A10)
+  const [rSugs, setRSugs] = useState<any[] | null>(null); // 반복 실행 이력에서 스캔한 루틴 제안
   // MCP 서버 추가 폼 (A11)
   const [mcName, setMcName] = useState(""); const [mcType, setMcType] = useState<"remote" | "stdio">("remote");
   const [mcUrl, setMcUrl] = useState(""); const [mcHdrs, setMcHdrs] = useState(""); const [mcCmd, setMcCmd] = useState("");
@@ -290,7 +292,8 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   useEffect(() => { if (section === "updates") { loadUpdates(); loadRelease(); } }, [section]);
   // 메뉴 배지를 띄우려면 섹션을 열기 전에 한 번은 알아야 한다
   useEffect(() => { loadUpdates(); loadRelease(); }, []);
-  const updBadge = updates.filter((u: any) => u.status === "pending").length + (rel?.pending.length ?? 0);
+  // 배지는 "지금 눌러서 적용되는 것"만 센다 — 정착 대기·묶음 미달로 막힌 릴리스는 섹션 안에서 사유를 보여주면 충분하다
+  const updBadge = updates.filter((u: any) => u.status === "pending").length + (rel?.canApply ? rel.pending.length : 0);
   // 적용·되돌리기는 성공하면 서버가 스스로 재시작한다 — 끊겼다 살아나면 새 화면으로 다시 불러온다
   const relAct = (label: string, fn: () => Promise<unknown>) => {
     setRelBusy(label); setRelErr("");
@@ -345,6 +348,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
 
   const authed = providers.filter((p) => p.enabled && p.authed);
   const shownMemories = memOpen ? memories : memories.slice(0, 5);
+  const statusLabel = (status: string) => ({ done: "완료", error: "오류", running: "실행 중", waiting: "대기", approved: "승인됨", denied: "거부됨", pending: "대기 중", expired: "만료됨" }[status] ?? "상태 확인 필요");
 
   return (
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-stone-950/30 md:items-center md:p-4" onClick={onClose}>
@@ -363,7 +367,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
               <Icon size={14} className="shrink-0" />
               <span className="truncate">{label}</span>
               {id === "providers" && authed.length > 0 && <span className="ml-auto rounded bg-emerald-50 px-1 text-micro text-emerald-600">{authed.length}</span>}
-              {id === "updates" && updBadge > 0 && <span className="ml-auto grid size-4 place-items-center rounded-full bg-amber-500 text-micro font-bold text-white">{updBadge}</span>}
+              {id === "updates" && updBadge > 0 && <span className="ml-auto size-1.5 rounded-full bg-amber-500" />}
             </button>
           ))}
           <div className="mt-auto hidden px-2 pb-1 text-2xs text-stone-300 md:block">MyBot 로컬 설정</div>
@@ -525,7 +529,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                       <div className="flex items-center gap-1.5">
                         <AgentIcon name={r.agent_name ?? "?"} seed={r.avatar} size={16} className="shrink-0" />
                         <span className="font-medium">{r.agent_name ?? "(삭제된 봇)"}</span>
-                        <span className={`rounded px-1 text-micro ${r.status === "done" ? "bg-emerald-100 text-emerald-700" : r.status === "error" ? "bg-red-100 text-red-600" : "bg-stone-200 text-stone-500"}`}>{r.status}</span>
+                        <span className={`rounded px-1 text-micro ${r.status === "done" ? "bg-emerald-100 text-emerald-700" : r.status === "error" ? "bg-red-100 text-red-600" : "bg-stone-200 text-stone-500"}`}>{statusLabel(r.status)}</span>
                         {r.routine_id && <span className="rounded bg-amber-100 px-1 text-micro text-amber-700">루틴</span>}
                         {r.resume_count > 0 && <span className="rounded bg-sky-100 px-1 text-micro text-sky-600">재개{r.resume_count}회</span>}
                         <span className="ml-auto text-micro text-stone-400">{new Date(r.created_at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
@@ -540,8 +544,8 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                   {(audit?.approvals ?? []).map((r) => (
                     <div key={r.id} className="rounded-lg bg-white px-2.5 py-1.5 text-caption">
                       <div className="flex items-center gap-1.5">
-                        <span className="font-medium">{r.tool}</span>
-                        <span className={`rounded px-1 text-micro ${r.status === "approved" ? "bg-emerald-100 text-emerald-700" : r.status === "denied" ? "bg-red-100 text-red-600" : "bg-amber-100 text-amber-700"}`}>{r.status}</span>
+                        <span className="font-medium">{operationLabel(r.tool)}</span>
+                        <span className={`rounded px-1 text-micro ${r.status === "approved" ? "bg-emerald-100 text-emerald-700" : r.status === "denied" ? "bg-red-100 text-red-600" : "bg-amber-100 text-amber-700"}`}>{statusLabel(r.status)}</span>
                         <span className="ml-auto text-micro text-stone-400">{r.agent_name ?? "—"} · {new Date(r.created_at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
                       </div>
                       <div className="mt-0.5 truncate text-stone-500">{r.summary}</div>
@@ -555,6 +559,28 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
             {section === "routines" && (
               <div>
                 <H>루틴 (예약 실행)</H>
+                <div className="mb-2 flex items-center gap-2">
+                  <button className="rounded-lg bg-stone-200 px-2.5 py-1 text-2xs text-stone-600 hover:bg-stone-300"
+                    onClick={() => mybotFetch("/api/routines/suggestions").then((r) => r.json()).then((d) => setRSugs(d.suggestions ?? []))}>
+                    반복 작업 제안 찾기
+                  </button>
+                  {rSugs !== null && <span className="text-2xs text-stone-400">최근 14일 중 같은 지시 3회 이상 실행</span>}
+                </div>
+                {rSugs !== null && (
+                  <div className="mb-2 space-y-1">
+                    {rSugs.length === 0 && <div className="rounded-lg bg-stone-50 px-2.5 py-2 text-2xs text-stone-400">반복되는 작업이 없습니다</div>}
+                    {rSugs.map((sg: any, i: number) => (
+                      <div key={i} className="flex items-center gap-2 rounded-lg bg-amber-50 px-2.5 py-1.5 text-xs">
+                        <span className="min-w-0 flex-1 truncate">{sg.task}</span>
+                        <span className="shrink-0 text-2xs text-stone-400">{sg.agent_name ?? "봇"} · {sg.runs}회</span>
+                        <button className="shrink-0 rounded bg-amber-200 px-2 py-0.5 text-2xs text-amber-800 hover:bg-amber-300"
+                          onClick={() => { setRName(sg.task.slice(0, 30)); setRPrompt(sg.task); setRAgent(sg.agent_id ?? ""); setRSugs((p) => (p ?? []).filter((_, j) => j !== i)); }}>
+                          초안으로
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="space-y-1.5">
                   {routines.map((r) => (
                     <div key={r.id} className="rounded-lg bg-white px-2.5 py-2 text-xs">
@@ -796,7 +822,10 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                     {mcType === "remote" ? (
                       <>
                         <input className={Input} placeholder="엔드포인트 URL (예: https://mcp.example.com/mcp)" value={mcUrl} onChange={(e) => setMcUrl(e.target.value)} />
-                        <input className={Input} placeholder='헤더 JSON (선택 — {"Authorization":"Bearer …"})' value={mcHdrs} onChange={(e) => setMcHdrs(e.target.value)} />
+                        <details className="rounded-lg border border-stone-200 bg-white/50 px-2.5 py-2">
+                          <summary className="cursor-pointer text-xs text-stone-600">고급 설정: 요청 헤더</summary>
+                          <input className={`${Input} mt-2`} type="password" aria-label="요청 헤더 설정" placeholder="서비스 문서의 헤더 설정을 입력하세요" value={mcHdrs} onChange={(e) => setMcHdrs(e.target.value)} />
+                        </details>
                       </>
                     ) : (
                       <input className={Input} placeholder="실행 명령 (예: npx -y @modelcontextprotocol/server-everything)" value={mcCmd} onChange={(e) => setMcCmd(e.target.value)} />
@@ -1004,54 +1033,85 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
 
             {section === "updates" && (
               <div>
-                <H>서비스 릴리스</H>
+                <H>서비스 버전 <span className="ml-1 text-xs font-normal text-stone-500">{rel?.version ? `현재 v${rel.version}` : ""}</span></H>
                 <p className="mb-3 text-caption text-stone-500">
-                  개발 인스턴스에서 검증을 마친 작업을 <code className="rounded bg-stone-200 px-1">release</code> 브랜치로 밀면 여기에 나타납니다.
+                  검증을 마친 개선 묶음이 등급별로 쌓입니다 — 긴급패치는 즉시, 마이너는 3건 이상 모이거나 첫 개선이 72시간을 넘기면 나가고, 메이저는 파괴적 표면(인증·승인·DB 스키마 등) 변경이 있을 때만 붙습니다.
                   적용하면 테스트를 먼저 돌리고, 통과할 때만 반영한 뒤 서비스를 다시 시작합니다.
                 </p>
+                {rel && (
+                  <div className="mb-3 flex items-center gap-2 rounded-lg bg-stone-50 px-3 py-2">
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${rel.stage === "launch" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                      {rel.stage === "launch" ? "정식 출시" : "개발 단계"}
+                    </span>
+                    <span className="flex-1 text-2xs text-stone-500">
+                      {rel.stage === "launch"
+                        ? "정규 semver — 메이저는 v(N+1).0.0과 12시간 정착 규칙이 적용됩니다"
+                        : "0.x 버전 체계 — 중요 업데이트는 중간 번호, 나머지는 끝 번호가 오릅니다"}
+                    </span>
+                    {rel.stage === "dev" && (
+                      <button onClick={() => { setRelBusy("정식 출시로 전환"); api.launchRelease().then(loadRelease).catch((e: Error) => setRelErr(e.message)).finally(() => setRelBusy("")); }} disabled={!!relBusy}
+                        className="shrink-0 rounded-lg border border-stone-300 px-2.5 py-1.5 text-xs text-stone-600 hover:bg-stone-100 disabled:opacity-40">
+                        {relBusy === "정식 출시로 전환" ? "전환 중…" : "정식 출시로 전환"}
+                      </button>
+                    )}
+                  </div>
+                )}
                 <div className="mb-6 rounded-xl border border-stone-200 p-3">
                   {rel === null ? (
-                    <p className="text-caption text-stone-500">릴리스 상태를 불러오지 못했습니다.</p>
+                    <p className="text-caption text-stone-500">버전 상태를 불러오지 못했습니다.</p>
                   ) : (
                     <>
                       <div className="flex items-start gap-2">
                         <div className="min-w-0 flex-1">
                           <div className="text-xs font-medium text-stone-800">
-                            {/* 대기분이 없는 이유는 "최신"만이 아니다 — 채널이 없을 수도 있어 사유를 그대로 보여준다 */}
-                            {rel.pending.length ? `새 릴리스 ${rel.pending.length}건 대기 중` : rel.reason || "최신 상태입니다"}
+                            {rel.canApply ? `v${rel.nextVersion} ${rel.pendingTierLabel} — 지금 적용할 수 있습니다` : "최신 상태입니다"}
                           </div>
                           <div className="mt-0.5 truncate font-mono text-2xs text-stone-500">
-                            현재 {rel.branch}@{rel.current} · {rel.currentSubject}
+                            {rel.version ? `v${rel.version}` : rel.current} · {rel.currentSubject}
                           </div>
                         </div>
+                        {rel.canApply && !!rel.pendingTier && (
+                          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${rel.pendingTier === "patch" ? "bg-red-100 text-red-700" : rel.pendingTier === "major" ? "bg-indigo-100 text-indigo-700" : "bg-stone-100 text-stone-600"}`}>
+                            {rel.pendingTierLabel}
+                          </span>
+                        )}
                         <button onClick={() => relAct("적용", api.applyRelease)} disabled={!rel.canApply || !!relBusy}
                           className="shrink-0 rounded-lg bg-stone-900 px-3 py-2 text-xs font-medium text-white hover:bg-stone-700 disabled:opacity-40 disabled:hover:bg-stone-900 md:py-1.5">
                           {relBusy === "적용" ? "적용 중…" : "적용"}
                         </button>
                       </div>
-                      {!!rel.pending.length && (
-                        <ul className="mt-2.5 space-y-1 border-t border-stone-100 pt-2.5">
-                          {rel.pending.map((p) => (
-                            <li key={p.sha} className="flex gap-2 text-2xs">
-                              <span className="shrink-0 font-mono text-stone-400">{p.sha}</span>
-                              <span className="min-w-0 flex-1 truncate text-stone-700">{p.subject}</span>
-                              <span className="shrink-0 text-stone-400">{new Date(p.date).toLocaleDateString("ko-KR", { month: "numeric", day: "numeric" })}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                      {!rel.canApply && rel.reason && rel.pending.length > 0 && (
-                        <p className="mt-2.5 text-caption text-amber-700">{rel.reason}</p>
-                      )}
                       {relBusy && relBusy !== "적용" && <p className="mt-2.5 text-caption text-stone-600">{relBusy}</p>}
                       {relErr && <p className="mt-2.5 whitespace-pre-wrap break-words text-caption text-red-700">{relErr}</p>}
                       {rel.canRevert && (
                         <div className="mt-2.5 flex items-center gap-2 border-t border-stone-100 pt-2.5">
-                          <span className="flex-1 text-2xs text-stone-500">직전 상태 {rel.prevSha}로 되돌릴 수 있습니다</span>
-                          <button onClick={() => relAct("되돌리기", api.revertRelease)} disabled={!!relBusy}
+                          <span className="flex-1 text-2xs text-stone-500">문제가 있으면 직전 버전으로 되돌릴 수 있습니다</span>
+                          <button onClick={() => relAct("되돌리기", () => api.winbackRelease())} disabled={!!relBusy}
                             className="shrink-0 rounded-lg bg-stone-200 px-2.5 py-1.5 text-xs text-stone-700 hover:bg-stone-300 disabled:opacity-40">
                             {relBusy === "되돌리기" ? "되돌리는 중…" : "되돌리기"}
                           </button>
+                        </div>
+                      )}
+                      {!!rel.history?.length && (
+                        <div className="mt-2.5 border-t border-stone-100 pt-2.5">
+                          <div className="mb-1.5 text-2xs font-medium text-stone-500">버전 기록 — 문제 발생 시 원하는 버전으로 윈백할 수 있습니다</div>
+                          <ul className="space-y-1.5">
+                            {rel.history.map((h) => (
+                              <li key={h.version} className="flex items-center gap-2 text-2xs">
+                                <span className={`shrink-0 font-mono font-semibold ${h.status === "reverted" ? "text-stone-400 line-through" : "text-stone-700"}`}>v{h.version}</span>
+                                <span className={`shrink-0 rounded px-1 py-px text-[9px] font-medium ${h.tier === "patch" ? "bg-red-50 text-red-600" : h.tier === "major" ? "bg-indigo-50 text-indigo-600" : "bg-stone-100 text-stone-500"}`}>
+                                  {{ patch: "긴급", minor: "마이너", major: "메이저" }[h.tier]}
+                                </span>
+                                <span className="min-w-0 flex-1 truncate text-stone-600">{h.subjects[0]}{h.subjects.length > 1 ? ` 외 ${h.subjects.length - 1}건` : ""}</span>
+                                <span className="shrink-0 text-stone-400">{new Date(h.appliedAt).toLocaleDateString("ko-KR", { month: "numeric", day: "numeric" })}</span>
+                                {h.status === "applied" && rel.version !== h.version && (
+                                  <button onClick={() => relAct(`v${h.version} 윈백`, () => api.winbackRelease(h.sha))} disabled={!!relBusy}
+                                    className="shrink-0 rounded bg-stone-100 px-1.5 py-0.5 text-[10px] text-stone-600 hover:bg-stone-200 disabled:opacity-40">
+                                    윈백
+                                  </button>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
                         </div>
                       )}
                       {!!rel.receipts?.length && (
@@ -1061,8 +1121,8 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                             {rel.receipts.map((r, i) => (
                               <li key={`${r.ts}-${i}`} className="text-2xs">
                                 <div className="flex gap-2">
-                                  <span className={`shrink-0 font-medium ${r.result === "applied" ? "text-emerald-700" : r.result === "rolled-back" ? "text-amber-700" : "text-red-700"}`}>
-                                    {r.result === "applied" ? "적용됨" : r.result === "rolled-back" ? "되돌림" : "중단됨"}
+                                  <span className={`shrink-0 font-medium ${r.result === "applied" ? "text-emerald-700" : r.result === "rolled-back" || r.result === "winback" ? "text-amber-700" : "text-red-700"}`}>
+                                    {r.result === "applied" ? "적용됨" : r.result === "rolled-back" ? "되돌림" : r.result === "winback" ? "윈백" : r.result === "rejected" ? "검증 실패" : "중단됨"}
                                   </span>
                                   <span className="min-w-0 flex-1 truncate text-stone-600">{r.subjects[0] ?? `${r.from.slice(0, 7)} → ${r.to.slice(0, 7)}`}</span>
                                   <span className="shrink-0 text-stone-400">{new Date(r.ts).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
@@ -1080,6 +1140,18 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
 
                 <H>버전 업데이트 <span className="ml-1 text-xs font-normal text-stone-500">현재 v{appVersion}</span></H>
                 <p className="mb-3 text-caption text-stone-500">새 버전이 준비되면 여기에서 직접 적용합니다.</p>
+                <div className="mb-3 rounded-lg bg-white px-3 py-2.5">
+                  <label className="flex items-center gap-2 text-xs text-stone-600">
+                    <input type="checkbox" checked={(s.evolve_auto ?? "1") !== "0"} onChange={(e) => update({ evolve_auto: e.target.checked ? "1" : "0" })} />
+                    자동 개선 사이클 — 개발 인스턴스가 실패 신호를 분석해 매일 검증된 개선안을 이 목록으로 보냅니다
+                  </label>
+                  <label className="mt-1.5 flex items-center gap-2 text-xs text-stone-600">
+                    사이클 실행 시각
+                    <input className="w-16 rounded-md bg-stone-100 px-2 py-1 text-xs outline-none" inputMode="numeric" value={s.evolve_hour ?? "3"}
+                      onChange={(e) => update({ evolve_hour: e.target.value.replace(/[^0-9]/g, "").slice(0, 2) })} />
+                    시 (0~23)
+                  </label>
+                </div>
                 <div className="space-y-2">
                   {updates.map((u) => {
                     const m = u.payload?.measurement;
@@ -1096,6 +1168,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
                           <span className="flex-1 font-medium text-stone-800">{u.payload?.summary}</span>
                         </div>
                         {gain && <div className="mt-1 text-caption text-stone-500">{gain}</div>}
+                        {u.status === "rejected" && !!u.payload?.rejectedReason && <div className="mt-1 text-caption text-red-500">거부 사유: {u.payload.rejectedReason}</div>}
                         {!!u.restart_required && <div className="mt-1 text-caption text-amber-600">적용 후 반영까지 잠시 시간이 걸릴 수 있습니다</div>}
                         <div className="mt-2 flex gap-1.5">
                           {u.status === "pending" && (

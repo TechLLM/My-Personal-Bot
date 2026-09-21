@@ -207,7 +207,7 @@ export function Sidebar({
           onClick={onOpenSettings}
           className="flex h-11 w-full items-center gap-2.5 rounded-xl px-3 text-left text-sm text-stone-600 hover:bg-white/60 hover:text-stone-900 md:h-10"
         ><Settings size={17} strokeWidth={1.8} /> 설정 · 엔드포인트 · 검색
-          {!!updateCount && <span className="ml-auto grid size-5 place-items-center rounded-full bg-amber-500 text-[10px] font-bold text-white">{updateCount}</span>}
+          {!!updateCount && <span className="ml-auto size-2 rounded-full bg-amber-500" />}
         </button>
       </div>
       </aside>

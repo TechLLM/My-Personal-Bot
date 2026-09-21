@@ -222,6 +222,19 @@ cliLog(JSON.stringify(rows));`,
 const PROVIDERS: Record<string, SearchProvider> = { bing, ddg, searxng, tavily, brave, exa, jina, headless, ego };
 
 export async function webSearch(query: string, limit = 6): Promise<{ provider: string; results: SearchResult[] }> {
+  // E2-B 격리 실행 — 샌드박스는 네트워크가 전면 차단이므로 부모의 자격 증명 브로커가
+  // 실제 검색을 대행한다. 허용 도구·호출 상한·인자 검증은 브로커가 집행하고,
+  // 운영(dev·서비스)에서는 이 분기가 켜지지 않는다(env 미설정).
+  if (process.env.MYBOT_ENV === "e2" && process.env.E2_BROKER_URL) {
+    const res = await fetch(`${process.env.E2_BROKER_URL}/tool`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${process.env.E2_BROKER_TOKEN ?? ""}` },
+      body: JSON.stringify({ tool: "web_search", args: { query, limit } }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) throw new Error(`broker_tool_${res.status}`);
+    return (await res.json()).result;
+  }
   const pref = getSetting("search_provider") ?? "auto";
   const order = pref === "auto" ? ["searxng", "tavily", "brave", "exa", "jina", "bing", "headless", "ego", "ddg"] : [pref, "bing", "headless", "ego", "ddg"];
   for (const name of order) {

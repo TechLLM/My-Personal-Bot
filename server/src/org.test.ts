@@ -1,4 +1,4 @@
-import { test, expect, beforeAll } from "bun:test";
+import { test, expect, beforeAll, afterAll } from "bun:test";
 import { db, now } from "./db";
 import { callBuiltin, runAgentDetached, stopAllRuns, getAgent, roundLimitFor, budgetWarnAt } from "./team";
 import { gateApproval, approvalDecision } from "./approvals";
@@ -6,15 +6,22 @@ import { systemPrompt } from "./routes/chat";
 
 // 봇 간 위임·메시지 연쇄 방지 테스트 — 2026-09-18 보고-회신 폭주(자정 이후 실행 64건·승인 대기 50건) 재발 방지
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
-// 외부 호출 차단 — 가드가 뚫려 실제 봇 실행으로 넘어가도 네트워크 없이 즉시 실패(400)하게
-globalThis.fetch = (async () => new Response('{"error":"test"}', { status: 400 })) as unknown as typeof fetch;
+// 외부 호출 차단 — 가드가 뚫려 실제 봇 실행으로 넘어가도 네트워크 없이 즉시 실패(400)하게.
+// 단 모듈 최상위에서 영구 교체하면 이 파일이 먼저 실행될 때 뒤따르는 다른 파일의 실제
+// fetch까지 400 mock으로 오염된다 (순서 의존으로 evolve-broker·격리 테스트가 깨졌다).
+// beforeAll/afterAll로 이 파일의 테스트 구간에만 한정한다.
+const realFetch = globalThis.fetch;
 
 const ids = { lead: "t-lead", a: "t-bot-a", b: "t-bot-b" };
 beforeAll(() => {
+  globalThis.fetch = (async () => new Response('{"error":"test"}', { status: 400 })) as unknown as typeof fetch;
   const ins = db.prepare("INSERT INTO agents (id, name, role_prompt, model, is_lead, created_at) VALUES (?, ?, '', 'zai/glm-5.3-flash', ?, 0)");
   ins.run(ids.lead, "테스트팀장", 1);
   ins.run(ids.a, "테스트봇A", 0);
   ins.run(ids.b, "테스트봇B", 0);
+});
+afterAll(() => {
+  globalThis.fetch = realFetch;
 });
 
 test("봇별 시간당 실행 상한(15회)이 실제로 위임을 막는다", async () => {
@@ -91,12 +98,13 @@ test("전체 중지는 진행 중인 봇 실행을 끊고 대기 중인 봇 메�
   }
 });
 
-test("위임 결과는 세션 기록용 보고서 정리(LLM)를 기다리지 않고 바로 돌아온다", async () => {
+test("위임 결과는 포맷터 없이 정규화된 실행 원문을 바로 반환한다", async () => {
   const blocked = globalThis.fetch;
   let releaseFormatter!: () => void;
   const formatterGate = new Promise<void>((r) => { releaseFormatter = r; });
   let formatterCalled = false;
   const answer = "## 결과\n" + "요약 내용입니다. ".repeat(30); // 200자 이상 — 보고서 정리 LLM 호출 대상
+  const messagesBefore = (db.prepare("SELECT COUNT(*) c FROM messages").get() as { c: number }).c;
   globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
     if (String(init?.body ?? "").includes("업무 보고서 포맷터")) {
       formatterCalled = true;
@@ -113,9 +121,11 @@ test("위임 결과는 세션 기록용 보고서 정리(LLM)를 기다리지 �
     ]);
     expect(out).toContain("테스트봇B 실행 결과 — 완료");
     expect(Date.now() - started).toBeLessThan(5000);
-    // 보고서 정리 호출 자체는 백그라운드에서 실제로 일어나야 한다 (정리 생략이 아니라 순서만 뒤로)
-    for (let i = 0; i < 50 && !formatterCalled; i++) await Bun.sleep(20);
-    expect(formatterCalled).toBe(true);
+    // 실제 실행 결과를 그대로 보존하며 합성 포맷터 대화나 세션 메시지를 추가하지 않는다.
+    expect(formatterCalled).toBe(false);
+    expect((db.prepare("SELECT COUNT(*) c FROM messages").get() as { c: number }).c).toBe(messagesBefore);
+    const run = db.prepare("SELECT result FROM agent_runs WHERE agent_id = ? ORDER BY created_at DESC LIMIT 1").get(ids.b) as { result: string };
+    expect(run.result).toBe(answer.trim());
   } finally {
     releaseFormatter();
     globalThis.fetch = blocked;

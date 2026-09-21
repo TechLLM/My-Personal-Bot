@@ -1,79 +1,52 @@
 import { Hono } from "hono";
 import nodemailer from "nodemailer";
 import { db, uid, now, getSetting, setSetting } from "./db";
+import { compactResult } from "../../shared/user-facing";
+import { completeCommand, createCommandJob, withRootJob } from "./command-delivery";
+
+const devSuppressed = () => process.env.MYBOT_ENV === "dev";
+const safeTelegramError = (status?: number) => status ? `텔레그램 API 오류 (${status})` : "텔레그램 전달 오류";
+
+export async function sendTelegramDetailed(text: string, o: { chatId?: string | null; messageId?: string | null } = {}): Promise<{ error: string | null; messageId?: string; unknown?: boolean }> {
+  if (devSuppressed()) return { error: "suppressed_dev" };
+  const token = getSetting("telegram_bot_token");
+  const chatId = o.chatId ?? getSetting("telegram_chat_id");
+  if (!token || !chatId) return { error: "봇 토큰/채팅 ID 미설정" };
+  const method = o.messageId ? "editMessageText" : "sendMessage";
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(20_000),
+      body: JSON.stringify({ chat_id: chatId, ...(o.messageId ? { message_id: Number(o.messageId) } : {}), text: text.slice(0, 3900) + (text.length > 3900 ? "\n…(전체는 앱에서 확인)" : "") }),
+    });
+    const data = await res.json().catch(() => null) as any;
+    if (!res.ok) return { error: safeTelegramError(res.status) };
+    if (!data || typeof data.ok !== "boolean") return { error: "텔레그램 전달 결과 미확인", unknown: true };
+    if (!data.ok) return { error: safeTelegramError(res.status) };
+    const messageId = String(data.result?.message_id ?? o.messageId ?? "") || undefined;
+    if (!messageId) return { error: "텔레그램 전달 결과 미확인", unknown: true };
+    return { error: null, messageId };
+  } catch {
+    return { error: "텔레그램 전달 결과 미확인", unknown: true };
+  }
+}
 
 // 텔레그램 봇 API로 결과 전송. 실패 시 오류 문자열, 성공 시 null
 export async function sendTelegram(text: string): Promise<string | null> {
-  const token = getSetting("telegram_bot_token");
-  const chatId = getSetting("telegram_chat_id");
-  if (!token || !chatId) return "봇 토큰/채팅 ID 미설정";
-  try {
-    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text: text.slice(0, 3900) + (text.length > 3900 ? "\n…(전체는 앱에서 확인)" : "") }),
-    });
-    if (!res.ok) return `텔레그램 ${res.status}: ${(await res.text()).slice(0, 200)}`;
-    return null;
-  } catch (e) {
-    return `텔레그램 오류: ${(e as Error).message}`;
-  }
+  return (await sendTelegramDetailed(text)).error;
 }
 
 // 마크다운 보고서를 텔레그램 HTML 메시지로 정돈해 전송 — 메시지 자체가 HTML 포맷
 // 별도 문서 파일을 만들지 않음. 길면 메시지를 나눠서 보내고, HTML 파싱 실패 시 평문 폴백
 // meta가 있으면 제목 아래 "관련 봇/요청" 헤더를 붙여 제목·관련봇·요청·결과 포맷을 완성한다
-export async function sendTelegramReport(title: string, mdReport: string, meta?: { agents?: string[]; request?: string }): Promise<string | null> {
-  const token = getSetting("telegram_bot_token");
-  const chatId = getSetting("telegram_chat_id");
-  if (!token || !chatId) return "봇 토큰/채팅 ID 미설정";
-  try {
-    const { mdToTelegramHtml, cleanOutput } = await import("./report");
-    const clean = cleanOutput(mdReport);
-    const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
-    let html = `<b>■ ${esc(title)}</b>`;
-    if (meta?.agents?.length) html += `\n관련 봇: ${esc(meta.agents.join(", "))}`;
-    if (meta?.request) html += `\n요청: ${esc(meta.request.slice(0, 300))}`;
-    if (meta?.agents?.length || meta?.request) html += "\n────────────\n";
-    html += "\n" + mdToTelegramHtml(clean);
-    // 텔레그램 메시지 한도 4096자 — 줄 단위로 나눠 여러 메시지로 전송
-    const chunks: string[] = [];
-    let buf = "";
-    for (const line of html.split("\n")) {
-      if (buf.length + line.length + 1 > 3900) { chunks.push(buf); buf = ""; }
-      buf += (buf ? "\n" : "") + line;
-    }
-    if (buf) chunks.push(buf);
-    for (let ci = 0; ci < chunks.length; ci++) {
-      const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, text: chunks[ci], parse_mode: "HTML", disable_web_page_preview: true }),
-      });
-      if (!res.ok) {
-        // HTML 파싱 실패 시 실패한 청크부터 평문으로 폴백 — 보고서 후반부가 유실되지 않게 청크 단위로 전송
-        const plain = clean.split("\n");
-        let buf2 = ci === 0
-          ? `[MyBot] ${title}\n` +
-            (meta?.agents?.length ? `관련 봇: ${meta.agents.join(", ")}\n` : "") +
-            (meta?.request ? `요청: ${meta.request.slice(0, 300)}\n` : "") + "\n"
-          : "";
-        for (const line of plain) {
-          if (buf2.length + line.length + 1 > 3900) { await sendTelegram(buf2); buf2 = ""; }
-          buf2 += (buf2 ? "\n" : "") + line;
-        }
-        if (buf2) await sendTelegram(buf2);
-        return null;
-      }
-    }
-    return null;
-  } catch (e) {
-    return `텔레그램 오류: ${(e as Error).message}`;
-  }
+export async function sendTelegramReport(title: string, mdReport: string, _meta?: { agents?: string[]; request?: string }): Promise<string | null> {
+  // 저수준 전송은 안전한 평문 한 건만 보낸다. 원 요청 재인용·청크 분할·HTML 폴백 재전송 금지.
+  return sendTelegram(`${title}\n\n${compactResult(mdReport, 3700)}`);
 }
 
 // SMTP로 결과 메일 전송
 export async function sendEmail(subject: string, text: string): Promise<string | null> {
+  if (devSuppressed()) return "suppressed_dev";
   const host = getSetting("smtp_host");
   const to = getSetting("email_to");
   if (!host || !to) return "SMTP 호스트/받는 주소 미설정";
@@ -96,9 +69,6 @@ export async function sendEmail(subject: string, text: string): Promise<string |
 // 텔레그램은 정규화된 보고서 형식으로 발송 — 모델과 무관하게 정돈된 포맷 보장
 // 포맷: ■ 제목 / 관련 봇 / 요청 / ──── / 결과. dedupeKey로 같은 결과의 중복 발송 차단
 // (위임 중간 응답 + 최종 보고, 루틴 발송 + 대화 완료 발송 등 같은 결과가 2경로로 오는 경우)
-const sentKeys = new Map<string, number>(); // dedupeKey → 발송 시각
-const DEDUPE_MS = 10 * 60 * 1000;
-
 export interface NotifyResultOpts {
   title: string;                    // 제목 — 대화 제목 / 루틴 라벨 등
   content: string;                  // 결과 내용
@@ -108,32 +78,13 @@ export interface NotifyResultOpts {
 }
 
 export function notifyResult(o: NotifyResultOpts) {
-  const key = o.dedupeKey ?? `${o.title}:${o.content.slice(0, 200)}`;
-  const now = Date.now();
-  for (const [k, t] of sentKeys) if (now - t > DEDUPE_MS) sentKeys.delete(k);
-  if (sentKeys.has(key)) return;
-  sentKeys.set(key, now);
-
-  const agentName = o.agents?.join(", ") ?? "MyBot";
-  const meta = { agents: o.agents, request: o.request };
-  if (getSetting("notify_telegram") === "1") {
-    void (async () => {
-      const { normalizeReport } = await import("./report");
-      const report = await normalizeReport(agentName, o.request ?? o.title, o.content);
-      const e = await sendTelegramReport(o.title, report, meta);
-      if (e) console.error("[notify]", e);
-    })();
-  }
-  if (getSetting("notify_email") === "1") {
-    const subject = `[MyBot] ${o.title}${o.agents?.length ? ` — ${o.agents.join(", ")}` : ""}`;
-    const body = (o.request ? `요청: ${o.request}\n\n` : "") + o.content;
-    sendEmail(subject, body).then((e) => e && console.error("[notify]", e));
-  }
+  const root = createCommandJob({ source: "notification", request: o.request ?? o.title, dedupeKey: o.dedupeKey ?? null });
+  void completeCommand(root, o.content, o.dedupeKey ?? "notification");
 }
 
 // --- 텔레그램 수신 → 대장 봇 처리 → 대장 세션 기록 + 텔레그램 회신 ---
 // 설정 telegram_listen=1 일 때만 동작. 대장 봇이 도구·봇 생성·위임을 전부 사용 가능
-async function handleTelegramText(text: string): Promise<string> {
+export async function handleTelegramText(text: string, updateId?: number): Promise<string> {
   const { ensureBossAgent, runAgent, bossSessionConvId, defaultModel } = await import("./team");
   type TeamAgentState = import("./team").TeamAgentState;
   const { appendToAgentSession } = await import("./routes/chat");
@@ -151,34 +102,44 @@ async function handleTelegramText(text: string): Promise<string> {
   }
   const ctxBlock = ctx.length ? `\n\n[이전 텔레그램 대화]\n${ctx.slice(-6).join("\n")}` : "";
 
+  const placeholder = appendToAgentSession(convId, `[텔레그램] ${text}`, "", boss.model);
+  const rootJobId = createCommandJob({ source: "telegram", conversationId: convId, assistantMessageId: placeholder.assistant.id, request: text, ownerAgentId: boss.id, dedupeKey: updateId === undefined ? null : `update:${updateId}` });
+  const existing = db.prepare("SELECT execution_done, full_result FROM command_jobs WHERE id = ?").get(rootJobId) as { execution_done: number; full_result: string | null };
+  if (existing.execution_done) return existing.full_result ?? "(결과 없음)";
   const runId = uid();
-  db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, created_at) VALUES (?, ?, ?, ?, 'running', ?)")
-    .run(runId, boss.id, convId, `[텔레그램] ${text.slice(0, 200)}`, now());
+  db.prepare("INSERT INTO agent_runs (id, agent_id, conversation_id, task, status, root_job_id, created_at) VALUES (?, ?, ?, ?, 'running', ?, ?)")
+    .run(runId, boss.id, convId, `[텔레그램] ${text.slice(0, 200)}`, rootJobId, now());
   const state = {
     id: boss.id, runId, name: boss.name, avatar: boss.avatar ?? "🤖",
     role: boss.role_prompt,
     task: `사용자가 텔레그램으로 보낸 업무 지시입니다. 수행하고 결과를 보고하세요. 필요하면 봇을 만들거나 기존 봇에게 위임하세요.${ctxBlock}\n\n지시: ${text}`,
     model: boss.model ?? defaultModel(), status: "running", steps: 0, toolLog: [], depth: 0,
   } as TeamAgentState;
-  await runAgent(state, boss, () => {}, AbortSignal.timeout(240_000));
-  db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
-    .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
-  const out = state.result ?? "(결과 없음)";
-  // 세션 기록과 텔레그램 회신 모두 정규화된 보고서 형식으로 — 이모지 제거·고정 섹션
-  const { normalizeReport } = await import("./report");
-  const report = await normalizeReport(boss.name, text, out);
-  appendToAgentSession(convId, `[텔레그램] ${text}`, report, boss.model);
-  const err = await sendTelegramReport(boss.name, report, { agents: [boss.name], request: text });
-  if (err) console.error("[telegram]", err);
-  return report;
+  state.rootJobId = rootJobId;
+  try {
+    await withRootJob(rootJobId, () => runAgent(state, boss, () => {}, AbortSignal.timeout(240_000)));
+    db.prepare("UPDATE agent_runs SET status = ?, result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
+      .run(state.status, state.result ?? null, state.steps, JSON.stringify(state.toolLog), now(), runId);
+    const out = state.result ?? "(결과 없음)";
+    const { normalizeReport } = await import("./report");
+    const report = await normalizeReport(boss.name, text, out);
+    await completeCommand(rootJobId, report, `run:${runId}`);
+    return report;
+  } catch (e) {
+    const report = `작업 실행 중 오류가 발생했습니다: ${(e as Error).message || "원인을 확인할 수 없습니다."}`;
+    db.prepare("UPDATE agent_runs SET status = 'error', result = ?, steps = ?, tool_log = ?, finished_at = ? WHERE id = ?")
+      .run(report, state.steps, JSON.stringify(state.toolLog), now(), runId);
+    await completeCommand(rootJobId, report, `run:${runId}`);
+    throw e;
+  }
 }
 
 let tgStarted = false;
 export function startTelegramBot() {
+  if (devSuppressed()) { console.log("[mybot] dev 환경 — 텔레그램 수신·발신 억제"); return; }
   if (tgStarted) return;
   tgStarted = true;
   let offset = Number(getSetting("telegram_update_offset") || 0);
-  let webhookCleared = false;
   (async () => {
     for (;;) {
       const token = getSetting("telegram_bot_token");
@@ -189,12 +150,7 @@ export function startTelegramBot() {
       }
       try {
         const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=${offset}&timeout=25`, { signal: AbortSignal.timeout(35_000) });
-        if (res.status === 409 && !webhookCleared) {
-          // 다른 곳에서 webhook이 설정돼 있으면 getUpdates가 막힘 — 해제 후 폴링
-          webhookCleared = true;
-          await fetch(`https://api.telegram.org/bot${token}/deleteWebhook`, { method: "POST" }).catch(() => {});
-          continue;
-        }
+        if (res.status === 409) { await Bun.sleep(10_000); continue; }
         if (!res.ok) { await Bun.sleep(10_000); continue; }
         const data = (await res.json()) as any;
         for (const u of data.result ?? []) {
@@ -202,15 +158,16 @@ export function startTelegramBot() {
           setSetting("telegram_update_offset", String(offset));
           const text = u.message?.text;
           if (!text || String(u.message.chat?.id) !== String(chatId)) continue; // 등록된 채팅만 허용
+          try { db.prepare("INSERT INTO telegram_updates (update_id, created_at) VALUES (?, ?)").run(Number(u.update_id), now()); }
+          catch { continue; }
           try {
-            await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
+            if (!devSuppressed()) await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
               method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ chat_id: chatId, action: "typing" }),
+              body: JSON.stringify({ chat_id: chatId, action: "typing" }), signal: AbortSignal.timeout(10_000),
             }).catch(() => {});
-            await handleTelegramText(text); // 정규화된 보고서 형식으로 텔레그램 회신까지 내부에서 처리
+            await handleTelegramText(text, Number(u.update_id));
           } catch (e) {
             console.error("[telegram]", (e as Error).message);
-            sendTelegram(`지시 처리 중 오류: ${(e as Error).message}`).catch(() => {});
           }
         }
       } catch {

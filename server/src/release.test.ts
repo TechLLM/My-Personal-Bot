@@ -2,10 +2,11 @@ import { test, expect } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { db } from "./db";
+import { db, setSetting } from "./db";
 import {
   evaluateRelease, runGates, defaultGates, bootCheck, run, BUN,
   writeReceipt, readReceipts, interruptedReceipt, type Gate,
+  classifyTier, nextVersion, pickWinbackTarget, applyRelease, type ReleaseRecord,
 } from "./release";
 
 if (db.filename !== ":memory:") throw new Error(`테스트가 운영 DB를 열었습니다: ${db.filename}`);
@@ -106,6 +107,30 @@ test("기동 시험은 웹 빌드까지 끝난 뒤 마지막에 돌린다", () =
   expect(names).toEqual(["테스트", "타입검사", "웹 빌드", "기동 시험"]);
 });
 
+// 2026-09-20 사고: merge로 서비스 트리를 바꾼 뒤 돌린 스위트가 외장 디스크 I/O 경합으로
+// 샌드박스 계열 테스트를 떨궈 멀쩡한 업데이트가 롤백됐다. 이제 검증은 대상 커밋을
+// 임시 worktree(빠른 로컬 디스크)에서 끝내고, 통과한 트리만 merge한다.
+
+test("검증 게이트는 지정한 루트 안에서 실행된다 — 스테이징 worktree가 쓰는 형태", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mybot-gates-"));
+  try {
+    mkdirSync(join(dir, "server"));
+    // 이 루트에서 도는 게 맞다면 실패해야 한다 — 저장소 테스트를 돌렸으면 통과했을 것
+    writeFileSync(join(dir, "server", "x.test.ts"), 'import { test, expect } from "bun:test"; test("f", () => expect(1).toBe(2));');
+    const r = await defaultGates(dir)[0].run();
+    expect(r.ok).toBe(false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}, 30000);
+
+test("이전 적용이 끝나지 않았으면 새 적용을 겹쳐 돌리지 않는다", async () => {
+  setSetting("release_inflight", JSON.stringify({ from: "a", to: "b", subjects: [], ts: Date.now() }));
+  try {
+    const r = await applyRelease([]);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("끝나지 않았습니다");
+  } finally { setSetting("release_inflight", ""); }
+});
+
 // --- 영수증·저널 (개선지침서 R1·R3) ---
 
 test("영수증은 쌓이고 최신이 먼저 나온다", () => {
@@ -148,4 +173,75 @@ test("여러 조건이 동시에 어긋나면 가장 먼저 막아야 할 사유
   expect(evaluateRelease({ hasChannel: false, pending: 0, clean: false, ff: false }).reason).toContain("아직 없습니다");
   // 브랜치는 있으나 더티하고 갈라진 경우 — 먼저 해결해야 하는 쪽은 작업 폴더다
   expect(evaluateRelease({ hasChannel: true, pending: 1, clean: false, ff: false }).reason).toContain("커밋되지 않은 변경");
+});
+
+// --- 버전 등급 분류·배치 임계·윈백 (3등급 릴리스 정책) ---
+
+test("커밋 제목에 긴급이 붙으면 긴급패치다 — 한 건이어도 즉시 나간다", () => {
+  expect(classifyTier(["긴급: 인증 오류 수정"], ["server/src/routes/chat.ts"])).toBe("patch");
+  expect(classifyTier(["hotfix: 결제 폴백 무한루프"], ["server/src/team.ts"])).toBe("patch");
+  const r = evaluateRelease({ ...ok, pending: 1, tier: "patch", oldestAgeMs: 0 });
+  expect(r.canApply).toBe(true); // 임계를 기다리지 않는다
+});
+
+test("파괴적 표면이나 명시 표시만 메이저다 — evolve·파일 수는 메이저가 아니다", () => {
+  // 인증·승인·릴리스·암호·DB·기동·의존성은 한 줄만 건드려도 메이저
+  expect(classifyTier(["승인 흐름 보강"], ["server/src/approvals.ts"])).toBe("major");
+  expect(classifyTier(["의존성 갱신"], ["package.json"])).toBe("major");
+  expect(classifyTier(["스키마 변경"], ["server/src/db.ts"])).toBe("major");
+  // 제목으로 명시한 메이저도 인정한다 — 파괴적이지만 표면 목록에 없는 변경용
+  expect(classifyTier(["메이저: API 계약 변경"], ["server/src/routes/chat.ts"])).toBe("major");
+  // 개발 단계의 일상 작업은 메이저가 아니다 — evolve 내부 도구·대규모 변경·라우트 추가
+  expect(classifyTier(["자기개선 격리"], ["evolve/surfaces.json"])).toBe("minor");
+  expect(classifyTier(["토너먼트 개선"], ["server/src/evolve.ts"])).toBe("minor");
+  expect(classifyTier(["UI 다수 개선"], Array.from({ length: 15 }, (_, i) => `web/src/c${i}.tsx`))).toBe("minor");
+  // 개발 단계(dev)의 메이저는 정착 없이 바로 적용된다 — 출시 단계(launch)만 12시간 정착
+  expect(evaluateRelease({ ...ok, pending: 1, tier: "major", newestAgeMs: 3600_000, stage: "dev" }).canApply).toBe(true);
+  const fresh = evaluateRelease({ ...ok, pending: 1, tier: "major", newestAgeMs: 3600_000, stage: "launch" });
+  expect(fresh.canApply).toBe(false);
+  expect(fresh.reason).toContain("정착");
+  expect(evaluateRelease({ ...ok, pending: 1, tier: "major", newestAgeMs: 13 * 3600_000, stage: "launch" }).canApply).toBe(true);
+});
+
+test("일상 개선 묶음은 마이너 — 3건 미만이고 72시간도 안 지났으면 보류한다", () => {
+  expect(classifyTier(["표현 다듬기"], ["web/src/components/Composer.tsx"])).toBe("minor");
+  const hold = evaluateRelease({ ...ok, pending: 2, tier: "minor", oldestAgeMs: 3600_000 });
+  expect(hold.canApply).toBe(false);
+  expect(hold.reason).toContain("쌓이면");
+  // 3건 이상이면 나간다
+  expect(evaluateRelease({ ...ok, pending: 3, tier: "minor", oldestAgeMs: 3600_000 }).canApply).toBe(true);
+  // 건수가 적어도 첫 커밋이 72시간을 넘기면 나간다 — 개선을 영원히 붙들지 않는다
+  expect(evaluateRelease({ ...ok, pending: 1, tier: "minor", oldestAgeMs: 73 * 3600_000 }).canApply).toBe(true);
+});
+
+test("버전 번호는 단계·등급대로 오른다", () => {
+  // 출시 단계 — 정규 semver
+  expect(nextVersion("1.2.3", "patch", "launch")).toBe("1.2.4");
+  expect(nextVersion("1.2.3", "minor", "launch")).toBe("1.3.0");
+  expect(nextVersion("1.2.3", "major", "launch")).toBe("2.0.0");
+  // 개발 단계 — 0.x 유지: 메이저만 중간 번호, 나머지는 끝 번호
+  expect(nextVersion("0.2.0", "major", "dev")).toBe("0.3.0");
+  expect(nextVersion("0.2.0", "minor", "dev")).toBe("0.2.1");
+  expect(nextVersion("0.2.0", "patch", "dev")).toBe("0.2.1");
+  expect(nextVersion(null, "minor", "dev")).toBe("0.0.1");
+  expect(nextVersion(null, "major", "dev")).toBe("0.1.0");
+  // 개발 단계에서는 1.0.0 이전 기록이 있어도 0.x로 유지한다 (구 버전 원장과 무관)
+  expect(nextVersion("3.0.0", "major", "dev")).toBe("0.1.0");
+  // 출시 전환 후 첫 메이저가 1.0.0이다
+  expect(nextVersion("0.9.2", "major", "launch")).toBe("1.0.0");
+});
+
+test("윈백 대상은 버전 원장에 기록된 지점만 된다", () => {
+  const h: ReleaseRecord[] = [
+    { version: "1.0.0", tier: "major", sha: "aaa", prevSha: "000", appliedAt: 1, subjects: ["처음"], status: "applied" },
+    { version: "1.1.0", tier: "minor", sha: "bbb", prevSha: "aaa", appliedAt: 2, subjects: ["개선"], status: "applied" },
+  ];
+  // 지정 없으면 직전 버전의 prevSha = 마지막 적용을 되돌리는 지점
+  expect(pickWinbackTarget(h, "bbb")).toEqual({ sha: "aaa", label: "1.0.0" });
+  // 기록된 어느 버전으로도 갈 수 있다
+  expect(pickWinbackTarget(h, "bbb", "000")).toEqual({ sha: "000", label: "000" });
+  // 기록에 없는 지점·현재 위치·빈 원장은 거부
+  expect(pickWinbackTarget(h, "bbb", "zzz")).toEqual(expect.objectContaining({ ok: false }));
+  expect(pickWinbackTarget(h, "bbb", "bbb")).toEqual(expect.objectContaining({ ok: false }));
+  expect(pickWinbackTarget([], "bbb")).toEqual(expect.objectContaining({ ok: false }));
 });

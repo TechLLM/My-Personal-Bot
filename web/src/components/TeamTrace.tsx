@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Bot } from "lucide-react";
 import { AgentIcon } from "./icons";
+import { operationLabel } from "../../../shared/user-facing";
 
 export interface TeamAgentInfo {
   id: string;
@@ -97,7 +98,7 @@ export function TeamTrace({ events, done, onView }: { events: TeamEvent[]; done:
             </div>
             <div className="mt-1 text-caption text-stone-500">작업: {a.task}</div>
             {a.toolLog.length > 0 && (
-              <div className="mt-1 text-2xs italic text-stone-400">도구: {a.toolLog.join(" → ")}</div>
+              <div className="mt-1 text-2xs italic text-stone-400">작업: {a.toolLog.map(operationLabel).join(" → ")}</div>
             )}
             {a.result && (
               <button

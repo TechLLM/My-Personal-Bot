@@ -1,0 +1,197 @@
+// E2-B credential broker — 격리 worker가 API 키를 들지 않고 모델을 쓰는 유일한 통로.
+// 부모(dev 서버) 프로세스가 127.0.0.1:<랜덤포트>에 열고, 샌드박스 정책이 그 포트로의
+// outbound만 허용한다. API 키는 부모에만 있고 worker는 토큰만 든다.
+// 여기서 모델 허용목록·호출 수·토큰 상한을 집행하고 호출당 비용을 계측한다 (E4 지점).
+import { createServer, type Server } from "node:http";
+import { randomUUID } from "node:crypto";
+
+export interface BrokerUsage {
+  calls: number;
+  estTokens: number; // usage 미제공 프로바이더용 추정치(문자/4) — E4에서 실제 usage로 대체 가능
+  toolCalls: number;
+  byTag: Record<string, { calls: number; estTokens: number; models: string[]; toolCalls: number }>;
+}
+
+export interface BrokerHandle {
+  url: string;
+  port: number;
+  token: string;
+  usage(): BrokerUsage;
+  close(): Promise<void>;
+}
+
+// 실제 모델 호출 — 테스트에서는 스텁을 주입한다
+export type BrokerUpstream = (
+  model: string,
+  messages: unknown[],
+  opts: Record<string, unknown>,
+) => Promise<{ content: string; toolCalls?: { id?: string; name: string; arguments: string }[]; usage?: { total_tokens?: number } }>;
+
+async function realUpstream(model: string, messages: unknown[], opts: Record<string, unknown>) {
+  const { resolveModel } = await import("../providers");
+  const { chatOnce } = await import("../providers/openaiCompat");
+  const { endpoint, model: resolved } = resolveModel(model);
+  const res = await chatOnce(endpoint, resolved, messages as any, opts as any);
+  return { content: res.content ?? "", toolCalls: res.toolCalls, usage: (res as any).usage };
+}
+
+// 허용 목록은 풀 id("prov/model")로 관리한다 — worker가 보낸 bare 이름은
+// 목록 중 그 접미사와 정확히 하나만 일치할 때 해석된다.
+function resolveAllowed(allowed: Set<string>, requested: string): string | null {
+  if (allowed.has(requested)) return requested;
+  const hits = [...allowed].filter((id) => id.endsWith(`/${requested}`) || id === requested);
+  return hits.length === 1 ? hits[0] : null;
+}
+
+// 외부 도구 대행 — worker(샌드박스)는 네트워크가 없으므로 허용된 도구만 부모가 실행한다.
+// 테스트에서는 스텁을 주입한다. tag는 호출 팔(baseline/candidate-N) — 팔별 자원 분리에 쓴다.
+export type BrokerToolHandler = (tool: string, args: Record<string, unknown>, tag: string) => Promise<unknown>;
+
+// 샌드박스에서 대행 가능한 브라우저 도구 — 읽기 전용만.
+// click·type·eval·login·handoff는 페이지 변형·자격증명·사용자 팝업이 걸리고,
+// look은 부모의 비전 모델 호출이라 계측 밖 비용이 생긴다. ego_run·bsk는 사용자의
+// 실제 브라우저를 임의 스크립트·명령으로 움직이므로 샌드박스에 열지 않는다.
+// (부작용이 생기는 도구는 측정이 아니라 운영 행동이다 — 승인 게이트 없는 샌드박스에 놓지 않는다)
+export const SANDBOX_BROWSER_TOOLS = new Set(["browser_open", "browser_read", "browser_scroll", "browser_wait", "browser_back"]);
+
+const MCP_TOOL_NAME = /^[\w-]+__[\w-]+$/; // MCP 도구는 "서버__도구" 네임스페이스
+
+const defaultToolHandler: BrokerToolHandler = async (tool, args, tag) => {
+  if (tool === "web_search") {
+    const { webSearch } = await import("../search/index");
+    const query = String(args.query ?? "").slice(0, 500);
+    if (!query.trim()) throw new Error("invalid_args");
+    const limit = Math.min(10, Math.max(1, Number(args.limit) || 6));
+    return await webSearch(query, limit);
+  }
+  // 읽기 전용 브라우저 — 부모의 headless Chromium을 팔별 페이지 키로 대행한다.
+  // 허용 목록(과제 선언)을 통과해도 여기 고정 집합 밖 브라우저 도구는 거부된다.
+  if (SANDBOX_BROWSER_TOOLS.has(tool)) {
+    const { browserTool } = await import("../browser");
+    const { __key, ...rest } = args;
+    const key = `e2-${tag}-${String(__key ?? "run").replace(/[^\w-]/g, "").slice(0, 48)}`;
+    return await browserTool(key, tool, rest);
+  }
+  // MCP — 도구 이름 자체가 허용 목록(골든 과제 선언)에 있어야 여기까지 온다.
+  if (MCP_TOOL_NAME.test(tool)) {
+    const { mcpCall } = await import("../mcp");
+    return await mcpCall(tool, args);
+  }
+  throw new Error("unsupported_tool");
+};
+
+export function startBroker(opts: {
+  models: string[];                 // 이 사이클에서 허용할 모델 id (풀 id 형식)
+  tools?: string[];                 // /tool 경로에서 허용할 도구 id — 명시하지 않으면 도구 대행은 닫혀 있다
+  toolHandler?: BrokerToolHandler;  // 테스트 주입용 — 기본은 실제 도구 경로
+  maxCalls?: number;                // 기본 40 — 벤치 무한 루프 방지
+  maxCallsPerTag?: number;          // 팔별 모델 호출 상한 — baseline과 candidate에 같은 예산
+  maxToolCallsPerTag?: number;      // 팔별 도구 호출 상한 — 기본 20
+  maxEstTokens?: number;            // 기본 200_000 — 사이클 토큰 예산 상한
+  upstream?: BrokerUpstream;        // 테스트 주입용 — 기본은 실제 프로바이더 경로
+}): Promise<BrokerHandle> {
+  const token = randomUUID();
+  const allowed = new Set(opts.models);
+  const allowedTools = new Set(opts.tools ?? []);
+  const maxCalls = opts.maxCalls ?? 40;
+  const maxCallsPerTag = opts.maxCallsPerTag ?? maxCalls;
+  const maxToolCallsPerTag = opts.maxToolCallsPerTag ?? 20;
+  const maxEstTokens = opts.maxEstTokens ?? 200_000;
+  const upstream = opts.upstream ?? realUpstream;
+  const toolHandler = opts.toolHandler ?? defaultToolHandler;
+  const usage: BrokerUsage = { calls: 0, estTokens: 0, toolCalls: 0, byTag: {} };
+  const tagUsage = (tag: string) => (usage.byTag[tag] ??= { calls: 0, estTokens: 0, models: [], toolCalls: 0 });
+
+  const server: Server = createServer((req, res) => {
+    const reply = (code: number, body: object) => {
+      res.writeHead(code, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    };
+    const isChat = req.method === "POST" && req.url === "/chat";
+    const isOpenAI = req.method === "POST" && req.url === "/v1/chat/completions";
+    const isTool = req.method === "POST" && req.url === "/tool";
+    const isUsage = req.method === "GET" && req.url === "/usage";
+    if (!isChat && !isOpenAI && !isTool && !isUsage) return reply(404, { error: "not_found" });
+    // 토큰 뒤에 ":태그"를 붙이면 호출이 그 태그로 계측된다 — 격리 비교는 팔(arm)별
+    // 토큰 태그를 써서 같은 브로커를 공유하면서도 팔별 비용을 분리해 기록한다.
+    const auth = req.headers.authorization ?? "";
+    const [bearer, tag = "default"] = auth.startsWith("Bearer ") ? auth.slice(7).split(":") : ["", "default"];
+    if (bearer !== token) return reply(401, { error: "unauthorized" });
+    if (isUsage) return reply(200, usage);
+    let body = "";
+    req.on("data", (c) => {
+      body += c;
+      if (body.length > 512 * 1024) { reply(413, { error: "request_too_large" }); req.destroy(); }
+    });
+    req.on("end", async () => {
+      let parsed: any;
+      try { parsed = JSON.parse(body); } catch { return reply(400, { error: "invalid_json" }); }
+      const per = tagUsage(tag);
+      if (isTool) {
+        // 도구 대행 — 허용 목록에 없는 도구·상한 초과는 거부한다. 호출은 팔별로 계측된다.
+        if (typeof parsed?.tool !== "string" || !allowedTools.has(parsed.tool)) return reply(403, { error: "tool_not_allowed" });
+        if (per.toolCalls >= maxToolCallsPerTag) return reply(429, { error: "tool_call_limit" });
+        usage.toolCalls++;
+        per.toolCalls++;
+        try {
+          const args = parsed.args && typeof parsed.args === "object" && !Array.isArray(parsed.args) ? parsed.args : {};
+          const result = await toolHandler(parsed.tool, args, tag);
+          return reply(200, { result });
+        } catch (e) {
+          return reply(502, { error: `tool_upstream: ${(e as Error).message.slice(0, 200)}` });
+        }
+      }
+      if (typeof parsed?.model !== "string" || !Array.isArray(parsed?.messages)) return reply(400, { error: "invalid_request" });
+      const resolvedModel = resolveAllowed(allowed, parsed.model);
+      if (!resolvedModel) return reply(403, { error: "model_not_allowed" });
+      if (usage.calls >= maxCalls) return reply(429, { error: "call_limit" });
+      if (per.calls >= maxCallsPerTag) return reply(429, { error: "tag_call_limit" });
+      if (usage.estTokens >= maxEstTokens) return reply(429, { error: "token_budget" });
+      usage.calls++;
+      try {
+        // /v1은 OpenAI 요청 형식을 받는다 — tools·tool_choice·reasoning_effort를 그대로 전달
+        const opts = isOpenAI
+          ? { tools: parsed.tools, toolChoice: parsed.tool_choice, reasoningEffort: parsed.reasoning_effort }
+          : (parsed.opts ?? {});
+        const out = await upstream(resolvedModel, parsed.messages, opts);
+        const inChars = parsed.messages.reduce((n: number, m: any) => n + String(m?.content ?? "").length, 0);
+        const spent = out.usage?.total_tokens ?? Math.ceil((inChars + out.content.length) / 4);
+        usage.estTokens += spent;
+        per.calls++;
+        per.estTokens += spent;
+        if (!per.models.includes(resolvedModel)) per.models.push(resolvedModel);
+        if (isOpenAI) {
+          reply(200, {
+            id: `broker-${randomUUID()}`, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: resolvedModel,
+            choices: [{
+              index: 0, finish_reason: out.toolCalls?.length ? "tool_calls" : "stop",
+              message: {
+                role: "assistant", content: out.content,
+                ...(out.toolCalls?.length ? { tool_calls: out.toolCalls.map((tc, i) => ({ id: tc.id ?? `call_${i}`, type: "function", function: { name: tc.name, arguments: tc.arguments ?? "{}" } })) } : {}),
+              },
+            }],
+            usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: out.usage?.total_tokens ?? 0 },
+          });
+        } else {
+          reply(200, { content: out.content, model: resolvedModel });
+        }
+      } catch (e) {
+        reply(502, { error: `upstream_error: ${(e as Error).message.slice(0, 200)}` });
+      }
+    });
+  });
+
+  return new Promise((resolvePromise, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const port = (server.address() as { port: number }).port;
+      resolvePromise({
+        url: `http://127.0.0.1:${port}`,
+        port,
+        token,
+        usage: () => ({ ...usage }),
+        close: () => new Promise<void>((done) => server.close(() => done())),
+      });
+    });
+  });
+}

@@ -1,5 +1,6 @@
 import { Hono } from "hono";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { getSetting, setSetting } from "./db";
 
@@ -14,6 +15,70 @@ const ROOT = join(import.meta.dir, "..", "..");
 const CHANNEL = "release";
 
 export interface PendingCommit { sha: string; subject: string; date: string }
+
+// ---------- 버전 등급·원장 ----------
+// 세 등급으로 관리한다: 긴급패치(patch)는 즉시, 마이너(minor)는 쌓아서, 메이저(major)는 마일스톤 단위.
+export type ReleaseTier = "patch" | "minor" | "major";
+export const TIER_LABEL: Record<ReleaseTier, string> = { patch: "긴급패치", minor: "마이너", major: "메이저" };
+
+// 확실한 메이저만 등급을 올린다 — 서비스 적용 시 실제로 깨질 수 있는 표면
+// (인증·승인·릴리스 자체·자격증명 암호·DB 스키마·기동·의존성) 접촉이거나
+// 커밋 제목으로 명시한 경우뿐. evolve 내부 도구·파일 수는 개발 단계의 일상
+// 작업이라 메이저가 아니다 — 그 기준이 커밋마다 메이저를 만들어 묶음을 깼다.
+const CRITICAL_SURFACE = /^(server\/src\/(access|approvals|release|crypto|db|index)\.|package\.json$|bun\.lock$)/;
+const MAJOR_SUBJECT = /^메이저[:!]|^major[:!]|^breaking[:!]|^BREAKING[:\s]/i;
+// 마이너는 매 커밋마다 배포하지 않는다 — 3건이 쌓이거나 첫 커밋이 72시간 묵으면 적용 가능하다.
+// 그보다 빨리 나가야 하는 수정은 커밋 제목을 "긴급"으로 시작해 긴급패치 등급을 쓴다.
+const MINOR_MIN_COMMITS = 3;
+const MINOR_MIN_AGE_MS = 72 * 3600_000;
+// 메이저는 정착 시간으로 간다 — 정식 출시(launch) 단계에서만 적용한다.
+// 개발(dev) 단계에는 메이저가 드물고 검증이 앞서므로 정착 없이 바로 적용 가능하다.
+const MAJOR_SETTLE_MS = 12 * 3600_000;
+
+// 릴리스 단계 — dev: 0.x 버전, 메이저 정착 없음 / launch: 정규 semver, 메이저 정착 12시간.
+// 정식 출시는 설정의 "정식 출시로 전환" 버튼으로 선언하고, 그 뒤 첫 메이저가 자동으로 1.0.0이 된다.
+export type ReleaseStage = "dev" | "launch";
+export function releaseStage(): ReleaseStage {
+  return getSetting("release_stage") === "launch" ? "launch" : "dev";
+}
+
+// 대기 커밋 묶음의 등급 — 긴급 접두사 > 파괴적 표면·명시 메이저 > 일반 묶음
+export function classifyTier(subjects: string[], files: string[]): ReleaseTier {
+  if (subjects.some((s) => /긴급|^hotfix[:!]|^fix!/i.test(s.trim()))) return "patch";
+  if (subjects.some((s) => MAJOR_SUBJECT.test(s.trim()))) return "major";
+  if (files.some((f) => CRITICAL_SURFACE.test(f))) return "major";
+  return "minor";
+}
+
+// dev 단계는 0.x — 중요 업데이트(메이저)만 중간 번호를 올리고 나머지는 끝 번호를 올린다.
+// launch 단계는 정규 semver — 0.x에서 메이저가 오면 1.0.0이 돼 출시 버전이 자연스럽게 시작된다.
+export function nextVersion(current: string | null, tier: ReleaseTier, stage: ReleaseStage = releaseStage()): string {
+  const [M, m, p] = (current ?? "0.0.0").split(".").map((n) => Number(n) || 0);
+  if (stage === "dev") {
+    // 개발 단계 — 정식 출시 전까지 0.x 유지. 구 버전 원장(1.x 이상)이 있어도 0.x로 매긴다.
+    const mm = M > 0 ? 0 : m, pp = M > 0 ? 0 : p;
+    return tier === "major" ? `0.${mm + 1}.0` : `0.${mm}.${pp + 1}`;
+  }
+  if (tier === "major") return `${M + 1}.0.0`; // launch에서 0.x + major = 1.0.0 — 출시 버전 시작
+  if (tier === "minor") return `${M}.${m + 1}.0`;
+  return `${M}.${m}.${p + 1}`;
+}
+
+// 적용된 릴리스의 버전 원장 — 윈백 지점과 적용 이력의 근거다. DB settings에 JSON으로 둔다.
+export interface ReleaseRecord {
+  version: string;
+  tier: ReleaseTier;
+  sha: string;        // 이 버전의 커밋
+  prevSha: string;    // 적용 직전 커밋 — 이 버전의 윈백 지점
+  appliedAt: number;
+  subjects: string[];
+  status: "applied" | "reverted"; // reverted = 더 과거 버전으로 윈백돼 현재 이력에서 벗어남
+}
+export function loadHistory(): ReleaseRecord[] {
+  try { return JSON.parse(getSetting("release_history") || "[]") as ReleaseRecord[]; } catch { return []; }
+}
+const saveHistory = (h: ReleaseRecord[]) => setSetting("release_history", JSON.stringify(h.slice(-50)));
+const currentRelease = () => loadHistory().filter((r) => r.status === "applied").at(-1) ?? null;
 
 // launchd로 뜬 프로세스는 로그인 셸의 PATH를 물려받지 않는다(기본 /usr/bin:/bin:/usr/sbin:/sbin).
 // plist가 절대 경로로 띄워 주므로 서버는 돌지만, 여기서 "bun"을 이름으로 부르면 찾지 못한다.
@@ -36,12 +101,19 @@ const git = (...args: string[]) => run(["git", ...args]);
 const tail = (s: string, n = 1200) => (s.length > n ? "…" + s.slice(-n) : s);
 
 // 적용 가능 여부 판정 — git 조회 결과만 받는 순수 함수로 두어 규칙을 테스트로 고정한다
-export function evaluateRelease(x: { hasChannel: boolean; pending: number; clean: boolean; ff: boolean }): { canApply: boolean; reason: string } {
+export function evaluateRelease(x: { hasChannel: boolean; pending: number; clean: boolean; ff: boolean; tier?: ReleaseTier; oldestAgeMs?: number; newestAgeMs?: number; stage?: ReleaseStage }): { canApply: boolean; reason: string } {
   if (!x.hasChannel) return { canApply: false, reason: `${CHANNEL} 브랜치가 아직 없습니다 — 개발 인스턴스에서 먼저 밀어 주세요` };
   if (!x.pending) return { canApply: false, reason: "최신 상태입니다" };
   if (!x.clean) return { canApply: false, reason: "서비스 폴더에 커밋되지 않은 변경이 있어 적용할 수 없습니다" };
   // ff가 아니면 서비스에만 있는 커밋이 사라질 수 있다 — 자동으로 합치지 않고 사람에게 넘긴다
   if (!x.ff) return { canApply: false, reason: `${CHANNEL}가 현재 커밋에서 갈라져 있습니다 — 개발 인스턴스에서 정리가 필요합니다` };
+  // 마이너는 커밋 단위로 나가지 않는다 — 임계 미만이면 보류하고 사유를 보여준다
+  if (x.tier === "minor" && x.pending < MINOR_MIN_COMMITS && (x.oldestAgeMs ?? 0) < MINOR_MIN_AGE_MS)
+    return { canApply: false, reason: `개선이 더 쌓이면 적용됩니다 — 마이너 업데이트는 ${MINOR_MIN_COMMITS}건 이상이거나 첫 커밋이 72시간을 넘겨야 나갑니다 (현재 ${x.pending}건)` };
+  // 메이저는 마지막 변경 뒤 정착 시간을 둔다 — 정식 출시 단계에서만. 개발 단계는 게이트 없이
+  // 관리자가 누르면 바로 적용한다. 호출자가 최신 커밋 시각을 모르면 정착된 것으로 본다
+  if (x.tier === "major" && x.stage === "launch" && (x.newestAgeMs ?? Infinity) < MAJOR_SETTLE_MS)
+    return { canApply: false, reason: `메이저 업데이트는 마지막 변경 후 ${Math.round(MAJOR_SETTLE_MS / 3600_000)}시간의 정착이 필요합니다 — ${Math.ceil((MAJOR_SETTLE_MS - (x.newestAgeMs ?? 0)) / 3600_000)}시간 후 적용할 수 있습니다` };
   return { canApply: true, reason: "" };
 }
 
@@ -55,16 +127,30 @@ export function releaseStatus() {
     ? git("log", "--format=%h\t%s\t%cI", `HEAD..${CHANNEL}`).out.split("\n").filter(Boolean)
         .map((l) => { const [sha, subject, date] = l.split("\t"); return { sha, subject, date }; })
     : [];
-  const prev = getSetting("release_prev_sha") ?? "";
+  const files = pending.length
+    ? git("diff", "--name-only", "HEAD", CHANNEL).out.split("\n").filter(Boolean)
+    : [];
+  const tier = pending.length ? classifyTier(pending.map((p) => p.subject), files) : null;
+  const oldest = pending.length ? Date.parse(pending[pending.length - 1].date) : 0;
+  const newest = pending.length ? Date.parse(pending[0].date) : 0; // git log는 최신 커밋이 먼저 온다
+  const history = loadHistory();
+  const cur = currentRelease();
+  const stage = releaseStage();
   return {
     branch: git("rev-parse", "--abbrev-ref", "HEAD").out,
     current: git("rev-parse", "--short", "HEAD").out,
     currentSubject: git("log", "-1", "--format=%s").out,
-    clean, pending,
-    ...evaluateRelease({ hasChannel, pending: pending.length, clean, ff }),
-    canRevert: !!prev,
-    prevSha: prev.slice(0, 7),
-    appliedAt: Number(getSetting("release_applied_at")) || 0,
+    clean, pending, files,
+    stage,
+    pendingTier: tier,
+    pendingTierLabel: tier ? TIER_LABEL[tier] : null,
+    version: cur?.version ?? null,
+    nextVersion: tier ? nextVersion(cur?.version ?? null, tier, stage) : null,
+    history: history.slice(-10).reverse(), // 최신 버전이 먼저 — 윈백 대상 목록
+    ...evaluateRelease({ hasChannel, pending: pending.length, clean, ff, tier: tier ?? undefined, oldestAgeMs: oldest ? Date.now() - oldest : 0, newestAgeMs: newest ? Date.now() - newest : 0, stage }),
+    canRevert: !!cur || !!getSetting("release_prev_sha"),
+    prevSha: (cur?.prevSha ?? getSetting("release_prev_sha") ?? "").slice(0, 7),
+    appliedAt: cur?.appliedAt ?? (Number(getSetting("release_applied_at")) || 0),
     appVersion: Number(getSetting("app_version")) || 0,
     receipts: readReceipts(5), // 무엇을 언제 적용했고 어떤 검사를 통과했는지
   };
@@ -82,7 +168,9 @@ export interface Receipt {
   to: string;                // 적용 대상 커밋
   subjects: string[];        // 적용하려는 커밋 제목
   gates: string[];           // 통과한 검사
-  result: "applied" | "rolled-back" | "interrupted";
+  result: "applied" | "rolled-back" | "interrupted" | "winback" | "rejected";
+  version?: string;          // 부여된 버전 (예: 1.2.0)
+  tier?: ReleaseTier;
   error?: string;
 }
 
@@ -169,20 +257,33 @@ export async function bootCheck(cwd = join(ROOT, "server")): Promise<{ ok: boole
   } finally { proc.kill(); }
 }
 
-const cmdGate = (name: string, cmd: string[], cwd: string, env?: Record<string, string>): Gate =>
-  ({ name, run: async () => run(cmd, { cwd: join(ROOT, cwd), env }) });
+const cmdGate = (name: string, cmd: string[], dir: string, env?: Record<string, string>): Gate =>
+  ({ name, run: async () => run(cmd, { cwd: dir, env }) });
 
 // 기동 시험은 반드시 마지막이다 — 웹 빌드까지 끝난 상태로 띄워야 실제 배포본과 같다
-export const defaultGates = (): Gate[] => [
-  cmdGate("테스트", [BUN, "test"], "server", { NODE_ENV: "test" }),
-  cmdGate("타입검사", [BUN, "x", "tsc", "--noEmit"], "server"),
-  cmdGate("웹 빌드", [BUN, "run", "build"], "web"),
-  { name: "기동 시험", run: bootCheck },
+export const defaultGates = (root = ROOT): Gate[] => [
+  cmdGate("테스트", [BUN, "test"], join(root, "server"), { NODE_ENV: "test" }),
+  cmdGate("타입검사", [BUN, "x", "tsc", "--noEmit"], join(root, "server")),
+  cmdGate("웹 빌드", [BUN, "run", "build"], join(root, "web")),
+  { name: "기동 시험", run: () => bootCheck(join(root, "server")) },
 ];
 
-// 검증은 반영 뒤에 돌린다 — 새 코드로 통과해야 의미가 있기 때문이다.
-// 하나라도 실패하면 받기 전 커밋으로 되돌려 서비스를 원래 상태로 남긴다.
-export async function applyRelease(gates?: Gate[]): Promise<{ ok: true; version: number; sha: string } | Fail> {
+// 반영 뒤에는 배포 산출물과 실기동만 다시 확인한다 — 무거운 검증은 스테이징에서 끝났다
+const deployGates = (): Gate[] => [
+  cmdGate("웹 빌드", [BUN, "run", "build"], join(ROOT, "web")),
+  { name: "기동 시험", run: () => bootCheck(join(ROOT, "server")) },
+];
+
+const installDeps = (dir: string) => run([BUN, "install"], { cwd: dir });
+
+// 검증은 반영 "전에", 대상 커밋의 트리를 임시 worktree에서 돌린다.
+// 서비스 트리를 merge로 바꾼 뒤 무거운 스위트를 돌리면 실행 중인 서비스와 외장 디스크의
+// I/O 경합 속에서 샌드박스·서브프로세스 계열 테스트가 일시적으로 실패해, 멀쩡한
+// 업데이트가 롤백되고 트리가 두 번 뒤집히는 사고가 있었다(2026-09-20).
+// 스테이징은 빠른 로컬 디스크(tmpdir)에서 돌고, 실패해도 서비스 코드는 한 줄도 안 바뀐다.
+export async function applyRelease(gates?: Gate[]): Promise<{ ok: true; version: number; sha: string; release: string; tier: ReleaseTier } | Fail> {
+  // 진행 중인 적용이 남아 있으면 겹쳐 돌리지 않는다 — 저널은 다음 기동 때 회수된다
+  if (getSetting("release_inflight")) return fail("점검", "이전 적용이 아직 끝나지 않았습니다 — 잠시 후 다시 시도하세요");
   const st = releaseStatus();
   if (!st.canApply) return fail("점검", st.reason);
 
@@ -191,6 +292,37 @@ export async function applyRelease(gates?: Gate[]): Promise<{ ok: true; version:
   const subjects = st.pending.map((p) => p.subject);
   beginJournal({ from: before, to: target, subjects }); // 손대기 전에 의도를 먼저 남긴다
 
+  // 1단계: 스테이징 검증 — 대상 커밋 그대로의 트리에서 의존성 설치부터 전체 검사를 돌린다.
+  const stageDir = mkdtempSync(join(tmpdir(), "mybot-stage-"));
+  git("worktree", "prune"); // 이전에 죽은 적용이 남긴 관리 항목을 미리 치운다
+  const wt = git("worktree", "add", "--detach", stageDir, target);
+  if (!wt.ok) {
+    rmSync(stageDir, { recursive: true, force: true });
+    clearJournal();
+    return fail("준비", tail(wt.out));
+  }
+  const reject = (stage: string, detail: string): Fail => {
+    // 스테이징 거부는 종결 상태다 — inflight 마커를 지우지 않으면 이후 적용이 영구 차단된다
+    clearJournal();
+    writeReceipt({ ts: Date.now(), from: before, to: target, subjects, gates: [], result: "rejected", error: `${stage}: ${tail(detail, 800)}` });
+    return fail(stage, `${tail(detail)}\n\n서비스 코드는 바뀌지 않았습니다. 일시적인 환경 문제일 수 있으니 다시 시도할 수 있습니다.`);
+  };
+  const list = gates ?? defaultGates(stageDir);
+  try {
+    for (const dir of [stageDir, join(stageDir, "web")]) {
+      const inst = installDeps(dir);
+      if (!inst.ok) return reject("의존성 설치", inst.out);
+    }
+    const result = await runGates(list);
+    if (!result.ok) return reject(result.stage, result.out);
+  } catch (e) {
+    return reject("검증", `예기치 못한 오류 — ${(e as Error).message}`);
+  } finally {
+    git("worktree", "remove", "--force", stageDir);
+    rmSync(stageDir, { recursive: true, force: true });
+  }
+
+  // 2단계: 반영 — 검증을 통과한 바로 그 트리를 받는다.
   const merged = git("merge", "--ff-only", CHANNEL);
   if (!merged.ok) {
     clearJournal();
@@ -201,36 +333,103 @@ export async function applyRelease(gates?: Gate[]): Promise<{ ok: true; version:
   // 예외가 그냥 올라가면 반영만 된 채 재시작도 롤백도 없이 남는다(실제로 겪은 사고다).
   const rollback = (stage: string, detail: string): Fail => {
     git("reset", "--hard", before);
+    installDeps(ROOT);
+    installDeps(join(ROOT, "web"));
     run([BUN, "run", "build"], { cwd: join(ROOT, "web") }); // 되돌린 소스로 화면도 원상복구
     clearJournal();
-    writeReceipt({ ts: Date.now(), from: before, to: target, subjects, gates: [], result: "rolled-back", error: `${stage}: ${tail(detail, 400)}` });
+    writeReceipt({ ts: Date.now(), from: before, to: target, subjects, gates: [], result: "rolled-back", error: `${stage}: ${tail(detail, 800)}` });
     return fail(stage, `${tail(detail)}\n\n받기 전 상태(${before.slice(0, 7)})로 되돌렸습니다.`);
   };
 
-  const list = gates ?? defaultGates();
   try {
-    const result = await runGates(list);
-    if (!result.ok) return rollback(result.stage, result.out);
+    // 의존성 동기화 — 릴리스가 패키지를 바꿨으면 테스트·기동 전에 맞춰야 한다
+    for (const dir of [ROOT, join(ROOT, "web")]) {
+      const inst = installDeps(dir);
+      if (!inst.ok) return rollback("의존성 설치", inst.out);
+    }
+    for (const g of deployGates()) {
+      const r = await g.run();
+      if (!r.ok) return rollback(g.name, r.out);
+    }
   } catch (e) {
     return rollback("검증", `예기치 못한 오류 — ${(e as Error).message}`);
   }
 
   setSetting("release_prev_sha", before);
   setSetting("release_applied_at", String(Date.now()));
-  const version = (Number(getSetting("app_version")) || 0) + 1;
-  setSetting("app_version", String(version));
+  const appV = (Number(getSetting("app_version")) || 0) + 1;
+  setSetting("app_version", String(appV));
+
+  // 버전 원장 — 대기 묶음의 등급으로 버전을 매기고, 태그·원장·영수증에 같은 번호를 남긴다
+  const files = git("diff", "--name-only", before, target).out.split("\n").filter(Boolean);
+  const tier = classifyTier(subjects, files);
+  const version = nextVersion(currentRelease()?.version ?? null, tier);
+  git("tag", `v${version}`, target);
+  const history = loadHistory();
+  history.push({ version, tier, sha: target, prevSha: before, appliedAt: Date.now(), subjects, status: "applied" });
+  saveHistory(history);
+
   clearJournal();
-  writeReceipt({ ts: Date.now(), from: before, to: target, subjects, gates: list.map((g) => g.name), result: "applied" });
-  return { ok: true, version, sha: git("rev-parse", "--short", "HEAD").out };
+  writeReceipt({ ts: Date.now(), from: before, to: target, subjects, gates: list.map((g) => g.name), result: "applied", version, tier });
+  return { ok: true, version: appV, sha: git("rev-parse", "--short", "HEAD").out, release: version, tier };
 }
 
-export function revertRelease(): { ok: true; sha: string } | Fail {
+// 윈백 대상 결정 — 기록된 버전 지점(sha·prevSha)만 허용한다.
+// 임의 커밋으로의 리셋은 "어디로 돌아간 건지"를 잃게 만들어 금지한다.
+export function pickWinbackTarget(history: ReleaseRecord[], head: string, sha?: string): { sha: string; label: string } | Fail {
+  if (!history.length) return fail("점검", "되돌릴 버전 기록이 없습니다");
+  const applied = history.filter((r) => r.status === "applied");
+  const target = sha ?? applied.at(-1)?.prevSha ?? "";
+  const anchors = new Set(history.flatMap((r) => [r.sha, r.prevSha]));
+  if (!target || !anchors.has(target)) return fail("점검", "기록된 버전 지점이 아닙니다");
+  if (target === head) return fail("점검", "이미 그 버전을 실행 중입니다");
+  const label = history.find((r) => r.sha === target)?.version ?? target.slice(0, 7);
+  return { sha: target, label };
+}
+
+// 문제가 생기면 기록된 어느 버전으로든 되돌린다. 되돌리기도 새 이력으로 남겨
+// "지금 어떤 버전인가"가 항상 원장에 걸맞게 유지되게 한다.
+export function winbackRelease(targetSha?: string): { ok: true; sha: string; release: string } | Fail {
+  if (git("status", "--porcelain", "--untracked-files=no").out) return fail("점검", "커밋되지 않은 변경이 있어 되돌릴 수 없습니다");
+  const head = git("rev-parse", "HEAD").out;
+  const t = pickWinbackTarget(loadHistory(), head, targetSha);
+  if (!("sha" in t)) return t;
+
+  const r = git("reset", "--hard", t.sha);
+  if (!r.ok) return fail("되돌리기", tail(r.out));
+  installDeps(ROOT);
+  installDeps(join(ROOT, "web"));
+  const build = run([BUN, "run", "build"], { cwd: join(ROOT, "web") });
+  if (!build.ok) return fail("웹 빌드", `코드는 되돌렸지만 화면 빌드에 실패했습니다 — ${tail(build.out)}`);
+
+  const history = loadHistory();
+  const from = [...history].reverse().find((rec) => rec.status === "applied") ?? null; // 윈백 전 현재 버전
+  // 대상 지점 위에 올라갔던 버전들은 이력에서 벗어났으므로 reverted로 표시한다
+  for (const rec of history) {
+    if (rec.status === "applied" && rec.sha !== t.sha && !git("merge-base", "--is-ancestor", rec.sha, t.sha).ok) rec.status = "reverted";
+  }
+  const version = nextVersion(from?.version ?? null, "patch"); // 윈백도 새 버전 — 이력이 선형으로 남는다
+  history.push({
+    version, tier: "patch", sha: t.sha, prevSha: head, appliedAt: Date.now(),
+    subjects: [`윈백: ${from?.version ? `v${from.version}` : head.slice(0, 7)} → v${t.label} 복귀`], status: "applied",
+  });
+  saveHistory(history);
+  setSetting("release_prev_sha", head); // 윈백 직후 한 단계 되돌림 지점도 갱신
+  writeReceipt({ ts: Date.now(), from: head, to: t.sha, subjects: [`윈백 → v${t.label}`], gates: [], result: "winback", version, tier: "patch" });
+  return { ok: true, sha: git("rev-parse", "--short", t.sha).out, release: version };
+}
+
+export function revertRelease(): { ok: true; sha: string; release?: string } | Fail {
+  // 예전 방식(직전 커밋 한 단계)은 원장이 없을 때의 폴백 — 기록이 있으면 윈백으로 간다
+  if (loadHistory().length) return winbackRelease();
   const prev = getSetting("release_prev_sha");
   if (!prev) return fail("점검", "되돌릴 지점이 없습니다");
   if (git("status", "--porcelain", "--untracked-files=no").out) return fail("점검", "커밋되지 않은 변경이 있어 되돌릴 수 없습니다");
 
   const r = git("reset", "--hard", prev);
   if (!r.ok) return fail("되돌리기", tail(r.out));
+  installDeps(ROOT);
+  installDeps(join(ROOT, "web"));
   const build = run([BUN, "run", "build"], { cwd: join(ROOT, "web") });
   if (!build.ok) return fail("웹 빌드", `코드는 되돌렸지만 화면 빌드에 실패했습니다 — ${tail(build.out)}`);
 
@@ -259,4 +458,20 @@ export const releaseRoute = new Hono()
       scheduleRestart();
       return c.json({ ...r, restarting: true });
     } catch (e) { return c.json({ ok: false, error: `되돌리기 중 오류 — ${(e as Error).message}` }, 500); }
+  })
+  // 특정 버전으로의 윈백 — 기록된 지점만 받는다
+  .post("/winback", async (c) => {
+    try {
+      const body = await c.req.json().catch(() => ({}));
+      const r = winbackRelease(typeof body?.sha === "string" && body.sha ? body.sha : undefined);
+      if (!r.ok) return c.json(r, 400);
+      scheduleRestart();
+      return c.json({ ...r, restarting: true });
+    } catch (e) { return c.json({ ok: false, error: `윈백 중 오류 — ${(e as Error).message}` }, 500); }
+  })
+  // 정식 출시 선언 — dev(0.x)에서 launch(정규 semver·메이저 정착)로 전환한다.
+  // 이후 첫 메이저 적용이 자동으로 1.0.0이 된다.
+  .post("/launch", (c) => {
+    setSetting("release_stage", "launch");
+    return c.json({ ok: true, stage: "launch" });
   });

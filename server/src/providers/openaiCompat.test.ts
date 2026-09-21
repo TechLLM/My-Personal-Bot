@@ -215,8 +215,8 @@ test("내용과 무관한 400은 폴백하지 않고 즉시 실패한다", async
   }
 });
 
-test("폴백까지 모두 거부되면 콘텐츠 정책이라고 알려준다", () => {
+test("폴백까지 모두 거부되면 콘텐츠 필터라고 알려준다", () => {
   const msg = friendlyProviderError('오류 400: {"contentFilter":[{"level":1,"role":"assistant"}],"error":{"code":"1301","message":"System detected potentially unsafe or sensitive content"}}');
-  expect(msg).toContain("콘텐츠 정책");
+  expect(msg).toContain("콘텐츠 필터");
   expect(msg).toContain("원문:");
 });

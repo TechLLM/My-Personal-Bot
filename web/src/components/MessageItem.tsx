@@ -8,6 +8,7 @@ import { AgentIcon } from "./icons";
 import { WorkingStatus } from "./WorkingStatus";
 import { HtmlPreview } from "./HtmlPreview";
 import { AuthenticatedImage } from "./AuthenticatedImage";
+import { operationLabel } from "../../../shared/user-facing";
 
 // 저장된 과거 메시지·스트리밍 중간에 섞인 장식 이모지를 렌더 단에서 제거 — 정돈된 선형 표기 유지
 const stripEmoji = (s: string) => s.replace(/\p{Extended_Pictographic}️?/gu, "").replace(/‍/g, "");
@@ -39,6 +40,14 @@ interface SearchMeta {
   events?: { type: string; title?: string; url?: string }[];
 }
 
+const commandStatusText: Record<NonNullable<Message["command_status"]>, string> = {
+  running: "작업을 실행하는 중입니다…",
+  waiting_approval: "사용자 승인을 기다리고 있습니다.",
+  waiting_children: "담당 봇들의 결과를 기다리고 있습니다.",
+  completed: "작업이 종료됐으며 표시할 결과를 확인하는 중입니다.",
+  interrupted: "작업이 중단됐습니다. 필요하면 다시 요청해 주세요.",
+};
+
 export function MessageItem({
   m,
   streaming,
@@ -61,6 +70,9 @@ export function MessageItem({
   const [editText, setEditText] = useState(m.content);
   const [copied, setCopied] = useState(false);
   const [planSel, setPlanSel] = useState<Set<number> | null>(null);
+  const [showFull, setShowFull] = useState(false);
+  const [showTrace, setShowTrace] = useState(false);
+  const fullDiffers = !!m.full_content && m.full_content !== m.content;
 
   const meta: SearchMeta | null = m.search_meta ? JSON.parse(m.search_meta) : null;
   // 승인 대기 계획: 기본 전체 선택
@@ -138,6 +150,11 @@ export function MessageItem({
         </div>
       )}
       {streaming && !m.reasoning && !m.content && <WorkingStatus compact />}
+      {!m.content && !streaming && m.command_status && (
+        <div className={`rounded-xl border px-3 py-2.5 text-xs ${m.command_status === "interrupted" ? "border-amber-200 bg-amber-50 text-amber-800" : "border-stone-200 bg-white/50 text-stone-600"}`}>
+          {commandStatusText[m.command_status]}
+        </div>
+      )}
       {m.content && (
         <div className="markdown text-body">
           <ReactMarkdown
@@ -159,6 +176,14 @@ export function MessageItem({
             }}
           >{stripEmoji(m.content)}</ReactMarkdown>
         </div>
+      )}
+      {fullDiffers && (
+        <details open={showFull} onToggle={(e) => setShowFull(e.currentTarget.open)} className="rounded-xl border border-stone-200 bg-white/50">
+          <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-stone-600">{showFull ? "전체 결과 접기" : "전체 결과 보기"}</summary>
+          <div className="markdown max-h-[32rem] overflow-y-auto border-t border-stone-200 px-3 py-2.5 text-body">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{stripEmoji(m.full_content!)}</ReactMarkdown>
+          </div>
+        </details>
       )}
       {meta?.type === "team" && meta.status === "pending" && meta.agents && (
         <div className="mt-1 rounded-2xl border border-amber-200 bg-amber-50 p-3">
@@ -216,12 +241,12 @@ export function MessageItem({
       )}
       {meta?.events && meta.events.length > 0 && (
         <div className="mt-1 rounded-xl border border-stone-200 bg-white/50 px-3 py-2.5">
-          <div className="mb-1.5 flex items-center gap-1 text-xs font-medium text-stone-600"><Bot size={13} /> 봇 도구 사용 {meta.events.filter((e) => e.title && !e.title.includes("라운드")).length}회</div>
-          <div className="flex flex-wrap gap-1">
+          <button onClick={() => setShowTrace(!showTrace)} className="flex w-full items-center gap-1 text-left text-xs font-medium text-stone-600"><Bot size={13} /> 내부 작업 기록 {meta.events.filter((e) => e.title && !e.title.includes("라운드")).length}회 <span className="ml-auto">{showTrace ? "▾" : "▸"}</span></button>
+          {showTrace && <div className="mt-1.5 flex flex-wrap gap-1">
             {meta.events.filter((e) => e.title && !e.title.includes("라운드")).map((e, i) => (
-              <span key={i} className={`rounded-full px-2.5 py-0.5 text-2xs ${e.title!.startsWith("⚠") ? "bg-red-50 text-red-600" : "bg-stone-100 text-stone-500"}`}>{e.title}</span>
+              <span key={i} className={`rounded-full px-2.5 py-0.5 text-2xs ${e.title!.startsWith("⚠") ? "bg-red-50 text-red-600" : "bg-stone-100 text-stone-500"}`}>{/^[A-Za-z][A-Za-z0-9_:./-]*$/.test(e.title!) ? operationLabel(e.title!) : e.title}</span>
             ))}
-          </div>
+          </div>}
         </div>
       )}
       {meta && meta.type !== "team" && (meta.sources?.length ?? 0) > 0 && (

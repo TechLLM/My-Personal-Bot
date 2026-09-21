@@ -1,4 +1,5 @@
 import { Search, Bot } from "lucide-react";
+import { operationLabel } from "../../../shared/user-facing";
 
 export interface SearchEvent {
   type: "plan" | "search" | "read" | "round" | "synthesize" | "phase";
@@ -11,6 +12,7 @@ export interface SearchEvent {
   count?: number;
   phase?: string;
   label?: string;
+  tool?: string;
 }
 
 // PGE 파이프라인 단계 — 서버 phase 이벤트로 진행 상황을 구동
@@ -38,13 +40,18 @@ export function SearchTrace({ events, done }: { events: SearchEvent[]; done: boo
 
   // 연속 동일 제목 제거 — 같은 행이 반복 출력되는 것 방지
   const dedupedReads = reads.filter((r, i) => i === 0 || r.title !== reads[i - 1].title);
+  const readLabel = (r: SearchEvent) => {
+    if (r.tool) return operationLabel(r.tool);
+    const title = r.title ?? "";
+    return /^[A-Za-z][A-Za-z0-9_:./-]*$/.test(title) ? operationLabel(title) : title;
+  };
 
   return (
     <div className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm">
       <div className="flex items-center gap-2 font-medium text-sky-600">
         <span className={done ? "" : "thinking-dot"}>{isSearch ? <Search size={14} /> : <Bot size={14} />}</span>
         {isSearch
-          ? done ? "DeepSearch 완료" : synthesizing ? "출처 종합 중…" : "DeepSearch 진행 중…"
+          ? done ? "심층 검색 완료" : synthesizing ? "출처 종합 중…" : "심층 검색 진행 중…"
           : done ? "봇 작업 완료" : "봇 작업 중…"}
       </div>
       {hasPhases && (
@@ -79,7 +86,7 @@ export function SearchTrace({ events, done }: { events: SearchEvent[]; done: boo
         {dedupedReads.map((r, i) => (
           <div key={`r${i}`} className="italic text-stone-500">
             {!r.url ? (
-              <span>· {r.title || r.url}</span>
+              <span>· {readLabel(r)}</span>
             ) : (
               <span>· 읽음: <a href={r.url} target="_blank" rel="noreferrer" className="hover:text-sky-600 underline decoration-stone-300">{r.title}</a></span>
             )}

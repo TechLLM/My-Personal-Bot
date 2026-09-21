@@ -230,6 +230,18 @@ export async function mcpTools(): Promise<{ name: string; description?: string; 
 }
 
 export async function mcpCall(name: string, args: object): Promise<string> {
+  // E2 격리 실행 — 샌드박스는 네트워크·프로세스가 차단되므로 MCP 서버에 직접 닿지 못한다.
+  // 과제가 명시 선언한 도구만 브로커 허용 목록을 통과해 부모가 대행한다.
+  if (process.env.MYBOT_ENV === "e2" && process.env.E2_BROKER_URL) {
+    const res = await fetch(`${process.env.E2_BROKER_URL}/tool`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${process.env.E2_BROKER_TOKEN ?? ""}` },
+      body: JSON.stringify({ tool: name, args }),
+      signal: AbortSignal.timeout(110_000),
+    });
+    if (!res.ok) return `도구 오류: broker_tool_${res.status}`;
+    return String((await res.json()).result ?? "");
+  }
   const t = toolMap.get(name);
   if (!t) return `알 수 없는 도구: ${name}`;
   try {
