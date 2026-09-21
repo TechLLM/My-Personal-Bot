@@ -184,17 +184,23 @@ test("커밋 제목에 긴급이 붙으면 긴급패치다 — 한 건이어도 
   expect(r.canApply).toBe(true); // 임계를 기다리지 않는다
 });
 
-test("핵심 표면이나 대규모 변경은 메이저다", () => {
-  // 인증·승인·릴리스·자기개선·DB·의존성은 한 줄만 건드려도 메이저
+test("파괴적 표면이나 명시 표시만 메이저다 — evolve·파일 수는 메이저가 아니다", () => {
+  // 인증·승인·릴리스·암호·DB·기동·의존성은 한 줄만 건드려도 메이저
   expect(classifyTier(["승인 흐름 보강"], ["server/src/approvals.ts"])).toBe("major");
   expect(classifyTier(["의존성 갱신"], ["package.json"])).toBe("major");
-  expect(classifyTier(["자기개선 격리"], ["evolve/surfaces.json"])).toBe("major");
-  expect(classifyTier(["UI 다수 개선"], Array.from({ length: 15 }, (_, i) => `web/src/c${i}.tsx`))).toBe("major");
-  // 메이저는 건수 대신 정착 시간으로 간다 — 마지막 변경 후 12시간이 지나야 적용 가능
-  const fresh = evaluateRelease({ ...ok, pending: 1, tier: "major", oldestAgeMs: 0, newestAgeMs: 3600_000 });
+  expect(classifyTier(["스키마 변경"], ["server/src/db.ts"])).toBe("major");
+  // 제목으로 명시한 메이저도 인정한다 — 파괴적이지만 표면 목록에 없는 변경용
+  expect(classifyTier(["메이저: API 계약 변경"], ["server/src/routes/chat.ts"])).toBe("major");
+  // 개발 단계의 일상 작업은 메이저가 아니다 — evolve 내부 도구·대규모 변경·라우트 추가
+  expect(classifyTier(["자기개선 격리"], ["evolve/surfaces.json"])).toBe("minor");
+  expect(classifyTier(["토너먼트 개선"], ["server/src/evolve.ts"])).toBe("minor");
+  expect(classifyTier(["UI 다수 개선"], Array.from({ length: 15 }, (_, i) => `web/src/c${i}.tsx`))).toBe("minor");
+  // 개발 단계(dev)의 메이저는 정착 없이 바로 적용된다 — 출시 단계(launch)만 12시간 정착
+  expect(evaluateRelease({ ...ok, pending: 1, tier: "major", newestAgeMs: 3600_000, stage: "dev" }).canApply).toBe(true);
+  const fresh = evaluateRelease({ ...ok, pending: 1, tier: "major", newestAgeMs: 3600_000, stage: "launch" });
   expect(fresh.canApply).toBe(false);
   expect(fresh.reason).toContain("정착");
-  expect(evaluateRelease({ ...ok, pending: 1, tier: "major", oldestAgeMs: 0, newestAgeMs: 13 * 3600_000 }).canApply).toBe(true);
+  expect(evaluateRelease({ ...ok, pending: 1, tier: "major", newestAgeMs: 13 * 3600_000, stage: "launch" }).canApply).toBe(true);
 });
 
 test("일상 개선 묶음은 마이너 — 3건 미만이고 72시간도 안 지났으면 보류한다", () => {
@@ -208,11 +214,21 @@ test("일상 개선 묶음은 마이너 — 3건 미만이고 72시간도 안 �
   expect(evaluateRelease({ ...ok, pending: 1, tier: "minor", oldestAgeMs: 73 * 3600_000 }).canApply).toBe(true);
 });
 
-test("버전 번호는 등급대로 오른다", () => {
-  expect(nextVersion("1.2.3", "patch")).toBe("1.2.4");
-  expect(nextVersion("1.2.3", "minor")).toBe("1.3.0");
-  expect(nextVersion("1.2.3", "major")).toBe("2.0.0");
-  expect(nextVersion(null, "minor")).toBe("0.1.0");
+test("버전 번호는 단계·등급대로 오른다", () => {
+  // 출시 단계 — 정규 semver
+  expect(nextVersion("1.2.3", "patch", "launch")).toBe("1.2.4");
+  expect(nextVersion("1.2.3", "minor", "launch")).toBe("1.3.0");
+  expect(nextVersion("1.2.3", "major", "launch")).toBe("2.0.0");
+  // 개발 단계 — 0.x 유지: 메이저만 중간 번호, 나머지는 끝 번호
+  expect(nextVersion("0.2.0", "major", "dev")).toBe("0.3.0");
+  expect(nextVersion("0.2.0", "minor", "dev")).toBe("0.2.1");
+  expect(nextVersion("0.2.0", "patch", "dev")).toBe("0.2.1");
+  expect(nextVersion(null, "minor", "dev")).toBe("0.0.1");
+  expect(nextVersion(null, "major", "dev")).toBe("0.1.0");
+  // 개발 단계에서는 1.0.0 이전 기록이 있어도 0.x로 유지한다 (구 버전 원장과 무관)
+  expect(nextVersion("3.0.0", "major", "dev")).toBe("0.1.0");
+  // 출시 전환 후 첫 메이저가 1.0.0이다
+  expect(nextVersion("0.9.2", "major", "launch")).toBe("1.0.0");
 });
 
 test("윈백 대상은 버전 원장에 기록된 지점만 된다", () => {

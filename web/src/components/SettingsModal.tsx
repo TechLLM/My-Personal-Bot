@@ -1034,9 +1034,27 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
               <div>
                 <H>서비스 버전 <span className="ml-1 text-xs font-normal text-stone-500">{rel?.version ? `현재 v${rel.version}` : ""}</span></H>
                 <p className="mb-3 text-caption text-stone-500">
-                  검증을 마친 개선 묶음이 등급별로 쌓입니다 — 긴급패치는 즉시, 메이저는 마일스톤 단위로 나가고, 마이너는 3건 이상 모이거나 첫 개선이 72시간을 넘기면 나갑니다.
+                  검증을 마친 개선 묶음이 등급별로 쌓입니다 — 긴급패치는 즉시, 마이너는 3건 이상 모이거나 첫 개선이 72시간을 넘기면 나가고, 메이저는 파괴적 표면(인증·승인·DB 스키마 등) 변경이 있을 때만 붙습니다.
                   적용하면 테스트를 먼저 돌리고, 통과할 때만 반영한 뒤 서비스를 다시 시작합니다.
                 </p>
+                {rel && (
+                  <div className="mb-3 flex items-center gap-2 rounded-lg bg-stone-50 px-3 py-2">
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${rel.stage === "launch" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                      {rel.stage === "launch" ? "정식 출시" : "개발 단계"}
+                    </span>
+                    <span className="flex-1 text-2xs text-stone-500">
+                      {rel.stage === "launch"
+                        ? "정규 semver — 메이저는 v(N+1).0.0과 12시간 정착 규칙이 적용됩니다"
+                        : "0.x 버전 체계 — 중요 업데이트는 중간 번호, 나머지는 끝 번호가 오릅니다"}
+                    </span>
+                    {rel.stage === "dev" && (
+                      <button onClick={() => { setRelBusy("정식 출시로 전환"); api.launchRelease().then(loadRelease).catch((e: Error) => setRelErr(e.message)).finally(() => setRelBusy("")); }} disabled={!!relBusy}
+                        className="shrink-0 rounded-lg border border-stone-300 px-2.5 py-1.5 text-xs text-stone-600 hover:bg-stone-100 disabled:opacity-40">
+                        {relBusy === "정식 출시로 전환" ? "전환 중…" : "정식 출시로 전환"}
+                      </button>
+                    )}
+                  </div>
+                )}
                 <div className="mb-6 rounded-xl border border-stone-200 p-3">
                   {rel === null ? (
                     <p className="text-caption text-stone-500">버전 상태를 불러오지 못했습니다.</p>

@@ -21,28 +21,45 @@ export interface PendingCommit { sha: string; subject: string; date: string }
 export type ReleaseTier = "patch" | "minor" | "major";
 export const TIER_LABEL: Record<ReleaseTier, string> = { patch: "긴급패치", minor: "마이너", major: "메이저" };
 
-// 인증·승인·릴리스·자기개선·DB 스키마·의존성을 건드리면 규모와 무관하게 메이저로 분류한다
-const CRITICAL_SURFACE = /^(server\/src\/(evolve|approvals|release|access|crypto|db|index)\.|evolve\/|package\.json$|bun\.lock$)/;
-const MAJOR_MIN_FILES = 15;
+// 확실한 메이저만 등급을 올린다 — 서비스 적용 시 실제로 깨질 수 있는 표면
+// (인증·승인·릴리스 자체·자격증명 암호·DB 스키마·기동·의존성) 접촉이거나
+// 커밋 제목으로 명시한 경우뿐. evolve 내부 도구·파일 수는 개발 단계의 일상
+// 작업이라 메이저가 아니다 — 그 기준이 커밋마다 메이저를 만들어 묶음을 깼다.
+const CRITICAL_SURFACE = /^(server\/src\/(access|approvals|release|crypto|db|index)\.|package\.json$|bun\.lock$)/;
+const MAJOR_SUBJECT = /^메이저[:!]|^major[:!]|^breaking[:!]|^BREAKING[:\s]/i;
 // 마이너는 매 커밋마다 배포하지 않는다 — 3건이 쌓이거나 첫 커밋이 72시간 묵으면 적용 가능하다.
 // 그보다 빨리 나가야 하는 수정은 커밋 제목을 "긴급"으로 시작해 긴급패치 등급을 쓴다.
 const MINOR_MIN_COMMITS = 3;
 const MINOR_MIN_AGE_MS = 72 * 3600_000;
-// 메이저(핵심 표면·대규모 변경)는 건수가 아니라 정착 시간으로 간다 — release 채널에
-// 마지막 커밋이 올라온 뒤 12시간을 지나야 적용 가능하다. 추가 커밋이 오면 타이머가
-// 리셋되므로 한 세션의 연속 작업은 자연스럽게 한 번의 적용으로 묶인다.
+// 메이저는 정착 시간으로 간다 — 정식 출시(launch) 단계에서만 적용한다.
+// 개발(dev) 단계에는 메이저가 드물고 검증이 앞서므로 정착 없이 바로 적용 가능하다.
 const MAJOR_SETTLE_MS = 12 * 3600_000;
 
-// 대기 커밋 묶음의 등급 — 긴급 접두사 > 핵심 표면·대규모 변경 > 일반 묶음
+// 릴리스 단계 — dev: 0.x 버전, 메이저 정착 없음 / launch: 정규 semver, 메이저 정착 12시간.
+// 정식 출시는 설정의 "정식 출시로 전환" 버튼으로 선언하고, 그 뒤 첫 메이저가 자동으로 1.0.0이 된다.
+export type ReleaseStage = "dev" | "launch";
+export function releaseStage(): ReleaseStage {
+  return getSetting("release_stage") === "launch" ? "launch" : "dev";
+}
+
+// 대기 커밋 묶음의 등급 — 긴급 접두사 > 파괴적 표면·명시 메이저 > 일반 묶음
 export function classifyTier(subjects: string[], files: string[]): ReleaseTier {
   if (subjects.some((s) => /긴급|^hotfix[:!]|^fix!/i.test(s.trim()))) return "patch";
-  if (files.length >= MAJOR_MIN_FILES || files.some((f) => CRITICAL_SURFACE.test(f))) return "major";
+  if (subjects.some((s) => MAJOR_SUBJECT.test(s.trim()))) return "major";
+  if (files.some((f) => CRITICAL_SURFACE.test(f))) return "major";
   return "minor";
 }
 
-export function nextVersion(current: string | null, tier: ReleaseTier): string {
+// dev 단계는 0.x — 중요 업데이트(메이저)만 중간 번호를 올리고 나머지는 끝 번호를 올린다.
+// launch 단계는 정규 semver — 0.x에서 메이저가 오면 1.0.0이 돼 출시 버전이 자연스럽게 시작된다.
+export function nextVersion(current: string | null, tier: ReleaseTier, stage: ReleaseStage = releaseStage()): string {
   const [M, m, p] = (current ?? "0.0.0").split(".").map((n) => Number(n) || 0);
-  if (tier === "major") return `${M + 1}.0.0`;
+  if (stage === "dev") {
+    // 개발 단계 — 정식 출시 전까지 0.x 유지. 구 버전 원장(1.x 이상)이 있어도 0.x로 매긴다.
+    const mm = M > 0 ? 0 : m, pp = M > 0 ? 0 : p;
+    return tier === "major" ? `0.${mm + 1}.0` : `0.${mm}.${pp + 1}`;
+  }
+  if (tier === "major") return `${M + 1}.0.0`; // launch에서 0.x + major = 1.0.0 — 출시 버전 시작
   if (tier === "minor") return `${M}.${m + 1}.0`;
   return `${M}.${m}.${p + 1}`;
 }
@@ -84,7 +101,7 @@ const git = (...args: string[]) => run(["git", ...args]);
 const tail = (s: string, n = 1200) => (s.length > n ? "…" + s.slice(-n) : s);
 
 // 적용 가능 여부 판정 — git 조회 결과만 받는 순수 함수로 두어 규칙을 테스트로 고정한다
-export function evaluateRelease(x: { hasChannel: boolean; pending: number; clean: boolean; ff: boolean; tier?: ReleaseTier; oldestAgeMs?: number; newestAgeMs?: number }): { canApply: boolean; reason: string } {
+export function evaluateRelease(x: { hasChannel: boolean; pending: number; clean: boolean; ff: boolean; tier?: ReleaseTier; oldestAgeMs?: number; newestAgeMs?: number; stage?: ReleaseStage }): { canApply: boolean; reason: string } {
   if (!x.hasChannel) return { canApply: false, reason: `${CHANNEL} 브랜치가 아직 없습니다 — 개발 인스턴스에서 먼저 밀어 주세요` };
   if (!x.pending) return { canApply: false, reason: "최신 상태입니다" };
   if (!x.clean) return { canApply: false, reason: "서비스 폴더에 커밋되지 않은 변경이 있어 적용할 수 없습니다" };
@@ -93,8 +110,9 @@ export function evaluateRelease(x: { hasChannel: boolean; pending: number; clean
   // 마이너는 커밋 단위로 나가지 않는다 — 임계 미만이면 보류하고 사유를 보여준다
   if (x.tier === "minor" && x.pending < MINOR_MIN_COMMITS && (x.oldestAgeMs ?? 0) < MINOR_MIN_AGE_MS)
     return { canApply: false, reason: `개선이 더 쌓이면 적용됩니다 — 마이너 업데이트는 ${MINOR_MIN_COMMITS}건 이상이거나 첫 커밋이 72시간을 넘겨야 나갑니다 (현재 ${x.pending}건)` };
-  // 메이저는 마지막 변경 뒤 정착 시간을 둔다 — 호출자가 최신 커밋 시각을 모르면 정착된 것으로 본다
-  if (x.tier === "major" && (x.newestAgeMs ?? Infinity) < MAJOR_SETTLE_MS)
+  // 메이저는 마지막 변경 뒤 정착 시간을 둔다 — 정식 출시 단계에서만. 개발 단계는 게이트 없이
+  // 관리자가 누르면 바로 적용한다. 호출자가 최신 커밋 시각을 모르면 정착된 것으로 본다
+  if (x.tier === "major" && x.stage === "launch" && (x.newestAgeMs ?? Infinity) < MAJOR_SETTLE_MS)
     return { canApply: false, reason: `메이저 업데이트는 마지막 변경 후 ${Math.round(MAJOR_SETTLE_MS / 3600_000)}시간의 정착이 필요합니다 — ${Math.ceil((MAJOR_SETTLE_MS - (x.newestAgeMs ?? 0)) / 3600_000)}시간 후 적용할 수 있습니다` };
   return { canApply: true, reason: "" };
 }
@@ -117,17 +135,19 @@ export function releaseStatus() {
   const newest = pending.length ? Date.parse(pending[0].date) : 0; // git log는 최신 커밋이 먼저 온다
   const history = loadHistory();
   const cur = currentRelease();
+  const stage = releaseStage();
   return {
     branch: git("rev-parse", "--abbrev-ref", "HEAD").out,
     current: git("rev-parse", "--short", "HEAD").out,
     currentSubject: git("log", "-1", "--format=%s").out,
     clean, pending, files,
+    stage,
     pendingTier: tier,
     pendingTierLabel: tier ? TIER_LABEL[tier] : null,
     version: cur?.version ?? null,
-    nextVersion: tier ? nextVersion(cur?.version ?? null, tier) : null,
+    nextVersion: tier ? nextVersion(cur?.version ?? null, tier, stage) : null,
     history: history.slice(-10).reverse(), // 최신 버전이 먼저 — 윈백 대상 목록
-    ...evaluateRelease({ hasChannel, pending: pending.length, clean, ff, tier: tier ?? undefined, oldestAgeMs: oldest ? Date.now() - oldest : 0, newestAgeMs: newest ? Date.now() - newest : 0 }),
+    ...evaluateRelease({ hasChannel, pending: pending.length, clean, ff, tier: tier ?? undefined, oldestAgeMs: oldest ? Date.now() - oldest : 0, newestAgeMs: newest ? Date.now() - newest : 0, stage }),
     canRevert: !!cur || !!getSetting("release_prev_sha"),
     prevSha: (cur?.prevSha ?? getSetting("release_prev_sha") ?? "").slice(0, 7),
     appliedAt: cur?.appliedAt ?? (Number(getSetting("release_applied_at")) || 0),
@@ -448,4 +468,10 @@ export const releaseRoute = new Hono()
       scheduleRestart();
       return c.json({ ...r, restarting: true });
     } catch (e) { return c.json({ ok: false, error: `윈백 중 오류 — ${(e as Error).message}` }, 500); }
+  })
+  // 정식 출시 선언 — dev(0.x)에서 launch(정규 semver·메이저 정착)로 전환한다.
+  // 이후 첫 메이저 적용이 자동으로 1.0.0이 된다.
+  .post("/launch", (c) => {
+    setSetting("release_stage", "launch");
+    return c.json({ ok: true, stage: "launch" });
   });

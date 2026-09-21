@@ -182,6 +182,7 @@ export const api = {
   applyRelease: () => mybotFetch("/api/release/apply", { method: "POST" }).then(j) as Promise<{ version: number; sha: string; release: string; tier: ReleaseTier; restarting: boolean }>,
   revertRelease: () => mybotFetch("/api/release/revert", { method: "POST" }).then(j) as Promise<{ sha: string; restarting: boolean }>,
   winbackRelease: (sha?: string) => mybotFetch("/api/release/winback", { method: "POST", body: JSON.stringify(sha ? { sha } : {}) }).then(j) as Promise<{ sha: string; release: string; restarting: boolean }>,
+  launchRelease: () => mybotFetch("/api/release/launch", { method: "POST" }).then(j) as Promise<{ ok: boolean; stage: string }>,
 };
 
 export type ReleaseTier = "patch" | "minor" | "major";
@@ -193,6 +194,7 @@ export interface ReleaseRecord {
 
 export interface ReleaseStatus {
   branch: string; current: string; currentSubject: string; clean: boolean;
+  stage: "dev" | "launch";
   pending: { sha: string; subject: string; date: string }[];
   files: string[];
   pendingTier: ReleaseTier | null; pendingTierLabel: string | null;
