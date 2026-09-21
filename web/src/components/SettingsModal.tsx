@@ -292,7 +292,8 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   useEffect(() => { if (section === "updates") { loadUpdates(); loadRelease(); } }, [section]);
   // 메뉴 배지를 띄우려면 섹션을 열기 전에 한 번은 알아야 한다
   useEffect(() => { loadUpdates(); loadRelease(); }, []);
-  const updBadge = updates.filter((u: any) => u.status === "pending").length + (rel?.pending.length ?? 0);
+  // 배지는 "지금 눌러서 적용되는 것"만 센다 — 정착 대기·묶음 미달로 막힌 릴리스는 섹션 안에서 사유를 보여주면 충분하다
+  const updBadge = updates.filter((u: any) => u.status === "pending").length + (rel?.canApply ? rel.pending.length : 0);
   // 적용·되돌리기는 성공하면 서버가 스스로 재시작한다 — 끊겼다 살아나면 새 화면으로 다시 불러온다
   const relAct = (label: string, fn: () => Promise<unknown>) => {
     setRelBusy(label); setRelErr("");
