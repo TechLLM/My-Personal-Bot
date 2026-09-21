@@ -77,7 +77,7 @@ export async function getBrowser(headless = true): Promise<BrowserContext> {
     })
     .then(async (c) => {
       await c.addInitScript(STEALTH_INIT);
-      c.on("close", () => { ctx = null; pages.clear(); });
+      c.on("close", () => { ctx = null; pages.clear(); pendingEvents.clear(); });
       ctx = c;
       ctxHeadless = headless;
       return c;
@@ -92,16 +92,43 @@ export async function getBrowser(headless = true): Promise<BrowserContext> {
 // 이제 팝업이 열리면 스택에 쌓아 자동으로 따라가고, browser_back으로 이전 창에 돌아온다.
 const pages = new Map<string, Page[]>();
 
+// 비동기 브라우저 이벤트 — 팝업·다운로드·대화상자·페이지 이동은 도구 호출 사이에 일어나
+// 모델이 놓치기 쉽다. 모아 두었다가 다음 도구 결과 끝에 붙여 알린다 (Aside의 agent signals).
+const pendingEvents = new Map<string, string[]>();
+
+function pushEvent(key: string, msg: string) {
+  const arr = pendingEvents.get(key) ?? [];
+  arr.push(msg);
+  pendingEvents.set(key, arr.slice(-20));
+}
+
+function drainEvents(key: string): string {
+  const arr = pendingEvents.get(key);
+  if (!arr?.length) return "";
+  pendingEvents.delete(key);
+  return `\n\n[브라우저 이벤트 — 직전 도구 호출 이후 발생]\n${arr.map((e) => `- ${e}`).join("\n")}`;
+}
+
 function trackPopups(key: string, page: Page) {
   page.on("popup", (pop) => {
     const stack = pages.get(key);
     if (!stack) return;
     stack.push(pop);
     trackPopups(key, pop); // 팝업이 또 팝업을 열어도 따라간다
+    pushEvent(key, `새 창/팝업 열림: ${pop.url() || "(로딩 중)"} — 화면이 새 창으로 전환됐습니다`);
   });
   page.on("close", () => {
     const stack = pages.get(key);
     if (stack) pages.set(key, stack.filter((x) => x !== page));
+    pushEvent(key, `탭 닫힘: ${page.url()}`);
+  });
+  page.on("download", (dl) => pushEvent(key, `다운로드 시작: ${dl.suggestedFilename()}`));
+  page.on("dialog", (d) => {
+    pushEvent(key, `대화상자(${d.type()}): ${d.message().slice(0, 120)} — 자동으로 닫았습니다`);
+    d.dismiss().catch(() => {});
+  });
+  page.on("framenavigated", (frame) => {
+    if (frame === page.mainFrame()) pushEvent(key, `페이지 이동: ${frame.url()}`);
   });
 }
 
@@ -118,6 +145,7 @@ async function pageFor(key: string): Promise<Page> {
 export async function closeAgentPage(key: string) {
   const stack = pages.get(key) ?? [];
   pages.delete(key);
+  pendingEvents.delete(key);
   for (const x of stack) { try { await x.close(); } catch {} }
 }
 
@@ -453,8 +481,13 @@ export async function resolveVisionModel(): Promise<{ endpoint: Endpoint; model:
   return (visionPick = null);
 }
 
-// 봇이 쓰는 브라우저 도구
+// 봇이 쓰는 브라우저 도구 — 도구 호출 사이에 쌓인 비동기 이벤트(팝업·다운로드·탭 닫힘·페이지 이동)를
+// 결과 끝에 붙여 모델에게 알린다. 브로커 경유 호출은 부모 쪽 래퍼가 같은 방식으로 붙인다.
 export async function browserTool(agentKey: string, name: string, args: Record<string, unknown>): Promise<string> {
+  return (await browserToolInner(agentKey, name, args)) + drainEvents(agentKey);
+}
+
+async function browserToolInner(agentKey: string, name: string, args: Record<string, unknown>): Promise<string> {
   // E2 격리 실행 — 샌드박스는 프로세스 생성·네트워크가 차단되므로 브로커가
   // 읽기 전용 브라우저 도구를 대행한다. 허용 집합은 브로커가 집행한다.
   if (process.env.MYBOT_ENV === "e2" && process.env.E2_BROKER_URL) {
