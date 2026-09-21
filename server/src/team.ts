@@ -1042,6 +1042,13 @@ async function runAgentInner(state: TeamAgentState, agent: Agent, emit: Emit, si
   trackEmit({ type: "agent_phase", agentId: state.id, phase: "exec", label: "작업 실행" });
   try {
     for (let round = 0; round < roundLimitFor(calledTools); round++) {
+      // 실행 중 사용자 스티어 — 대기열로 미루지 않고 진행 중인 작업에 즉시 지시를 주입한다 (Aside식 Steer)
+      const steers = db.prepare("SELECT id, content FROM run_steers WHERE run_id = ? AND consumed_at IS NULL ORDER BY created_at").all(state.runId) as { id: string; content: string }[];
+      for (const s of steers) {
+        messages.push({ role: "user", content: `[사용자 추가 지시 — 실행 중 도착] ${s.content}\n위 지시를 진행 중인 작업에 반영하세요. 기존 지시와 충돌하면 이 지시가 우선입니다.` });
+        db.prepare("UPDATE run_steers SET consumed_at = ? WHERE id = ?").run(now(), s.id);
+        trackEmit({ type: "agent_step", agentId: state.id, runId: state.runId, tool: "사용자 스티어 반영" });
+      }
       // 남은 도구 단계를 미리 알린다 — 상한에 닿아서야 끊기면 지시의 뒷부분을 통째로 놓친다
       if (!budgetWarned && budgetWarnAt(round, roundLimitFor(calledTools))) {
         budgetWarned = true;

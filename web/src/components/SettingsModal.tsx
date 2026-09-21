@@ -230,6 +230,7 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
   const [rMailFrom, setRMailFrom] = useState(""); const [rMailSubj, setRMailSubj] = useState("");
   const [hookUrl, setHookUrl] = useState("");
   const [rRuns, setRRuns] = useState<Record<string, any[]>>({}); // 펼쳐진 루틴별 실행 이력 (A10)
+  const [rSugs, setRSugs] = useState<any[] | null>(null); // 반복 실행 이력에서 스캔한 루틴 제안
   // MCP 서버 추가 폼 (A11)
   const [mcName, setMcName] = useState(""); const [mcType, setMcType] = useState<"remote" | "stdio">("remote");
   const [mcUrl, setMcUrl] = useState(""); const [mcHdrs, setMcHdrs] = useState(""); const [mcCmd, setMcCmd] = useState("");
@@ -557,6 +558,28 @@ export function SettingsModal({ models: initialModels, onClose }: { models: Mode
             {section === "routines" && (
               <div>
                 <H>루틴 (예약 실행)</H>
+                <div className="mb-2 flex items-center gap-2">
+                  <button className="rounded-lg bg-stone-200 px-2.5 py-1 text-2xs text-stone-600 hover:bg-stone-300"
+                    onClick={() => mybotFetch("/api/routines/suggestions").then((r) => r.json()).then((d) => setRSugs(d.suggestions ?? []))}>
+                    반복 작업 제안 찾기
+                  </button>
+                  {rSugs !== null && <span className="text-2xs text-stone-400">최근 14일 중 같은 지시 3회 이상 실행</span>}
+                </div>
+                {rSugs !== null && (
+                  <div className="mb-2 space-y-1">
+                    {rSugs.length === 0 && <div className="rounded-lg bg-stone-50 px-2.5 py-2 text-2xs text-stone-400">반복되는 작업이 없습니다</div>}
+                    {rSugs.map((sg: any, i: number) => (
+                      <div key={i} className="flex items-center gap-2 rounded-lg bg-amber-50 px-2.5 py-1.5 text-xs">
+                        <span className="min-w-0 flex-1 truncate">{sg.task}</span>
+                        <span className="shrink-0 text-2xs text-stone-400">{sg.agent_name ?? "봇"} · {sg.runs}회</span>
+                        <button className="shrink-0 rounded bg-amber-200 px-2 py-0.5 text-2xs text-amber-800 hover:bg-amber-300"
+                          onClick={() => { setRName(sg.task.slice(0, 30)); setRPrompt(sg.task); setRAgent(sg.agent_id ?? ""); setRSugs((p) => (p ?? []).filter((_, j) => j !== i)); }}>
+                          초안으로
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="space-y-1.5">
                   {routines.map((r) => (
                     <div key={r.id} className="rounded-lg bg-white px-2.5 py-2 text-xs">

@@ -27,6 +27,9 @@ async function runRoutineInner(r: any): Promise<string> {
   // 모든 루틴은 봇 세션으로 실행 — 담당 봇, 없으면 대장 봇. 봇의 도구(검색/브라우저/파일/MCP) 사용 가능
   const { ensureBossAgent, getAgent, runAgentDetached } = await import("./team");
   const agent = (r.agent_id ? getAgent(r.agent_id) : null) ?? ensureBossAgent();
+  // 겹침 실행 건너뛰기 — 대상 봇이 실행 중(루틴·대화 무관)이면 이번 발화는 건너뛴다 (Aside식 overlap skip)
+  if (db.prepare("SELECT 1 FROM agent_runs WHERE agent_id = ? AND status = 'running' LIMIT 1").get(agent.id))
+    return `건너뜀 — ${agent.name} 봇이 다른 작업을 실행 중입니다`;
   const { createCommandJob, completeCommand, withRootJob } = await import("./command-delivery");
   const convId = (db.prepare("SELECT id FROM conversations WHERE agent_id = ? AND (mode IS NULL OR mode != 'routine') ORDER BY updated_at DESC LIMIT 1").get(agent.id) as { id: string } | undefined)?.id
     ?? (await import("./team")).agentSessionConvId(agent.id);
@@ -152,6 +155,15 @@ export const routinesRoute = new Hono()
     db.prepare("UPDATE routines SET last_run_at = ? WHERE id = ?").run(now(), r.id);
     return c.json({ ok: true, preview: out.slice(0, 500) });
   })
+  // 루틴 제안 — 같은 지시가 반복 실행된 이력을 스캔해 루틴 초안을 제안한다 (Aside식 routine suggestions)
+  .get("/suggestions", (c) => c.json({
+    suggestions: db.prepare(`
+      SELECT r.task, r.agent_id, a.name AS agent_name, COUNT(*) AS runs, MAX(r.created_at) AS last_at
+      FROM agent_runs r LEFT JOIN agents a ON a.id = r.agent_id
+      WHERE r.routine_id IS NULL AND r.created_at > ? AND LENGTH(r.task) > 8
+      GROUP BY r.agent_id, r.task HAVING runs >= 3
+      ORDER BY runs DESC LIMIT 10`).all(now() - 14 * 24 * 3600_000),
+  }))
   // 루틴 실행 이력 — 루틴당 최근 20건 (A10)
   .get("/:id/runs", (c) => c.json({
     runs: db.prepare("SELECT id, task, status, result, steps, tool_log, created_at, finished_at FROM agent_runs WHERE routine_id = ? ORDER BY created_at DESC LIMIT 20").all(c.req.param("id")),

@@ -308,6 +308,20 @@ export const chatRoute = new Hono()
   .post("/conversations/:id/select", (c) => {
     return c.json({ messages: activePath(c.req.param("id")).map(withSiblings) });
   })
+  // 실행 중 스티어 — 대기열로 미루지 않고 지금 달리고 있는 작업에 지시를 주입한다 (Aside식 Steer)
+  .post("/steer", async (c) => {
+    const b = await c.req.json().catch(() => ({}));
+    const content = String(b.content ?? "").trim().slice(0, 2000);
+    if (!content) return c.json({ error: "content 필요" }, 400);
+    const convId = String(b.conversationId ?? "");
+    const conv = convId ? (q.convGet.get(convId) as any) : null;
+    const agentId = String(b.agentId ?? conv?.agent_id ?? "");
+    if (!agentId) return c.json({ error: "봇을 찾을 수 없습니다" }, 404);
+    const run = db.prepare("SELECT id FROM agent_runs WHERE agent_id = ? AND status = 'running' ORDER BY created_at DESC LIMIT 1").get(agentId) as any;
+    if (!run) return c.json({ error: "실행 중인 작업이 없습니다" }, 404);
+    db.prepare("INSERT INTO run_steers (id, run_id, content, created_at) VALUES (?, ?, ?, ?)").run(uid(), run.id, content, now());
+    return c.json({ ok: true, runId: run.id });
+  })
   // 스트리밍 전송. body: {conversationId?, content?, model, mode?, parentMessageId?, regenerateMessageId?}
   .post("/stream", async (c) => {
     const body = await c.req.json();

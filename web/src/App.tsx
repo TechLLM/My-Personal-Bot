@@ -638,7 +638,12 @@ export default function App() {
               >↓ 새 내용 — 최신으로</button>
             )}
             <div className="mx-auto max-w-3xl">
-              <Composer models={models} model={effectiveModel} onModelChange={changeModel} onSend={send} onStop={stop} streaming={streaming} queued={queued} onRemoveQueued={(i) => setQueued((prev) => prev.filter((_, j) => j !== i))} personas={personas} personaId={personaId} onPersonaChange={setPersonaId} skills={skills} />
+              <Composer models={models} model={effectiveModel} onModelChange={changeModel} onSend={send} onStop={stop} streaming={streaming} queued={queued} onRemoveQueued={(i) => setQueued((prev) => prev.filter((_, j) => j !== i))} onSteer={(i) => {
+                const item = queued[i];
+                if (!item) return;
+                const target = item.forConv ?? convId;
+                if (target) mybotFetch("/api/chat/steer", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ conversationId: target, content: item.text }) }).then((r) => { if (r.ok) setQueued((prev) => prev.filter((_, j) => j !== i)); });
+              }} personas={personas} personaId={personaId} onPersonaChange={setPersonaId} skills={skills} />
             </div>
           </div>
         )}

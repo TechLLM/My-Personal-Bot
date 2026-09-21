@@ -400,3 +400,11 @@ export function setSetting(key: string, value: string) {
 export const uid = () => crypto.randomUUID().replaceAll("-", "").slice(0, 16);
 export const now = () => Date.now();
 try { db.exec("ALTER TABLE command_jobs ADD COLUMN task_mode TEXT"); } catch {} // 작업별 권한 모드 (readonly|guard|null=기본)
+try { db.exec(`CREATE TABLE IF NOT EXISTS run_steers (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  consumed_at INTEGER
+)`); } catch {}
+try { db.exec("CREATE INDEX IF NOT EXISTS idx_run_steers_run ON run_steers(run_id, consumed_at)"); } catch {}
